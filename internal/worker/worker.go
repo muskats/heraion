@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/muskats/heraion/internal/config"
+	"github.com/muskats/heraion/internal/confluence"
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/jira"
 	"github.com/muskats/heraion/internal/llm"
@@ -27,6 +28,9 @@ type Options struct {
 	LLM      llm.Chatter
 	PRs      scm.PRService
 	Jira     jira.API // overrides the client built from Config.Jira (tests)
+	// JiraReader and Confluence override the read clients (tests).
+	JiraReader jira.Reader
+	Confluence confluence.Reader
 	// ExtraTools are added before the allowlist is applied (used in tests).
 	ExtraTools []llm.Tool
 	Version    string
@@ -82,6 +86,25 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	tb := &scm.Toolbox{Playbook: pb.Name, Workspaces: ws, PRs: prs, Guard: guard, Log: log}
 
 	extra := o.ExtraTools
+	var readSpaces, confSpaces []string
+	if cfg.Jira != nil {
+		if readSpaces = pb.EffectiveJiraReadSpaces(cfg.Jira.ReadSpaces); len(readSpaces) > 0 {
+			r := o.JiraReader
+			if r == nil {
+				r = jira.NewClient(cfg.Jira)
+			}
+			extra = append(extra, jira.ReadTools(r, cfg.Jira.URL, readSpaces)...)
+		}
+	}
+	if cfg.Confluence != nil {
+		if confSpaces = pb.EffectiveConfluenceSpaces(cfg.Confluence.Spaces); len(confSpaces) > 0 {
+			r := o.Confluence
+			if r == nil {
+				r = confluence.NewClient(cfg.Confluence)
+			}
+			extra = append(extra, confluence.Tools(r, cfg.Confluence.URL, confSpaces, cfg.Confluence.MaxPageBytes)...)
+		}
+	}
 	var issues *jira.Tool
 	if cfg.Jira != nil && len(projects) > 0 {
 		api := o.Jira
@@ -124,7 +147,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		LLM: chat, Model: cfg.LLM.Model, Tools: tools, Redact: red.Redact, Log: log,
 		Limits: llm.Limits{MaxSteps: cfg.LLM.MaxSteps, MaxTokens: cfg.LLM.MaxTokens, Temperature: cfg.LLM.Temperature},
 	}
-	res, err := agent.Run(ctx, systemPrompt(pb, repos, projects, dryRun), userPrompt(pb, o.Event))
+	res, err := agent.Run(ctx, systemPrompt(pb, repos, projects, readSpaces, confSpaces, dryRun), userPrompt(pb, o.Event))
 	rep := &Report{Playbook: pb.Name, DryRun: dryRun, PRs: tb.Opened}
 	if issues != nil {
 		rep.Issues = issues.Created
@@ -137,7 +160,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 
 func isGitTool(n string) bool { return strings.HasPrefix(n, "repo_") || n == "open_pr" }
 
-func systemPrompt(pb *playbook.Playbook, repos, projects []string, dryRun bool) string {
+func systemPrompt(pb *playbook.Playbook, repos, projects, readSpaces, confSpaces []string, dryRun bool) string {
 	var b strings.Builder
 	b.WriteString(`You are HeraIon, an automated investigation agent running inside a Kubernetes cluster.
 You investigate operational problems using only the tools provided, and you propose fixes
@@ -160,6 +183,12 @@ Rules:
 		b.WriteString("This playbook produces a report only: do not attempt to open pull requests.\n")
 	} else {
 		fmt.Fprintf(&b, "You may open at most %d pull request(s) in this run. Use a stable 'branch' key per change so reruns de-duplicate.\n", pb.Guardrails.MaxPRs)
+	}
+	if len(readSpaces) > 0 && pb.AllowsTool("jira_search") {
+		fmt.Fprintf(&b, "jira_search and jira_get_issue read recent issues in: %s. Check them for related changes and known problems.\n", strings.Join(readSpaces, ", "))
+	}
+	if len(confSpaces) > 0 && pb.AllowsTool("confluence_search") {
+		fmt.Fprintf(&b, "confluence_search and confluence_get_page read recent pages in: %s, e.g. runbooks and change logs.\n", strings.Join(confSpaces, ", "))
 	}
 	if len(projects) > 0 && pb.AllowsTool("create_issue") {
 		fmt.Fprintf(&b, "You may create at most %d Jira issue(s) with create_issue, in: %s. Create one only for a finding that needs a human, and use a stable 'key' so reruns de-duplicate.\n",

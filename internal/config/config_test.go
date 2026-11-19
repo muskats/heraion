@@ -133,9 +133,32 @@ func TestJiraDefaultsAndValidation(t *testing.T) {
 		t.Errorf("self-hosted must default to datacenter: %v %v", err, c.Jira)
 	}
 	_, err = Load(write(t, "llm: {baseURL: http://x, model: m}\njira: {url: ftp://x, deployment: server, projects: [ops], labels: [a b]}\n"))
-	for _, want := range []string{"jira.url", "jira.deployment", `"ops" is not a project key`, `"a b"`} {
+	for _, want := range []string{"jira.url", "jira.deployment", `"ops" is not a space (project) key`, `"a b"`} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("error %v does not mention %s", err, want)
 		}
+	}
+}
+
+func TestConfluenceDefaults(t *testing.T) {
+	c, err := Load(write(t, "llm: {baseURL: http://x, model: m}\nconfluence: {url: https://acme.atlassian.net, spaces: [RUN, ~5b10ac8d82e05b22cc7d4ef5]}\njira: {url: https://acme.atlassian.net, readSpaces: [CHG]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Confluence.URL != "https://acme.atlassian.net/wiki" || c.Confluence.Deployment != DeploymentCloud || c.Confluence.MaxPageBytes != 32<<10 {
+		t.Errorf("%+v", c.Confluence)
+	}
+	if len(c.Jira.Projects) != 0 || c.Jira.ReadSpaces[0] != "CHG" {
+		t.Errorf("read-only jira %+v", c.Jira)
+	}
+	c, err = Load(write(t, "llm: {baseURL: http://x, model: m}\nconfluence: {url: https://wiki.example.com, spaces: [RUN]}\n"))
+	if err != nil || c.Confluence.URL != "https://wiki.example.com" || c.Confluence.Deployment != DeploymentDataCenter {
+		t.Errorf("data center: %v %+v", err, c.Confluence)
+	}
+	if _, err := Load(write(t, "llm: {baseURL: http://x, model: m}\nconfluence: {url: https://wiki.example.com, spaces: [\"bad key\"]}\n")); err == nil {
+		t.Error("bad space key must fail")
+	}
+	if _, err := Load(write(t, "llm: {baseURL: http://x, model: m}\njira: {url: https://x.example.com}\n")); err == nil {
+		t.Error("jira without projects and readSpaces must fail")
 	}
 }

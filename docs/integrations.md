@@ -91,8 +91,10 @@ There are two separate parts:
 
 | Need | Use |
 |---|---|
-| Create issues | The built-in `create_issue` tool (`jira.*` values), with a project allowlist, issue budget, de-duplication and dry-run. See the [chart README](../charts/heraion/README.md#jira-issues) |
-| Read issues, e.g. search for related tickets | A Jira MCP server, as below. Keep it read-only |
+| Create issues | The built-in `create_issue` tool (`jira.projects`), with a project allowlist, issue budget, de-duplication and dry-run. See the [chart README](../charts/heraion/README.md#jira-issues) |
+| Read recent issues in chosen spaces | The built-in `jira_search` and `jira_get_issue` tools (`jira.readSpaces`). See [Reading Jira and Confluence](../charts/heraion/README.md#reading-jira-and-confluence) |
+| Read recent Confluence pages in chosen spaces | The built-in `confluence_search` and `confluence_get_page` tools (`confluence.*`) |
+| Anything else, e.g. boards, sprints, JQL across all spaces | A Jira MCP server, as below. Keep it read-only |
 
 
 Server or Data Center: run [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) with a

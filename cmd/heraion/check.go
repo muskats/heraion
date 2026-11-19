@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/muskats/heraion/internal/config"
+	"github.com/muskats/heraion/internal/confluence"
 	"github.com/muskats/heraion/internal/jira"
 	"github.com/muskats/heraion/internal/mcp"
 	"github.com/muskats/heraion/internal/playbook"
@@ -29,7 +30,8 @@ import (
 //	warn  secret     HERAION_GIT_TOKEN not set
 //	ok    mcp        k8s: 18 tools
 //	ok    llm        GET https://api.openai.com/v1/models: 200
-//	ok    jira       https://acme.atlassian.net (cloud), projects [OPS]
+//	ok    jira       https://acme.atlassian.net (cloud), create in [OPS], read [CHG OPS]
+//	ok    confluence https://acme.atlassian.net/wiki (cloud), spaces [RUNBOOKS]
 func cmdCheck(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	cfgPath := fs.String("config", envOr("HERAION_CONFIG", "/etc/heraion/config.yaml"), "config file (env HERAION_CONFIG)")
@@ -71,6 +73,9 @@ func cmdCheck(ctx context.Context, args []string) error {
 		if cfg.Jira != nil {
 			c.secret(cfg.Jira.Token, true, "jira")
 		}
+		if cfg.Confluence != nil {
+			c.secret(cfg.Confluence.Token, true, "confluence")
+		}
 		for name, m := range cfg.MCPServers {
 			for h, src := range m.SecretHeaders {
 				c.secret(src, true, "mcp "+name+" "+h)
@@ -102,7 +107,14 @@ func cmdCheck(ctx context.Context, args []string) error {
 			if err := jira.NewClient(cfg.Jira).Myself(ctx); err != nil {
 				c.fail("jira", err.Error())
 			} else {
-				c.ok("jira", fmt.Sprintf("%s (%s), projects %v", cfg.Jira.URL, cfg.Jira.Deployment, cfg.Jira.Projects))
+				c.ok("jira", fmt.Sprintf("%s (%s), create in %v, read %v", cfg.Jira.URL, cfg.Jira.Deployment, cfg.Jira.Projects, cfg.Jira.ReadSpaces))
+			}
+		}
+		if cfg.Confluence != nil {
+			if err := confluence.NewClient(cfg.Confluence).Myself(ctx); err != nil {
+				c.fail("confluence", err.Error())
+			} else {
+				c.ok("confluence", fmt.Sprintf("%s (%s), spaces %v", cfg.Confluence.URL, cfg.Confluence.Deployment, cfg.Confluence.Spaces))
 			}
 		}
 	}

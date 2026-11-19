@@ -100,17 +100,35 @@ git:
     key: ""          # default git-token
     value: ""
 
-# Jira issue creation (built-in create_issue tool). A playbook gets the tool when
-# its tools list allows it, e.g. tools: [k8s.*, create_issue].
+# Jira. projects enables create_issue; readSpaces enables jira_search and
+# jira_get_issue. A playbook gets a tool when its tools list allows it, e.g.
+# tools: [k8s.*, jira_search, create_issue].
 jira:
   enabled: false
   url: ""               # e.g. https://acme.atlassian.net or https://jira.example.com
   deployment: ""        # cloud or datacenter; default: cloud for *.atlassian.net
   email: ""             # Cloud: account of the API token (Basic auth). Empty: Bearer token (Data Center PAT)
-  projects: []          # project keys issues may go to, e.g. [OPS]
+  projects: []          # spaces (projects) issues may be created in, e.g. [OPS]
+  readSpaces: []        # spaces that may be read, e.g. [CHG, OPS]
   issueType: Task
   labels: [heraion]     # added to every issue
   token:                # credential, default key jira-token
+    serviceAccountToken: { audience: "", expirationSeconds: 3600 }
+    csiKey: ""
+    existingSecret: ""
+    key: ""
+    value: ""
+
+# Confluence (read only): confluence_search and confluence_get_page, limited to
+# spaces. Cloud and Data Center; the same Atlassian API token works on Cloud.
+confluence:
+  enabled: false
+  url: ""               # e.g. https://acme.atlassian.net/wiki or https://wiki.example.com
+  deployment: ""        # cloud or datacenter; default: cloud for *.atlassian.net
+  email: ""             # Cloud: account of the API token. Empty: Bearer token (Data Center PAT)
+  spaces: []            # e.g. [RUNBOOKS, OPS]
+  maxPageBytes: 32768   # longer pages are cut
+  token:                # credential, default key confluence-token
     serviceAccountToken: { audience: "", expirationSeconds: 3600 }
     csiKey: ""
     existingSecret: ""
@@ -146,10 +164,11 @@ playbooks:
   alertmanager-triage:
     enabled: false   # needs gateway.hooks.alertmanager and mcpServers.k8s
     trigger: { webhook: alertmanager }
-    tools: [k8s.*, repo_*, open_pr, create_issue]
+    tools: [k8s.*, repo_*, open_pr, create_issue, jira_search, jira_get_issue, confluence_search, confluence_get_page]
     prompt: |
       An Alertmanager webhook delivered the alert group below. For each firing alert,
-      identify the workload from its labels, gather evidence with the k8s tools (pod
+      identify the workload from its labels, check recent changes and runbooks with the
+      jira_* and confluence_* tools if they are available, gather evidence with the k8s tools (pod
       status, restarts, events, logs, resource usage, owning controller) and determine
       the most likely root cause. Only if the cause is a configuration value in one of
       the allowed repositories, open one minimal PR (branch key: alertname + workload).

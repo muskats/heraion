@@ -57,13 +57,21 @@ grafana-mcp:
 jira:
   enabled: true
   url: https://jira.example.internal
-  projects: [OPS]
+  projects: [OPS]              # create_issue
+  readSpaces: [CHG, OPS]       # jira_search, jira_get_issue
   token: { existingSecret: jira, key: pat }
+
+# Read-only Confluence pages (runbooks, change logs).
+confluence:
+  enabled: true
+  url: https://wiki.example.internal
+  spaces: [RUNBOOKS]
+  token: { existingSecret: confluence, key: pat }
 
 playbooks:
   incident-digest:
     trigger: { schedule: "0 8 * * 1-5" }
-    tools: ["grafana.*", "datadog.*", "jira.*", create_issue]
+    tools: ["grafana.*", "datadog.*", jira_search, confluence_search, create_issue]
     output: report
     prompt: |
       Summarize the last 24 hours for the platform team: firing alerts and error-rate

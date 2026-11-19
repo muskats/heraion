@@ -10,36 +10,26 @@
 package jira
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"strings"
-	"time"
 
+	"github.com/muskats/heraion/internal/atlassian"
 	"github.com/muskats/heraion/internal/config"
-	"github.com/muskats/heraion/internal/secret"
 )
 
 // Client talks to one Jira site.
 type Client struct {
-	BaseURL    string // e.g. https://acme.atlassian.net
-	Cloud      bool
-	Email      string         // Cloud: Basic auth user. Empty: Bearer token.
-	Token      *secret.Source // API token (Cloud) or PAT (Data Center)
-	HTTPClient *http.Client
+	BaseURL string // e.g. https://acme.atlassian.net
+	Cloud   bool
+	HTTP    *atlassian.Client
 }
 
 // NewClient builds a Client from the config.
 func NewClient(c *config.Jira) *Client {
-	return &Client{
-		BaseURL: strings.TrimRight(c.URL, "/"), Cloud: c.Deployment == config.JiraCloud,
-		Email: c.Email, Token: c.Token, HTTPClient: &http.Client{Timeout: 30 * time.Second},
-	}
+	return &Client{BaseURL: strings.TrimRight(c.URL, "/"), Cloud: c.Deployment == config.JiraCloud,
+		HTTP: atlassian.New(c.Email, c.Token)}
 }
 
 // Issue is a created or found issue.
@@ -53,15 +43,6 @@ type NewIssue struct {
 	Project, Type, Summary, Description, Priority string
 	Labels                                        []string
 }
-
-// APIError is a non-2xx response, with Jira's error text, e.g.
-// `400: summary: You must specify a summary of the issue.`
-type APIError struct {
-	Status  int
-	Message string
-}
-
-func (e *APIError) Error() string { return fmt.Sprintf("jira returned %d: %s", e.Status, e.Message) }
 
 func (c *Client) api() string {
 	if c.Cloud {
@@ -123,70 +104,7 @@ func (c *Client) Myself(ctx context.Context) error {
 }
 
 func (c *Client) do(ctx context.Context, method, url string, in, out any) error {
-	var body io.Reader
-	if in != nil {
-		b, err := json.Marshal(in)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/json")
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	tok, err := c.Token.Value() // per request, so a rotated token file is picked up
-	if err != nil {
-		return fmt.Errorf("jira token: %w", err)
-	}
-	if c.Email != "" {
-		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(c.Email+":"+tok)))
-	} else {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode/100 != 2 {
-		return &APIError{Status: resp.StatusCode, Message: errorText(raw)}
-	}
-	if out == nil {
-		return nil
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("decode jira response: %w", err)
-	}
-	return nil
-}
-
-// errorText flattens Jira's {"errorMessages": [...], "errors": {field: msg}}.
-func errorText(raw []byte) string {
-	var e struct {
-		ErrorMessages []string          `json:"errorMessages"`
-		Errors        map[string]string `json:"errors"`
-	}
-	if json.Unmarshal(raw, &e) != nil || (len(e.ErrorMessages) == 0 && len(e.Errors) == 0) {
-		s := strings.TrimSpace(string(raw))
-		if len(s) > 500 {
-			s = s[:500] + "..."
-		}
-		if s == "" {
-			s = "no details"
-		}
-		return s
-	}
-	parts := append([]string{}, e.ErrorMessages...)
-	for f, m := range e.Errors {
-		parts = append(parts, f+": "+m)
-	}
-	return strings.Join(parts, "; ")
+	return c.HTTP.Do(ctx, "jira", method, url, in, out)
 }
 
 // ErrNotConfigured is returned when no Jira site is configured.

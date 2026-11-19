@@ -16,7 +16,14 @@ jira:
   url: https://acme.atlassian.net
   email: heraion-bot@acme.com
   projects: [OPS, SEC]
+  readSpaces: [CHG, OPS]
   token: {}                 # key jira-token in secrets.existingSecret
+confluence:
+  enabled: true
+  url: https://acme.atlassian.net/wiki
+  email: heraion-bot@acme.com
+  spaces: [RUN, OPS]
+  token: { existingSecret: atlassian, key: api-token }   # same token as Jira on Cloud
 dryRun: true
 playbooks:
   trivy-remediate: { enabled: true }

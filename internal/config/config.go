@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ const (
 	EnvLLMModel   = "HERAION_LLM_MODEL"
 	EnvGitToken   = "HERAION_GIT_TOKEN"
 	EnvJiraToken  = "HERAION_JIRA_TOKEN"
+	EnvConfToken  = "HERAION_CONFLUENCE_TOKEN"
 	EnvDryRun     = "HERAION_DRY_RUN"
 )
 
@@ -41,9 +43,12 @@ type Config struct {
 	// MCPServers maps a name to a server. Server "k8s" exposes tools such
 	// as "k8s.resources_list".
 	MCPServers map[string]*MCPServer `json:"mcpServers,omitempty"`
-	// Jira enables the create_issue tool. Nil: no Jira.
-	Jira    *Jira   `json:"jira,omitempty"`
-	Gateway Gateway `json:"gateway,omitempty"`
+	// Jira enables create_issue (projects) and jira_search / jira_get_issue
+	// (readSpaces). Nil: no Jira.
+	Jira *Jira `json:"jira,omitempty"`
+	// Confluence enables confluence_search and confluence_get_page. Nil: none.
+	Confluence *Confluence `json:"confluence,omitempty"`
+	Gateway    Gateway     `json:"gateway,omitempty"`
 }
 
 // MCPServer is one MCP server reached over HTTP, e.g.
@@ -75,11 +80,30 @@ type MCPServer struct {
 	SecretHeaders map[string]*secret.Source `json:"-"` // from HeadersFromEnv
 }
 
-// Jira deployments.
+// Atlassian deployments.
 const (
-	JiraCloud      = "cloud"
-	JiraDataCenter = "datacenter"
+	DeploymentCloud      = "cloud"
+	DeploymentDataCenter = "datacenter"
+	JiraCloud            = DeploymentCloud
+	JiraDataCenter       = DeploymentDataCenter
 )
+
+// Confluence is a site the read tools may use, e.g.
+//
+//	confluence: {url: https://acme.atlassian.net/wiki, email: bot@acme.com, spaces: [OPS, RUN]}
+type Confluence struct {
+	// URL is where /rest/api starts, e.g. https://acme.atlassian.net/wiki or
+	// https://wiki.example.com. A Cloud site URL without /wiki gets it added.
+	URL        string `json:"url"`
+	Deployment string `json:"deployment,omitempty"` // as for Jira
+	Email      string `json:"email,omitempty"`      // as for Jira
+	// Spaces pages may be read from, e.g. [OPS, RUNBOOKS].
+	Spaces []string `json:"spaces"`
+	// MaxPageBytes cuts long pages before they reach the model. Default 32 KiB.
+	MaxPageBytes int `json:"maxPageBytes,omitempty"`
+
+	Token *secret.Source `json:"-"` // HERAION_CONFLUENCE_TOKEN[_FILE|_FALLBACK]
+}
 
 // Jira is the site create_issue writes to, e.g.
 //
@@ -92,8 +116,11 @@ type Jira struct {
 	// Email turns on Basic auth (Cloud API tokens). Empty: Bearer token
 	// (Data Center personal access token, or a Cloud OAuth token).
 	Email string `json:"email,omitempty"`
-	// Projects issues may be created in, e.g. [OPS, SEC].
-	Projects []string `json:"projects"`
+	// Projects issues may be created in, e.g. [OPS, SEC]. Empty: no create_issue.
+	Projects []string `json:"projects,omitempty"`
+	// ReadSpaces may be searched and read, e.g. [CHG, OPS]. Empty: no read tools.
+	// (Jira Cloud calls projects "spaces" since 2025; the API still says project.)
+	ReadSpaces []string `json:"readSpaces,omitempty"`
 	// IssueType is used when the model does not pick one. Default "Task".
 	IssueType string `json:"issueType,omitempty"`
 	// Labels are added to every issue, e.g. [heraion].
@@ -209,6 +236,9 @@ func (c *Config) applyEnv(getenv func(string) string) {
 	if c.Jira != nil {
 		c.Jira.Token = secret.New(EnvJiraToken, getenv)
 	}
+	if c.Confluence != nil {
+		c.Confluence.Token = secret.New(EnvConfToken, getenv)
+	}
 	if v := getenv(EnvLLMBaseURL); v != "" {
 		c.LLM.BaseURL = v
 	}
@@ -288,14 +318,22 @@ func (c *Config) applyDefaults() {
 	if j := c.Jira; j != nil {
 		j.URL = strings.TrimRight(j.URL, "/")
 		if j.Deployment == "" {
-			if u, err := url.Parse(j.URL); err == nil && strings.HasSuffix(u.Hostname(), ".atlassian.net") {
-				j.Deployment = JiraCloud
-			} else {
-				j.Deployment = JiraDataCenter
-			}
+			j.Deployment = deploymentFor(j.URL)
 		}
 		if j.IssueType == "" {
 			j.IssueType = "Task"
+		}
+	}
+	if cf := c.Confluence; cf != nil {
+		cf.URL = strings.TrimRight(cf.URL, "/")
+		if cf.Deployment == "" {
+			cf.Deployment = deploymentFor(cf.URL)
+		}
+		if u, err := url.Parse(cf.URL); err == nil && cf.Deployment == DeploymentCloud && u.Path == "" {
+			cf.URL += "/wiki"
+		}
+		if cf.MaxPageBytes == 0 {
+			cf.MaxPageBytes = 32 << 10
 		}
 	}
 	if c.Gateway.Listen == "" {
@@ -329,6 +367,17 @@ const (
 
 // Jira project keys, e.g. OPS, SEC2, MY_PROJ.
 var projectKeyRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,254}$`)
+
+// Confluence space keys, e.g. OPS, RUNBOOKS, or ~accountid for personal spaces.
+var spaceKeyRE = regexp.MustCompile(`^~?[A-Za-z0-9_]{1,255}$`)
+
+// deploymentFor guesses cloud for *.atlassian.net, else datacenter.
+func deploymentFor(raw string) string {
+	if u, err := url.Parse(raw); err == nil && strings.HasSuffix(u.Hostname(), ".atlassian.net") {
+		return DeploymentCloud
+	}
+	return DeploymentDataCenter
+}
 
 var serverNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 
@@ -377,17 +426,33 @@ func (c *Config) Validate() error {
 		if j.Deployment != JiraCloud && j.Deployment != JiraDataCenter {
 			errs = append(errs, fmt.Errorf("jira.deployment %q must be %s or %s", j.Deployment, JiraCloud, JiraDataCenter))
 		}
-		if len(j.Projects) == 0 {
-			errs = append(errs, errors.New("jira.projects must list at least one project key, e.g. [OPS]"))
+		if len(j.Projects) == 0 && len(j.ReadSpaces) == 0 {
+			errs = append(errs, errors.New("jira: set projects (create issues) and/or readSpaces (read issues), e.g. [OPS]"))
 		}
-		for _, p := range j.Projects {
+		for _, p := range append(slices.Clone(j.Projects), j.ReadSpaces...) {
 			if !projectKeyRE.MatchString(p) {
-				errs = append(errs, fmt.Errorf("jira.projects: %q is not a project key", p))
+				errs = append(errs, fmt.Errorf("jira: %q is not a space (project) key", p))
 			}
 		}
 		for _, l := range j.Labels {
 			if l == "" || strings.ContainsAny(l, " \t\n") {
 				errs = append(errs, fmt.Errorf("jira.labels: %q must not contain spaces", l))
+			}
+		}
+	}
+	if cf := c.Confluence; cf != nil {
+		if err := checkURL(cf.URL); err != nil || cf.URL == "" {
+			errs = append(errs, fmt.Errorf("confluence.url: invalid %q", cf.URL))
+		}
+		if cf.Deployment != DeploymentCloud && cf.Deployment != DeploymentDataCenter {
+			errs = append(errs, fmt.Errorf("confluence.deployment %q must be %s or %s", cf.Deployment, DeploymentCloud, DeploymentDataCenter))
+		}
+		if len(cf.Spaces) == 0 {
+			errs = append(errs, errors.New("confluence.spaces must list at least one space key, e.g. [OPS]"))
+		}
+		for _, k := range cf.Spaces {
+			if !spaceKeyRE.MatchString(k) {
+				errs = append(errs, fmt.Errorf("confluence.spaces: %q is not a space key", k))
 			}
 		}
 	}
@@ -458,6 +523,9 @@ func (c *Config) Secrets() []*secret.Source {
 	out := []*secret.Source{c.LLM.APIKey, c.Git.Token}
 	if c.Jira != nil {
 		out = append(out, c.Jira.Token)
+	}
+	if c.Confluence != nil {
+		out = append(out, c.Confluence.Token)
 	}
 	for _, m := range c.MCPServers {
 		if m == nil {

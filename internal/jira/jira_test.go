@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/muskats/heraion/internal/atlassian"
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/secret"
 )
@@ -77,10 +78,11 @@ func setup(t *testing.T, cloud bool) (*Client, *fakeJira) {
 	f := &fakeJira{open: map[string]string{}}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	c := &Client{BaseURL: srv.URL, Cloud: cloud, Token: secret.Static("jira-token-123"), HTTPClient: srv.Client()}
+	email := ""
 	if cloud {
-		c.Email = "bot@acme.com"
+		email = "bot@acme.com"
 	}
+	c := &Client{BaseURL: srv.URL, Cloud: cloud, HTTP: atlassian.New(email, secret.Static("jira-token-123"))}
 	return c, f
 }
 
@@ -155,7 +157,7 @@ func TestErrorMessages(t *testing.T) {
 	c, f := setup(t, true)
 	f.fail = http.StatusBadRequest
 	_, err := c.Create(context.Background(), NewIssue{Project: "OPS", Type: "Task"})
-	var apiErr *APIError
+	var apiErr *atlassian.APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != 400 || !strings.Contains(err.Error(), "summary: You must specify a summary") {
 		t.Fatalf("got %v", err)
 	}

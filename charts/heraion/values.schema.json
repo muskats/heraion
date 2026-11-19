@@ -305,6 +305,20 @@
               "type": "string",
               "pattern": "^[A-Z][A-Z0-9_]*$"
             }
+          },
+          "jiraReadSpaces": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*$"
+            }
+          },
+          "confluenceSpaces": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^~?[A-Za-z0-9_]+$"
+            }
           }
         },
         "if": {
@@ -1174,6 +1188,94 @@
               "type": "string"
             }
           }
+        },
+        "readSpaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "then": {
+        "properties": {
+          "url": {
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "confluence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "url": {
+          "type": "string"
+        },
+        "deployment": {
+          "enum": [
+            "",
+            "cloud",
+            "datacenter"
+          ]
+        },
+        "email": {
+          "type": "string"
+        },
+        "spaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^~?[A-Za-z0-9_]+$"
+          }
+        },
+        "maxPageBytes": {
+          "type": "integer",
+          "minimum": 1024
+        },
+        "token": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "serviceAccountToken": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "audience": {
+                  "type": "string"
+                },
+                "expirationSeconds": {
+                  "type": "integer",
+                  "minimum": 600
+                }
+              }
+            },
+            "csiKey": {
+              "type": "string"
+            },
+            "existingSecret": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
         }
       },
       "if": {
@@ -1191,7 +1293,7 @@
           "url": {
             "minLength": 1
           },
-          "projects": {
+          "spaces": {
             "minItems": 1
           }
         }

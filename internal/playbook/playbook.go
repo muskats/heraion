@@ -35,10 +35,14 @@ type Playbook struct {
 	Tools       []string `json:"tools"`
 	Repos       []string `json:"repos,omitempty"`
 	// JiraProjects narrows jira.projects, e.g. [OPS]. Empty: all of them.
-	JiraProjects []string   `json:"jiraProjects,omitempty"`
-	Prompt       string     `json:"prompt"`
-	Output       string     `json:"output,omitempty"`
-	Guardrails   Guardrails `json:"guardrails,omitempty"`
+	JiraProjects []string `json:"jiraProjects,omitempty"`
+	// JiraReadSpaces narrows jira.readSpaces, ConfluenceSpaces narrows
+	// confluence.spaces. Empty: all of them.
+	JiraReadSpaces   []string   `json:"jiraReadSpaces,omitempty"`
+	ConfluenceSpaces []string   `json:"confluenceSpaces,omitempty"`
+	Prompt           string     `json:"prompt"`
+	Output           string     `json:"output,omitempty"`
+	Guardrails       Guardrails `json:"guardrails,omitempty"`
 }
 
 // Trigger says how a playbook is started. Exactly one field must be set.
@@ -180,6 +184,16 @@ func intersect(local, global []string) []string {
 		}
 	}
 	return out
+}
+
+// EffectiveJiraReadSpaces works like EffectiveRepos, for jira.readSpaces.
+func (p *Playbook) EffectiveJiraReadSpaces(global []string) []string {
+	return intersect(p.JiraReadSpaces, global)
+}
+
+// EffectiveConfluenceSpaces works like EffectiveRepos, for confluence.spaces.
+func (p *Playbook) EffectiveConfluenceSpaces(global []string) []string {
+	return intersect(p.ConfluenceSpaces, global)
 }
 
 // DryRun is true if the global flag or the playbook asks for it.

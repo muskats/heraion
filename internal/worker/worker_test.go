@@ -14,6 +14,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/muskats/heraion/internal/config"
+	"github.com/muskats/heraion/internal/confluence"
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/jira"
 	"github.com/muskats/heraion/internal/llm"
@@ -246,5 +247,59 @@ func TestNoJiraToolWithoutConfig(t *testing.T) {
 	}
 	if tools := srv.Requests[0].Tools; len(tools) != 0 {
 		t.Fatalf("create_issue offered without jira config: %v", tools)
+	}
+}
+
+type fakeJiraReader struct{ jql []string }
+
+func (f *fakeJiraReader) Search(_ context.Context, jql string, _ int) ([]jira.Summary, error) {
+	f.jql = append(f.jql, jql)
+	return []jira.Summary{{Key: "CHG-42", Type: "Change", Status: "Done", Updated: "2026-11-18T10:02", Summary: "Upgrade ingress-nginx"}}, nil
+}
+func (f *fakeJiraReader) Get(context.Context, string, int) (*jira.Detail, error) { return nil, nil }
+
+type fakeConfluence struct{}
+
+func (fakeConfluence) Search(context.Context, string, int) ([]confluence.Hit, error) { return nil, nil }
+func (fakeConfluence) GetPage(context.Context, string) (*confluence.Page, error)     { return nil, nil }
+
+func TestRunReadsJiraAndConfluence(t *testing.T) {
+	srv := llmtest.New(t,
+		llmtest.Turn{Calls: []llmtest.Call{{Name: "jira_search", Args: map[string]any{"days": 2}}}},
+		llmtest.Turn{Final: "CHG-42 changed ingress yesterday."},
+	)
+	c := cfg(t, srv.BaseURL(), "file:///unused")
+	c.Repos = nil
+	c.Jira = &config.Jira{URL: "https://acme.atlassian.net", Deployment: config.JiraCloud, ReadSpaces: []string{"CHG", "OPS"}}
+	c.Confluence = &config.Confluence{URL: "https://acme.atlassian.net/wiki", Deployment: config.DeploymentCloud, Spaces: []string{"RUN"}}
+	fj := &fakeJiraReader{}
+	rep, err := worker.Run(context.Background(), worker.Options{
+		Config:     c,
+		Playbook:   pb(t, "name: triage\ntrigger: {manual: true}\ntools: [jira_*, confluence_*, create_issue]\njiraReadSpaces: [CHG]\noutput: report\nprompt: p\n"),
+		LLM:        fastClient(srv.BaseURL()),
+		JiraReader: fj,
+		Confluence: fakeConfluence{},
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil || rep.Final != "CHG-42 changed ingress yesterday." {
+		t.Fatalf("%v %v", rep, err)
+	}
+	var names []string
+	for _, tl := range srv.Requests[0].Tools {
+		names = append(names, tl.Function.Name)
+	}
+	// No jira.projects configured, so no create_issue even though the playbook allows it.
+	if strings.Join(names, ",") != "confluence_get_page,confluence_search,jira_get_issue,jira_search" {
+		t.Errorf("tools %v", names)
+	}
+	if len(fj.jql) != 1 || !strings.HasPrefix(fj.jql[0], `project in ("CHG") AND updated >= -2d`) {
+		t.Errorf("jiraReadSpaces not applied: %v", fj.jql)
+	}
+	sys := srv.Requests[0].Messages[0].Text()
+	if !strings.Contains(sys, "recent issues in: CHG.") || !strings.Contains(sys, "recent pages in: RUN") {
+		t.Errorf("system prompt: %s", sys)
+	}
+	if res := srv.Requests[1].Messages[3].Text(); !strings.Contains(res, "CHG-42 | Change | Done") {
+		t.Errorf("tool result %q", res)
 	}
 }
