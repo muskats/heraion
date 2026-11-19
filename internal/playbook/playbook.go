@@ -29,14 +29,16 @@ const (
 
 // Playbook is one investigation definition.
 type Playbook struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description,omitempty"`
-	Trigger     Trigger    `json:"trigger"`
-	Tools       []string   `json:"tools"`
-	Repos       []string   `json:"repos,omitempty"`
-	Prompt      string     `json:"prompt"`
-	Output      string     `json:"output,omitempty"`
-	Guardrails  Guardrails `json:"guardrails,omitempty"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Trigger     Trigger  `json:"trigger"`
+	Tools       []string `json:"tools"`
+	Repos       []string `json:"repos,omitempty"`
+	// JiraProjects narrows jira.projects, e.g. [OPS]. Empty: all of them.
+	JiraProjects []string   `json:"jiraProjects,omitempty"`
+	Prompt       string     `json:"prompt"`
+	Output       string     `json:"output,omitempty"`
+	Guardrails   Guardrails `json:"guardrails,omitempty"`
 }
 
 // Trigger says how a playbook is started. Exactly one field must be set.
@@ -49,6 +51,7 @@ type Trigger struct {
 // Guardrails limit what a single run may do.
 type Guardrails struct {
 	MaxPRs       int   `json:"maxPRs,omitempty"`
+	MaxIssues    int   `json:"maxIssues,omitempty"`
 	DryRun       *bool `json:"dryRun,omitempty"`
 	MaxFileBytes int   `json:"maxFileBytes,omitempty"`
 }
@@ -66,6 +69,9 @@ func Parse(b []byte) (*Playbook, error) {
 	}
 	if p.Guardrails.MaxPRs == 0 {
 		p.Guardrails.MaxPRs = 1
+	}
+	if p.Guardrails.MaxIssues == 0 {
+		p.Guardrails.MaxIssues = 1
 	}
 	if p.Guardrails.MaxFileBytes == 0 {
 		p.Guardrails.MaxFileBytes = 1 << 20
@@ -120,6 +126,9 @@ func (p *Playbook) Validate() error {
 	if p.Guardrails.MaxPRs < 0 {
 		errs = append(errs, errors.New("guardrails.maxPRs must be >= 0"))
 	}
+	if p.Guardrails.MaxIssues < 0 {
+		errs = append(errs, errors.New("guardrails.maxIssues must be >= 0"))
+	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("playbook %q: %w", p.Name, err)
 	}
@@ -150,6 +159,24 @@ func (p *Playbook) EffectiveRepos(global []string) []string {
 	for _, r := range p.Repos {
 		if slices.Contains(global, r) {
 			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// EffectiveJiraProjects works like EffectiveRepos, for jira.projects.
+func (p *Playbook) EffectiveJiraProjects(global []string) []string {
+	return intersect(p.JiraProjects, global)
+}
+
+func intersect(local, global []string) []string {
+	if len(local) == 0 {
+		return slices.Clone(global)
+	}
+	var out []string
+	for _, x := range local {
+		if slices.Contains(global, x) {
+			out = append(out, x)
 		}
 	}
 	return out

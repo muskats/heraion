@@ -21,8 +21,12 @@ type Guard struct {
 	maxFileBytes int
 	redactor     *Redactor
 
-	mu  sync.Mutex
-	prs int
+	projects  []string
+	maxIssues int
+
+	mu     sync.Mutex
+	prs    int
+	issues int
 }
 
 // New creates a Guard.
@@ -31,6 +35,44 @@ func New(repos []string, maxPRs int, dryRun bool, maxFileBytes int, r *Redactor)
 		r = NewRedactor()
 	}
 	return &Guard{repos: repos, maxPRs: maxPRs, dryRun: dryRun, maxFileBytes: maxFileBytes, redactor: r}
+}
+
+// WithIssues allows creating up to max issues in the given Jira projects,
+// e.g. WithIssues([]string{"OPS"}, 1).
+func (g *Guard) WithIssues(projects []string, max int) *Guard {
+	g.projects, g.maxIssues = projects, max
+	return g
+}
+
+// Projects returns the Jira projects issues may be created in.
+func (g *Guard) Projects() []string { return slices.Clone(g.projects) }
+
+// CheckProject fails unless project is allowlisted.
+func (g *Guard) CheckProject(project string) error {
+	if !slices.Contains(g.projects, project) {
+		return fmt.Errorf("jira project %q is not allowed; allowed: %v", project, g.projects)
+	}
+	return nil
+}
+
+// ReserveIssue takes one issue from the budget. Call ReleaseIssue if none was created.
+func (g *Guard) ReserveIssue() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.issues >= g.maxIssues {
+		return fmt.Errorf("issue budget exhausted: this playbook may create at most %d issue(s) per run", g.maxIssues)
+	}
+	g.issues++
+	return nil
+}
+
+// ReleaseIssue returns a slot taken by ReserveIssue.
+func (g *Guard) ReleaseIssue() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.issues > 0 {
+		g.issues--
+	}
 }
 
 // DryRun reports whether changes must only be logged, not pushed.

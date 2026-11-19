@@ -118,3 +118,24 @@ func TestSecretHierarchy(t *testing.T) {
 		t.Errorf("git token %q from %s", c.Git.Token.String(), c.Git.Token.Origin())
 	}
 }
+
+func TestJiraDefaultsAndValidation(t *testing.T) {
+	t.Setenv(EnvJiraToken, "tok")
+	c, err := Load(write(t, "llm: {baseURL: http://x, model: m}\njira: {url: https://acme.atlassian.net/, projects: [OPS]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Jira.Deployment != JiraCloud || c.Jira.IssueType != "Task" || c.Jira.URL != "https://acme.atlassian.net" || c.Jira.Token.String() != "tok" {
+		t.Errorf("%+v", c.Jira)
+	}
+	c, err = Load(write(t, "llm: {baseURL: http://x, model: m}\njira: {url: https://jira.example.internal, projects: [OPS]}\n"))
+	if err != nil || c.Jira.Deployment != JiraDataCenter {
+		t.Errorf("self-hosted must default to datacenter: %v %v", err, c.Jira)
+	}
+	_, err = Load(write(t, "llm: {baseURL: http://x, model: m}\njira: {url: ftp://x, deployment: server, projects: [ops], labels: [a b]}\n"))
+	for _, want := range []string{"jira.url", "jira.deployment", `"ops" is not a project key`, `"a b"`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error %v does not mention %s", err, want)
+		}
+	}
+}

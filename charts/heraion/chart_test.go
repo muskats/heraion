@@ -97,6 +97,9 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 	if h := cfg.MCPServers["datadog"].HeadersFromEnv; h["DD-API-KEY"] != "HERAION_MCP_DATADOG_DD_API_KEY" {
 		t.Errorf("datadog headers %v", h)
 	}
+	if j := cfg.Jira; j == nil || j.Deployment != config.JiraCloud || len(j.Projects) != 2 || j.Email == "" {
+		t.Errorf("jira %+v", cfg.Jira)
+	}
 	if cfg.Gateway.Hooks["alertmanager"].SecretEnv != "HERAION_HOOK_ALERTMANAGER_SECRET" {
 		t.Errorf("hook %+v", cfg.Gateway.Hooks["alertmanager"])
 	}
@@ -124,7 +127,7 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 		env[e.Name] = true
 	}
 	// existingSecret refs arrive as <ENV>, inline values as <ENV>_FALLBACK.
-	for _, want := range []string{"HERAION_CONFIG", "HERAION_LLM_API_KEY", "HERAION_GIT_TOKEN_FALLBACK",
+	for _, want := range []string{"HERAION_CONFIG", "HERAION_LLM_API_KEY", "HERAION_GIT_TOKEN_FALLBACK", "HERAION_JIRA_TOKEN",
 		"HERAION_MCP_DATADOG_DD_API_KEY", "HERAION_MCP_DATADOG_DD_APPLICATION_KEY_FALLBACK"} {
 		if !env[want] {
 			t.Errorf("worker env missing %s", want)

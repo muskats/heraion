@@ -11,6 +11,12 @@ git:
   endpoint: https://git.example.internal
   token: { value: gitea-token-value }
 repos: [platform/web, platform/payments-api]
+jira:
+  enabled: true
+  url: https://acme.atlassian.net
+  email: heraion-bot@acme.com
+  projects: [OPS, SEC]
+  token: {}                 # key jira-token in secrets.existingSecret
 dryRun: true
 playbooks:
   trivy-remediate: { enabled: true }

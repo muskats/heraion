@@ -110,6 +110,7 @@ dict "root" $ "role" "worker"|"gateway"
 {{- if eq .role "worker" -}}
 {{- $out = append $out (dict "env" "HERAION_LLM_API_KEY" "key" "llm-api-key" "ref" $v.llm.apiKey) -}}
 {{- $out = append $out (dict "env" "HERAION_GIT_TOKEN" "key" "git-token" "ref" $v.git.token) -}}
+{{- if $v.jira.enabled }}{{ $out = append $out (dict "env" "HERAION_JIRA_TOKEN" "key" "jira-token" "ref" $v.jira.token) }}{{ end -}}
 {{- range $n, $s := $v.mcpServers }}{{ if $s.enabled }}{{ range $h, $ref := $s.secretHeaders -}}
 {{- $out = append $out (dict "env" (include "heraion.mcpHeaderEnv" (dict "server" $n "header" $h)) "key" (printf "mcp-%s-%s" $n (include "heraion.keySuffix" $h)) "ref" $ref) -}}
 {{- end }}{{ end }}{{ end -}}
@@ -168,7 +169,9 @@ dict "root" $ "role" "worker"|"gateway"
     sources:
       {{- toYaml $sources | nindent 6 }}
 {{- end }}
-{{- with .root.Values.secrets.csi }}{{ if .enabled }}
+{{- $csi := false -}}
+{{- range .items }}{{ if (.ref | default dict).csiKey }}{{ $csi = true }}{{ end }}{{ end -}}
+{{- with .root.Values.secrets.csi }}{{ if and .enabled $csi }}
 - name: csi-secrets
   csi:
     driver: secrets-store.csi.k8s.io
@@ -179,12 +182,12 @@ dict "root" $ "role" "worker"|"gateway"
 {{- end }}
 
 {{- define "heraion.credMounts" -}}
-{{- $sa := false -}}
-{{- range .items }}{{ if ((.ref | default dict).serviceAccountToken | default dict).audience }}{{ $sa = true }}{{ end }}{{ end -}}
+{{- $sa := false -}}{{- $csi := false -}}
+{{- range .items }}{{ if ((.ref | default dict).serviceAccountToken | default dict).audience }}{{ $sa = true }}{{ end }}{{ if (.ref | default dict).csiKey }}{{ $csi = true }}{{ end }}{{ end -}}
 {{- if $sa }}
 - { name: sa-tokens, mountPath: /var/run/secrets/heraion/sa, readOnly: true }
 {{- end }}
-{{- if .root.Values.secrets.csi.enabled }}
+{{- if and .root.Values.secrets.csi.enabled $csi }}
 - { name: csi-secrets, mountPath: {{ .root.Values.secrets.csi.mountPath }}, readOnly: true }
 {{- end }}
 {{- end }}
@@ -266,6 +269,12 @@ dict "root" $ "role" "worker"|"gateway"
 {{- $cfg := dict "llm" $llm "git" $git "repos" ($v.repos | default list) "dryRun" $v.dryRun
       "playbooksDir" "/etc/heraion/playbooks" "workDir" "/workspace" -}}
 {{- if $mcp }}{{ $_ := set $cfg "mcpServers" $mcp }}{{ end -}}
+{{- with $v.jira }}{{ if .enabled -}}
+{{- $j := dict "url" (required "jira.url is required when jira.enabled" .url) "projects" (required "jira.projects is required when jira.enabled" .projects) "issueType" .issueType -}}
+{{- range $k := list "deployment" "email" "labels" }}{{ with index $v.jira $k }}{{ $_ := set $j $k . }}{{ end }}{{ end -}}
+{{- if not (include "heraion.credConfigured" (dict "root" $ "ref" .token)) }}{{ fail "jira.token: set serviceAccountToken, csiKey, existingSecret or value (or secrets.existingSecret)" }}{{ end -}}
+{{- $_ := set $cfg "jira" $j -}}
+{{- end }}{{ end -}}
 {{- $_ := set $cfg "gateway" (dict "listen" ":8080" "jobTemplate" "/etc/heraion/job/job-template.yaml"
       "maxConcurrentJobs" $v.gateway.maxConcurrentJobs "maxBodyBytes" $v.gateway.maxBodyBytes "hooks" $hooks) -}}
 {{- toYaml $cfg }}

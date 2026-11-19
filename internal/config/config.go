@@ -26,6 +26,7 @@ const (
 	EnvLLMBaseURL = "HERAION_LLM_BASE_URL"
 	EnvLLMModel   = "HERAION_LLM_MODEL"
 	EnvGitToken   = "HERAION_GIT_TOKEN"
+	EnvJiraToken  = "HERAION_JIRA_TOKEN"
 	EnvDryRun     = "HERAION_DRY_RUN"
 )
 
@@ -40,7 +41,9 @@ type Config struct {
 	// MCPServers maps a name to a server. Server "k8s" exposes tools such
 	// as "k8s.resources_list".
 	MCPServers map[string]*MCPServer `json:"mcpServers,omitempty"`
-	Gateway    Gateway               `json:"gateway,omitempty"`
+	// Jira enables the create_issue tool. Nil: no Jira.
+	Jira    *Jira   `json:"jira,omitempty"`
+	Gateway Gateway `json:"gateway,omitempty"`
 }
 
 // MCPServer is one MCP server reached over HTTP, e.g.
@@ -70,6 +73,33 @@ type MCPServer struct {
 	Required bool `json:"required,omitempty"`
 
 	SecretHeaders map[string]*secret.Source `json:"-"` // from HeadersFromEnv
+}
+
+// Jira deployments.
+const (
+	JiraCloud      = "cloud"
+	JiraDataCenter = "datacenter"
+)
+
+// Jira is the site create_issue writes to, e.g.
+//
+//	jira: {url: https://acme.atlassian.net, email: bot@acme.com, projects: [OPS]}
+type Jira struct {
+	URL string `json:"url"`
+	// Deployment is "cloud" (REST v3, ADF) or "datacenter" (REST v2, wiki
+	// markup). Default: cloud for *.atlassian.net, else datacenter.
+	Deployment string `json:"deployment,omitempty"`
+	// Email turns on Basic auth (Cloud API tokens). Empty: Bearer token
+	// (Data Center personal access token, or a Cloud OAuth token).
+	Email string `json:"email,omitempty"`
+	// Projects issues may be created in, e.g. [OPS, SEC].
+	Projects []string `json:"projects"`
+	// IssueType is used when the model does not pick one. Default "Task".
+	IssueType string `json:"issueType,omitempty"`
+	// Labels are added to every issue, e.g. [heraion].
+	Labels []string `json:"labels,omitempty"`
+
+	Token *secret.Source `json:"-"` // HERAION_JIRA_TOKEN[_FILE|_FALLBACK]
 }
 
 // Gateway configures `heraion serve`.
@@ -176,6 +206,9 @@ func Load(path string) (*Config, error) {
 func (c *Config) applyEnv(getenv func(string) string) {
 	c.LLM.APIKey = secret.New(EnvLLMAPIKey, getenv)
 	c.Git.Token = secret.New(EnvGitToken, getenv)
+	if c.Jira != nil {
+		c.Jira.Token = secret.New(EnvJiraToken, getenv)
+	}
 	if v := getenv(EnvLLMBaseURL); v != "" {
 		c.LLM.BaseURL = v
 	}
@@ -252,6 +285,19 @@ func (c *Config) applyDefaults() {
 			m.Timeout.Duration = 60 * time.Second
 		}
 	}
+	if j := c.Jira; j != nil {
+		j.URL = strings.TrimRight(j.URL, "/")
+		if j.Deployment == "" {
+			if u, err := url.Parse(j.URL); err == nil && strings.HasSuffix(u.Hostname(), ".atlassian.net") {
+				j.Deployment = JiraCloud
+			} else {
+				j.Deployment = JiraDataCenter
+			}
+		}
+		if j.IssueType == "" {
+			j.IssueType = "Task"
+		}
+	}
 	if c.Gateway.Listen == "" {
 		c.Gateway.Listen = ":8080"
 	}
@@ -280,6 +326,9 @@ const (
 	HookAuthHMAC  = "hmac-sha256"
 	HookAuthToken = "token"
 )
+
+// Jira project keys, e.g. OPS, SEC2, MY_PROJ.
+var projectKeyRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,254}$`)
 
 var serverNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 
@@ -319,6 +368,27 @@ func (c *Config) Validate() error {
 	for _, r := range c.Repos {
 		if err := ValidateRepoName(r); err != nil {
 			errs = append(errs, fmt.Errorf("repos: %w", err))
+		}
+	}
+	if j := c.Jira; j != nil {
+		if err := checkURL(j.URL); err != nil || j.URL == "" {
+			errs = append(errs, fmt.Errorf("jira.url: invalid %q", j.URL))
+		}
+		if j.Deployment != JiraCloud && j.Deployment != JiraDataCenter {
+			errs = append(errs, fmt.Errorf("jira.deployment %q must be %s or %s", j.Deployment, JiraCloud, JiraDataCenter))
+		}
+		if len(j.Projects) == 0 {
+			errs = append(errs, errors.New("jira.projects must list at least one project key, e.g. [OPS]"))
+		}
+		for _, p := range j.Projects {
+			if !projectKeyRE.MatchString(p) {
+				errs = append(errs, fmt.Errorf("jira.projects: %q is not a project key", p))
+			}
+		}
+		for _, l := range j.Labels {
+			if l == "" || strings.ContainsAny(l, " \t\n") {
+				errs = append(errs, fmt.Errorf("jira.labels: %q must not contain spaces", l))
+			}
 		}
 	}
 	for name, m := range c.MCPServers {
@@ -386,6 +456,9 @@ func checkURL(s string) error {
 // Secrets returns the credentials to mask in prompts and logs.
 func (c *Config) Secrets() []*secret.Source {
 	out := []*secret.Source{c.LLM.APIKey, c.Git.Token}
+	if c.Jira != nil {
+		out = append(out, c.Jira.Token)
+	}
 	for _, m := range c.MCPServers {
 		if m == nil {
 			continue

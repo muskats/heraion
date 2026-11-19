@@ -100,6 +100,23 @@ git:
     key: ""          # default git-token
     value: ""
 
+# Jira issue creation (built-in create_issue tool). A playbook gets the tool when
+# its tools list allows it, e.g. tools: [k8s.*, create_issue].
+jira:
+  enabled: false
+  url: ""               # e.g. https://acme.atlassian.net or https://jira.example.com
+  deployment: ""        # cloud or datacenter; default: cloud for *.atlassian.net
+  email: ""             # Cloud: account of the API token (Basic auth). Empty: Bearer token (Data Center PAT)
+  projects: []          # project keys issues may go to, e.g. [OPS]
+  issueType: Task
+  labels: [heraion]     # added to every issue
+  token:                # credential, default key jira-token
+    serviceAccountToken: { audience: "", expirationSeconds: 3600 }
+    csiKey: ""
+    existingSecret: ""
+    key: ""
+    value: ""
+
 # Repos HeraIon may change, e.g. [acme/web, acme/api]. Playbooks can only narrow this.
 repos: []
 
@@ -129,13 +146,14 @@ playbooks:
   alertmanager-triage:
     enabled: false   # needs gateway.hooks.alertmanager and mcpServers.k8s
     trigger: { webhook: alertmanager }
-    tools: [k8s.*, repo_*, open_pr]
+    tools: [k8s.*, repo_*, open_pr, create_issue]
     prompt: |
       An Alertmanager webhook delivered the alert group below. For each firing alert,
       identify the workload from its labels, gather evidence with the k8s tools (pod
       status, restarts, events, logs, resource usage, owning controller) and determine
       the most likely root cause. Only if the cause is a configuration value in one of
       the allowed repositories, open one minimal PR (branch key: alertname + workload).
+      If it needs a human instead and create_issue is available, create one issue.
       Finish with a short report: summary, evidence, root cause, confidence, next steps.
     output: pr
     guardrails: { maxPRs: 1 }

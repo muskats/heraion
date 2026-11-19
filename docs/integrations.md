@@ -5,6 +5,8 @@ Each integration is an existing [MCP](https://modelcontextprotocol.io) server un
 `tools: ["grafana.*"]` can call `grafana.query_prometheus`. All servers are off by default.
 
 Full example: [examples/helm/values-integrations.yaml](../examples/helm/values-integrations.yaml).
+Credentials (`secretHeaders`, `secretEnv`) accept the sources described in the chart README's
+[Secrets](../charts/heraion/README.md#secrets) section.
 
 ## Connector modes
 
@@ -84,6 +86,14 @@ mcpServers:
 ```
 
 ## Jira
+
+There are two separate parts:
+
+| Need | Use |
+|---|---|
+| Create issues | The built-in `create_issue` tool (`jira.*` values), with a project allowlist, issue budget, de-duplication and dry-run. See the [chart README](../charts/heraion/README.md#jira-issues) |
+| Read issues, e.g. search for related tickets | A Jira MCP server, as below. Keep it read-only |
+
 
 Server or Data Center: run [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) with a
 personal access token and `READ_ONLY_MODE=true`, as in

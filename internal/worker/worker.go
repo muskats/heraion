@@ -10,6 +10,7 @@ import (
 
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/guardrails"
+	"github.com/muskats/heraion/internal/jira"
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/mcp"
 	"github.com/muskats/heraion/internal/playbook"
@@ -25,6 +26,7 @@ type Options struct {
 	Log      *slog.Logger
 	LLM      llm.Chatter
 	PRs      scm.PRService
+	Jira     jira.API // overrides the client built from Config.Jira (tests)
 	// ExtraTools are added before the allowlist is applied (used in tests).
 	ExtraTools []llm.Tool
 	Version    string
@@ -38,6 +40,7 @@ type Report struct {
 	Steps    int
 	Tokens   int
 	PRs      []scm.OpenedPR
+	Issues   []jira.Created
 }
 
 // Run executes the playbook.
@@ -56,6 +59,11 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	dryRun := pb.DryRun(cfg.DryRun)
 	repos := pb.EffectiveRepos(cfg.Repos)
 	guard := guardrails.New(repos, pb.Guardrails.MaxPRs, dryRun, pb.Guardrails.MaxFileBytes, red)
+	var projects []string
+	if cfg.Jira != nil {
+		projects = pb.EffectiveJiraProjects(cfg.Jira.Projects)
+		guard.WithIssues(projects, pb.Guardrails.MaxIssues)
+	}
 
 	work, err := os.MkdirTemp(cfg.WorkDir, "heraion-"+pb.Name+"-")
 	if err != nil {
@@ -74,6 +82,16 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	tb := &scm.Toolbox{Playbook: pb.Name, Workspaces: ws, PRs: prs, Guard: guard, Log: log}
 
 	extra := o.ExtraTools
+	var issues *jira.Tool
+	if cfg.Jira != nil && len(projects) > 0 {
+		api := o.Jira
+		if api == nil && !dryRun {
+			api = jira.NewClient(cfg.Jira)
+		}
+		issues = &jira.Tool{API: api, Playbook: pb.Name, IssueType: cfg.Jira.IssueType,
+			Labels: cfg.Jira.Labels, Guard: guard, Log: log}
+		extra = append(extra, issues)
+	}
 	if len(cfg.MCPServers) > 0 {
 		mgr, mcpTools, err := mcp.Connect(ctx, cfg.MCPServers,
 			func(server string) bool { return mcp.NeededBy(pb.Tools, server) }, o.Version, log)
@@ -106,8 +124,11 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		LLM: chat, Model: cfg.LLM.Model, Tools: tools, Redact: red.Redact, Log: log,
 		Limits: llm.Limits{MaxSteps: cfg.LLM.MaxSteps, MaxTokens: cfg.LLM.MaxTokens, Temperature: cfg.LLM.Temperature},
 	}
-	res, err := agent.Run(ctx, systemPrompt(pb, repos, dryRun), userPrompt(pb, o.Event))
+	res, err := agent.Run(ctx, systemPrompt(pb, repos, projects, dryRun), userPrompt(pb, o.Event))
 	rep := &Report{Playbook: pb.Name, DryRun: dryRun, PRs: tb.Opened}
+	if issues != nil {
+		rep.Issues = issues.Created
+	}
 	if res != nil {
 		rep.Final, rep.Steps, rep.Tokens = res.Final, res.Steps, res.Usage.TotalTokens
 	}
@@ -116,7 +137,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 
 func isGitTool(n string) bool { return strings.HasPrefix(n, "repo_") || n == "open_pr" }
 
-func systemPrompt(pb *playbook.Playbook, repos []string, dryRun bool) string {
+func systemPrompt(pb *playbook.Playbook, repos, projects []string, dryRun bool) string {
 	var b strings.Builder
 	b.WriteString(`You are HeraIon, an automated investigation agent running inside a Kubernetes cluster.
 You investigate operational problems using only the tools provided, and you propose fixes
@@ -140,8 +161,12 @@ Rules:
 	} else {
 		fmt.Fprintf(&b, "You may open at most %d pull request(s) in this run. Use a stable 'branch' key per change so reruns de-duplicate.\n", pb.Guardrails.MaxPRs)
 	}
+	if len(projects) > 0 && pb.AllowsTool("create_issue") {
+		fmt.Fprintf(&b, "You may create at most %d Jira issue(s) with create_issue, in: %s. Create one only for a finding that needs a human, and use a stable 'key' so reruns de-duplicate.\n",
+			pb.Guardrails.MaxIssues, strings.Join(projects, ", "))
+	}
 	if dryRun {
-		b.WriteString("Dry-run mode: open_pr records the proposed change but nothing is pushed. Behave as if it were real.\n")
+		b.WriteString("Dry-run mode: open_pr and create_issue record the change, but nothing is pushed or created. Behave as if it were real.\n")
 	}
 	return b.String()
 }

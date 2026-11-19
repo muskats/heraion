@@ -15,6 +15,7 @@ import (
 
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/guardrails"
+	"github.com/muskats/heraion/internal/jira"
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/llm/llmtest"
 	"github.com/muskats/heraion/internal/playbook"
@@ -189,4 +190,61 @@ func redactor(c *config.Config) *guardrails.Redactor {
 	r := guardrails.NewRedactor()
 	r.AddSources(c.Secrets()...)
 	return r
+}
+
+type fakeJira struct{ created []jira.NewIssue }
+
+func (f *fakeJira) Create(_ context.Context, in jira.NewIssue) (*jira.Issue, error) {
+	f.created = append(f.created, in)
+	return &jira.Issue{Key: "OPS-7", URL: "https://acme.atlassian.net/browse/OPS-7"}, nil
+}
+func (f *fakeJira) FindOpen(context.Context, string) (*jira.Issue, error) { return nil, nil }
+
+func TestRunCreatesJiraIssue(t *testing.T) {
+	srv := llmtest.New(t,
+		llmtest.Turn{Calls: []llmtest.Call{{Name: "create_issue", Args: map[string]string{
+			"project": "OPS", "summary": "payments-api OOMKilled", "description": "14 restarts", "key": "oom-payments"}}}},
+		llmtest.Turn{Final: "Opened OPS-7."},
+	)
+	c := cfg(t, srv.BaseURL(), "file:///unused")
+	c.Repos = nil
+	c.Jira = &config.Jira{URL: "https://acme.atlassian.net", Deployment: config.JiraCloud, Projects: []string{"OPS", "SEC"}, IssueType: "Task"}
+	fj := &fakeJira{}
+	rep, err := worker.Run(context.Background(), worker.Options{
+		Config:   c,
+		Playbook: pb(t, "name: triage\ntrigger: {webhook: alertmanager}\ntools: [create_issue]\njiraProjects: [OPS]\noutput: report\nprompt: p\n"),
+		LLM:      fastClient(srv.BaseURL()),
+		Jira:     fj,
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fj.created) != 1 || len(rep.Issues) != 1 || rep.Issues[0].Key != "OPS-7" {
+		t.Fatalf("created=%v report=%+v", fj.created, rep.Issues)
+	}
+	// jiraProjects narrows the enum offered to the model to OPS.
+	schema := string(srv.Requests[0].Tools[0].Function.Parameters)
+	if !strings.Contains(schema, `"enum":["OPS"]`) {
+		t.Errorf("project enum not narrowed: %s", schema)
+	}
+	if sys := srv.Requests[0].Messages[0].Text(); !strings.Contains(sys, "create_issue, in: OPS") {
+		t.Errorf("system prompt does not mention Jira: %s", sys)
+	}
+}
+
+func TestNoJiraToolWithoutConfig(t *testing.T) {
+	srv := llmtest.New(t, llmtest.Turn{Final: "ok"})
+	c := cfg(t, srv.BaseURL(), "file:///unused")
+	c.Repos = nil
+	_, err := worker.Run(context.Background(), worker.Options{
+		Config: c, Playbook: pb(t, "name: x\ntrigger: {manual: true}\ntools: ['*']\nprompt: p\nguardrails: {dryRun: true}\n"),
+		LLM: fastClient(srv.BaseURL()), Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tools := srv.Requests[0].Tools; len(tools) != 0 {
+		t.Fatalf("create_issue offered without jira config: %v", tools)
+	}
 }

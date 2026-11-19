@@ -1,17 +1,28 @@
 # HeraIon
 
 HeraIon looks into problems in a Kubernetes cluster with an LLM and proposes fixes as pull
-requests. It never merges, and it cannot change the cluster.
+requests. When a problem needs a person instead, it can open a Jira issue. It never merges,
+and it cannot change the cluster.
 
 Example: Trivy Operator reports a fixable CVE in `alpine:3.18`. The `trivy-remediate`
 playbook reads the report, finds the Dockerfile in `acme/web`, and opens a PR on the branch
 `heraion/trivy-remediate/bump-alpine-3-20`. On the next run the PR is still open, so no
-second PR is opened.
+second PR is opened. If an alert has no config fix, `alertmanager-triage` opens one Jira
+issue with the evidence, and reruns find that issue instead of creating another.
 
 It works with any OpenAI-compatible endpoint (OpenAI, vLLM, Ollama, KubeAI, LiteLLM) and any
 Git server go-scm supports (GitHub, GitLab, Gitea, Bitbucket, including self-hosted).
 Integrations such as Kubernetes, Grafana, Datadog and Jira are MCP servers you turn on one by
 one.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| This README | What HeraIon does, playbooks, webhooks, configuration, limits |
+| [charts/heraion/README.md](charts/heraion/README.md) | Helm install, secrets, every chart value, testing, upgrading |
+| [docs/integrations.md](docs/integrations.md) | Kubernetes, Grafana, Datadog, Jira and custom MCP servers; webhook senders; LLM providers |
+| [examples/](examples/) | Runtime config, playbooks, Helm values |
 
 ## Try it locally
 
@@ -21,6 +32,13 @@ export HERAION_LLM_API_KEY=sk-...
 export HERAION_GIT_TOKEN=...
 ./bin/heraion run --config examples/config.yaml --playbook trivy-remediate --dry-run
 ```
+
+| Command | Does |
+|---|---|
+| `heraion run --playbook NAME [--dry-run] [--event FILE]` | Runs one playbook, then exits (what a worker Job runs) |
+| `heraion serve` | Webhook gateway: creates a worker Job per request |
+| `heraion check [--role gateway] [--connect]` | Checks config, playbooks and where each secret comes from; with `--connect` also the MCP servers and the LLM |
+| `heraion version` | Prints the version |
 
 With `--dry-run` the agent clones the repos and edits files, but each PR is only logged with
 its diff:
@@ -37,60 +55,43 @@ kubectl -n heraion create secret generic heraion \
   --from-literal=llm-api-key=sk-... --from-literal=git-token=ghp_...
 helm install heraion oci://ghcr.io/muskats/charts/heraion -n heraion \
   -f examples/helm/values-minimal.yaml
-helm test heraion -n heraion   # runs `heraion check --connect` with the worker's pod spec
+helm test heraion -n heraion
 ```
 
-| Values file | Installs |
+The **[chart README](charts/heraion/README.md)** covers the chart in detail:
+
+| Topic | Section |
 |---|---|
-| [values-minimal.yaml](examples/helm/values-minimal.yaml) | A CronJob for `trivy-remediate` and the read-only k8s MCP server |
-| [values-selfhosted.yaml](examples/helm/values-selfhosted.yaml) | Gitea, LiteLLM, and a webhook gateway for Alertmanager |
-| [values-integrations.yaml](examples/helm/values-integrations.yaml) | Jira, Grafana and Datadog servers, plus report and webhook playbooks |
-| [values-identity.yaml](examples/helm/values-identity.yaml) | No static secrets: AWS Secrets Manager via CSI and IRSA, and a projected token for an MCP server |
+| Requirements and install from a checkout | [Install](charts/heraion/README.md#install) |
+| Which objects are created, and when | [What gets deployed](charts/heraion/README.md#what-gets-deployed) |
+| ServiceAccount tokens, CSI, existing Secrets, literal fallbacks | [Secrets](charts/heraion/README.md#secrets) |
+| Enabling, scheduling and running playbooks | [Playbooks](charts/heraion/README.md#playbooks) |
+| Hooks, Ingress, Alertmanager receiver, load limits | [Webhooks](charts/heraion/README.md#webhooks) |
+| Every value with its default | [Values reference](charts/heraion/README.md#values-reference) |
+| `helm test`, breaking changes | [Testing](charts/heraion/README.md#testing), [Upgrading](charts/heraion/README.md#upgrading) |
 
-What runs in the cluster:
-
-| Component | Created when | Notes |
-|---|---|---|
-| Worker Job | A CronJob fires or a webhook arrives | One Job per run, no ServiceAccount token, read-only root filesystem |
-| Gateway Deployment | A webhook playbook is enabled | RBAC: `create` and `list` on Jobs, nothing else |
-| MCP server | `mcpServers.<name>.enabled: true` | Its own ServiceAccount and RBAC; only worker pods can connect |
+Example values: [minimal](examples/helm/values-minimal.yaml),
+[self-hosted](examples/helm/values-selfhosted.yaml),
+[integrations](examples/helm/values-integrations.yaml),
+[identity-based secrets](examples/helm/values-identity.yaml).
 
 ## Secrets
 
-Every credential (`llm.apiKey`, `git.token`, `gateway.hooks.<name>.secret`,
-`mcpServers.<name>.secretHeaders.<header>`) takes up to three sources. The first one that
-yields a value at runtime wins:
-
-| Order | Values | Pod gets | Example |
-|---|---|---|---|
-| 1 | `serviceAccountToken: { audience: vault }` | `<ENV>_FILE`, a projected ServiceAccount token, rotated | An MCP server or LLM gateway that trusts the cluster's OIDC issuer |
-| 1 | `csiKey: llm-api-key` | `<ENV>_FILE` from the Secrets Store CSI driver | AWS Secrets Manager, Azure Key Vault or Google Secret Manager, via IRSA or Workload Identity |
-| 2 | `existingSecret: llm`, `key: api-key` | `<ENV>` from an optional `secretKeyRef` | A Secret from External Secrets or Sealed Secrets |
-| 3 | `value: sk-...` | `<ENV>_FALLBACK` from the chart's own Secret | Quick tests |
-
-`secrets.existingSecret` is the default Secret for level 2, with keys `llm-api-key`,
-`git-token`, `hook-<name>` and `mcp-<server>-<header>`. A key missing from it is skipped:
+Each credential is read from the first source that has a value: a ServiceAccount token or
+cloud secret manager file, then an existing Secret, then a literal value. Example:
 
 ```yaml
 secrets:
-  existingSecret: heraion        # holds git-token and hook-alertmanager
+  existingSecret: heraion        # default Secret: llm-api-key, git-token, hook-<name>, ...
 llm:
   apiKey:
-    csiKey: llm-api-key          # 1: from the cloud secret manager
-    value: sk-local-dev          # 3: used only when the CSI file is missing
+    csiKey: llm-api-key          # first: AWS/Azure/GCP secret manager via the CSI driver
+    value: sk-local-dev          # last: only if nothing else is set
 ```
 
-Token files are re-read, so rotation needs no restart. Changing a chart-managed value rolls
-the pods (`checksum/secret`). `heraion check` lists the source of each secret, never the value:
-
-```
-ok    secret     HERAION_LLM_API_KEY (file) for llm
-ok    secret     HERAION_GIT_TOKEN (env) for git
-```
-
-Servers deployed by the chart (`mcpServers.<name>.deploy.secretEnv`) read plain env vars, so
-the source is picked when the chart is rendered: their own `existingSecret`, then `value`,
-then `secrets.existingSecret`.
+Outside Kubernetes the same order applies to env vars, e.g. `HERAION_LLM_API_KEY_FILE`, then
+`HERAION_LLM_API_KEY`, then `HERAION_LLM_API_KEY_FALLBACK`. See the chart README's
+[Secrets](charts/heraion/README.md#secrets) section for every option.
 
 ## Playbooks
 
@@ -108,11 +109,64 @@ output: pr                             # "report" removes open_pr
 guardrails: { maxPRs: 3 }
 ```
 
-Built-in tools: `repo_list`, `repo_read_file`, `repo_write_file` and `open_pr`. MCP tools are
-named `<server>.<tool>`, so `k8s.*` matches every tool of the `k8s` server.
+Built-in tools:
+
+| Tool | Does |
+|---|---|
+| `repo_list`, `repo_read_file`, `repo_write_file` | Read and edit a clone of an allowed repo |
+| `open_pr` | Commit the edits and open a pull request |
+| `create_issue` | Create a Jira issue, see [Jira issues](#jira-issues) |
+
+MCP tools are named `<server>.<tool>`, so `k8s.*` matches every tool of the `k8s` server.
 
 More examples: [trivy-remediate.yaml](examples/playbooks/trivy-remediate.yaml),
 [alertmanager-triage.yaml](examples/playbooks/alertmanager-triage.yaml).
+
+## Jira issues
+
+`create_issue` opens an issue in Jira Cloud or Jira Data Center. Use it for findings that need
+a person, e.g. an alert without a config fix, or a CVE with no fixed version yet.
+
+```yaml
+# config.yaml (the chart writes this from jira.* values)
+jira:
+  url: https://acme.atlassian.net   # or https://jira.example.com
+  email: heraion-bot@acme.com       # Cloud API token: Basic auth. Omit for a Data Center PAT
+  projects: [OPS]
+  issueType: Task
+  labels: [heraion]
+```
+
+```yaml
+# playbook
+tools: [k8s.*, create_issue]
+jiraProjects: [OPS]                # optional, narrows jira.projects
+guardrails: { maxIssues: 1 }       # default 1
+```
+
+The token is `HERAION_JIRA_TOKEN`: a Cloud API token with `email`, or a Data Center personal
+access token without it.
+
+| | Jira Cloud | Jira Data Center |
+|---|---|---|
+| Detected by | `url` on `*.atlassian.net`, or `deployment: cloud` | Anything else, or `deployment: datacenter` |
+| Create | `POST /rest/api/3/issue`, description in ADF | `POST /rest/api/2/issue`, description in wiki markup |
+| Search | `POST /rest/api/3/search/jql` | `POST /rest/api/2/search` |
+| Auth | `Basic base64(email:api-token)` | `Bearer <personal access token>` |
+
+How an issue is created:
+
+1. The model calls `create_issue` with a project, a summary, a Markdown description and a
+   `key` such as `oomkilled-payments-api`. HeraIon converts the Markdown to ADF or wiki markup.
+2. HeraIon adds the labels `heraion`, `heraion-<playbook>` and a fingerprint such as
+   `heraion-1b2c3d4e5f60`, computed from the playbook, project and key.
+3. Before creating, it searches
+   `project = "OPS" AND labels = "heraion-1b2c3d4e5f60" AND statusCategory != Done`. If that
+   finds an issue, it is returned and nothing new is created. Once the issue is done, the next
+   occurrence opens a new one.
+
+In dry-run the issue is only logged. Reading Jira, e.g. searching for related tickets, works
+through a Jira MCP server; see [docs/integrations.md](docs/integrations.md#jira).
 
 ## Webhooks
 
@@ -144,6 +198,7 @@ come from env vars. A secret in the file is rejected.
 |---|---|
 | `HERAION_LLM_API_KEY` | `sk-...`; also `_FILE` and `_FALLBACK`, see [Secrets](#secrets) |
 | `HERAION_GIT_TOKEN` | A token that can push branches and open PRs; also `_FILE` and `_FALLBACK` |
+| `HERAION_JIRA_TOKEN` | Jira Cloud API token or Data Center PAT; also `_FILE` and `_FALLBACK` |
 | `HERAION_LLM_BASE_URL`, `HERAION_LLM_MODEL` | Override the file, e.g. `http://vllm:8000/v1` |
 | `HERAION_DRY_RUN` | `true` |
 | `HERAION_CONFIG`, `HERAION_PLAYBOOK`, `HERAION_EVENT_FILE` | Defaults for `heraion run` flags |
@@ -157,16 +212,18 @@ come from env vars. A secret in the file is rejected.
 | Repo allowlist | With `repos: [acme/web]`, a tool call for `acme/billing` fails |
 | File access | `../../etc/passwd`, `.git/config` and symlinks out of the clone are refused |
 | PR budget | With `maxPRs: 1`, a second `open_pr` call fails |
+| Jira projects | With `jira.projects: [OPS]`, an issue for `SEC` is refused |
+| Issue budget | With `maxIssues: 1`, a second new issue is refused |
 | Branches | Only `heraion/<playbook>/...` branches are pushed |
-| Duplicates | If an open PR already uses the branch, it is reused |
-| Masking | `ghp_...`, `glpat-...`, `sk-...`, `Bearer ...`, PEM keys and configured secrets become `[REDACTED]` in prompts, PRs and logs |
+| Duplicates | An open PR on the same branch, or an open issue with the same fingerprint label, is reused |
+| Masking | `ghp_...`, `glpat-...`, `sk-...`, `Bearer ...`, PEM keys and configured secrets become `[REDACTED]` in prompts, PRs, issues and logs |
 | Run size | `llm.maxSteps`, `llm.maxTokens`, `llm.timeout` |
 | No merge | The code has no merge call |
 
 ## Development
 
 ```sh
-heraion check --config examples/config.yaml   # config, playbooks and secret sources
+./bin/heraion check --config examples/config.yaml
 make test         # Go tests with the race detector
 make chart-test   # helm lint, chart cross-check, helm-unittest
 make lint

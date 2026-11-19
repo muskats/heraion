@@ -133,7 +133,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	rep, err := worker.Run(ctx, worker.Options{Config: cfg, Playbook: pb, Event: event, Redactor: red, Log: log, Version: version})
 	if rep != nil {
 		log.Info("run finished", "dryRun", rep.DryRun, "steps", rep.Steps, "tokens", rep.Tokens,
-			"prs", rep.PRs, "summary", rep.Final)
+			"prs", rep.PRs, "issues", rep.Issues, "summary", rep.Final)
 	}
 	return err
 }

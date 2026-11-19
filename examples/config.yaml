@@ -26,6 +26,13 @@ repos:
 playbooksDir: ./examples/playbooks
 dryRun: true   # log PRs instead of pushing; same as --dry-run or HERAION_DRY_RUN=true
 
+# Jira issues for the create_issue tool. Token: HERAION_JIRA_TOKEN.
+# jira:
+#   url: https://acme.atlassian.net
+#   email: heraion-bot@acme.com     # Cloud API token; omit for a Data Center PAT
+#   projects: [OPS]
+#   labels: [heraion]
+
 # MCP servers. In Kubernetes the chart writes this section.
 mcpServers:
   k8s:

@@ -292,7 +292,18 @@
               "maxFileBytes": {
                 "type": "integer",
                 "minimum": 1
+              },
+              "maxIssues": {
+                "type": "integer",
+                "minimum": 0
               }
+            }
+          },
+          "jiraProjects": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*$"
             }
           }
         },
@@ -1091,6 +1102,97 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        }
+      }
+    },
+    "jira": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "url": {
+          "type": "string"
+        },
+        "deployment": {
+          "enum": [
+            "",
+            "cloud",
+            "datacenter"
+          ]
+        },
+        "email": {
+          "type": "string"
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          }
+        },
+        "issueType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^\\S+$"
+          }
+        },
+        "token": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "serviceAccountToken": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "audience": {
+                  "type": "string"
+                },
+                "expirationSeconds": {
+                  "type": "integer",
+                  "minimum": 600
+                }
+              }
+            },
+            "csiKey": {
+              "type": "string"
+            },
+            "existingSecret": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "then": {
+        "properties": {
+          "url": {
+            "minLength": 1
+          },
+          "projects": {
+            "minItems": 1
           }
         }
       }

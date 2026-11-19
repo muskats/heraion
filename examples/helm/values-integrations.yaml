@@ -53,15 +53,23 @@ grafana-mcp:
     url: http://grafana.monitoring.svc:80
     apiKeySecret: { name: grafana-sa-token, key: token }
 
+# Issue creation (built-in create_issue tool). The jira MCP server above stays read-only.
+jira:
+  enabled: true
+  url: https://jira.example.internal
+  projects: [OPS]
+  token: { existingSecret: jira, key: pat }
+
 playbooks:
   incident-digest:
     trigger: { schedule: "0 8 * * 1-5" }
-    tools: ["grafana.*", "datadog.*", "jira.*"]
+    tools: ["grafana.*", "datadog.*", "jira.*", create_issue]
     output: report
     prompt: |
       Summarize the last 24 hours for the platform team: firing alerts and error-rate
       spikes (Grafana / Datadog), and open Jira incidents in project OPS with their status.
-      Correlate them where possible. Keep it under 300 words.
+      Correlate them where possible. Keep it under 300 words. If an error spike has no
+      open OPS issue yet, create one (key: "<service>-<date>").
   jira-bug-to-pr:
     trigger: { webhook: jira }       # Jira webhook on "issue created" with label heraion
     tools: ["jira.*", "grafana.query_loki_logs", repo_*, open_pr]

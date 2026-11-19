@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/muskats/heraion/internal/config"
+	"github.com/muskats/heraion/internal/jira"
 	"github.com/muskats/heraion/internal/mcp"
 	"github.com/muskats/heraion/internal/playbook"
 	"github.com/muskats/heraion/internal/secret"
@@ -28,6 +29,7 @@ import (
 //	warn  secret     HERAION_GIT_TOKEN not set
 //	ok    mcp        k8s: 18 tools
 //	ok    llm        GET https://api.openai.com/v1/models: 200
+//	ok    jira       https://acme.atlassian.net (cloud), projects [OPS]
 func cmdCheck(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	cfgPath := fs.String("config", envOr("HERAION_CONFIG", "/etc/heraion/config.yaml"), "config file (env HERAION_CONFIG)")
@@ -66,6 +68,9 @@ func cmdCheck(ctx context.Context, args []string) error {
 	default:
 		c.secret(cfg.LLM.APIKey, false, "llm")
 		c.secret(cfg.Git.Token, false, "git")
+		if cfg.Jira != nil {
+			c.secret(cfg.Jira.Token, true, "jira")
+		}
 		for name, m := range cfg.MCPServers {
 			for h, src := range m.SecretHeaders {
 				c.secret(src, true, "mcp "+name+" "+h)
@@ -93,6 +98,13 @@ func cmdCheck(ctx context.Context, args []string) error {
 			}
 		}
 		c.llm(ctx, cfg)
+		if cfg.Jira != nil {
+			if err := jira.NewClient(cfg.Jira).Myself(ctx); err != nil {
+				c.fail("jira", err.Error())
+			} else {
+				c.ok("jira", fmt.Sprintf("%s (%s), projects %v", cfg.Jira.URL, cfg.Jira.Deployment, cfg.Jira.Projects))
+			}
+		}
 	}
 	return c.result()
 }
