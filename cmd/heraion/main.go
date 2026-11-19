@@ -119,7 +119,8 @@ func cmdRun(ctx context.Context, args []string) error {
 	var event []byte
 	switch *eventPath {
 	case "":
-		// Jobs created by the gateway pass the payload in HERAION_EVENT.
+		// Gateway Jobs set HERAION_EVENT_FILE (the default of --event);
+		// HERAION_EVENT is still read for Jobs created by older gateways.
 		event = []byte(os.Getenv(dispatch.EnvEvent))
 	case "-":
 		event, err = io.ReadAll(io.LimitReader(os.Stdin, 1<<20))

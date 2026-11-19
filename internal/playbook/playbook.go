@@ -15,10 +15,12 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
 	"github.com/muskats/heraion/internal/config"
+	"github.com/muskats/heraion/internal/guardrails"
 )
 
 // Output kinds.
@@ -52,33 +54,41 @@ type Trigger struct {
 	Manual   bool   `json:"manual,omitempty"`   // only started by `heraion run`
 }
 
-// Guardrails limit what a single run may do.
+// Guardrails limit what a single run may do. Unset keys get the defaults of
+// DefaultGuardrails; an explicit 0 is kept, e.g. maxIssues: 0 means none.
 type Guardrails struct {
-	MaxPRs       int   `json:"maxPRs,omitempty"`
-	MaxIssues    int   `json:"maxIssues,omitempty"`
+	MaxPRs       int   `json:"maxPRs"`
+	MaxIssues    int   `json:"maxIssues"`
 	DryRun       *bool `json:"dryRun,omitempty"`
-	MaxFileBytes int   `json:"maxFileBytes,omitempty"`
+	MaxFileBytes int   `json:"maxFileBytes"`
+	// WritePaths limits repo_write_file to these globs, e.g. [Dockerfile,
+	// "deploy/**"]. Empty: any path except the denied ones.
+	WritePaths []string `json:"writePaths,omitempty"`
+	// DenyPaths adds to guardrails.DefaultDenyPaths (CI files, CODEOWNERS).
+	DenyPaths []string `json:"denyPaths,omitempty"`
+	// ReopenAfter is how long a PR closed without merging stops a new PR on
+	// the same branch. "0s": never reopen.
+	ReopenAfter config.Duration `json:"reopenAfter"`
+}
+
+// DefaultGuardrails are used for keys a playbook does not set.
+func DefaultGuardrails() Guardrails {
+	return Guardrails{MaxPRs: 1, MaxIssues: 1, MaxFileBytes: 1 << 20,
+		ReopenAfter: config.Duration{Duration: 7 * 24 * time.Hour}}
 }
 
 var nameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,50}[a-z0-9])?$`)
 
 // Parse decodes and validates a single playbook.
 func Parse(b []byte) (*Playbook, error) {
-	p := &Playbook{}
+	// Decoding keeps fields the YAML does not mention, so prefilled defaults
+	// apply only to unset keys.
+	p := &Playbook{Guardrails: DefaultGuardrails()}
 	if err := yaml.UnmarshalStrict(b, p); err != nil {
 		return nil, err
 	}
 	if p.Output == "" {
 		p.Output = OutputPR
-	}
-	if p.Guardrails.MaxPRs == 0 {
-		p.Guardrails.MaxPRs = 1
-	}
-	if p.Guardrails.MaxIssues == 0 {
-		p.Guardrails.MaxIssues = 1
-	}
-	if p.Guardrails.MaxFileBytes == 0 {
-		p.Guardrails.MaxFileBytes = 1 << 20
 	}
 	return p, p.Validate()
 }
@@ -132,6 +142,17 @@ func (p *Playbook) Validate() error {
 	}
 	if p.Guardrails.MaxIssues < 0 {
 		errs = append(errs, errors.New("guardrails.maxIssues must be >= 0"))
+	}
+	if p.Guardrails.MaxFileBytes < 1 {
+		errs = append(errs, errors.New("guardrails.maxFileBytes must be >= 1"))
+	}
+	if p.Guardrails.ReopenAfter.Duration < 0 {
+		errs = append(errs, errors.New("guardrails.reopenAfter must not be negative"))
+	}
+	for _, pat := range append(slices.Clone(p.Guardrails.WritePaths), p.Guardrails.DenyPaths...) {
+		if err := guardrails.ValidatePathPattern(pat); err != nil {
+			errs = append(errs, fmt.Errorf("guardrails: %w", err))
+		}
 	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("playbook %q: %w", p.Name, err)

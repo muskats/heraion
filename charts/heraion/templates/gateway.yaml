@@ -39,7 +39,8 @@ metadata:
 {{- end }}
 {{- if .Values.rbac.create }}
 ---
-# Create Jobs; list them only to enforce maxConcurrentJobs.
+# Create Jobs (get: duplicate deliveries; list: maxConcurrentJobs), and the
+# Secret with each webhook payload, owned by its Job.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -47,7 +48,10 @@ metadata:
 rules:
   - apiGroups: [batch]
     resources: [jobs]
-    verbs: [create{{ if $g.maxConcurrentJobs }}, list{{ end }}]
+    verbs: [get, create{{ if $g.maxConcurrentJobs }}, list{{ end }}]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, patch, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

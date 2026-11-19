@@ -121,3 +121,60 @@ func TestRegistryCollision(t *testing.T) {
 		t.Fatal("expected collision error")
 	}
 }
+
+type counter struct {
+	name  string
+	calls *int
+	out   string
+}
+
+func (c counter) Name() string            { return c.name }
+func (c counter) Description() string     { return "counter" }
+func (c counter) Schema() json.RawMessage { return nil }
+func (c counter) Call(context.Context, json.RawMessage) (string, error) {
+	*c.calls++
+	return c.out, nil
+}
+
+func TestTokenLimitStopsBeforeTools(t *testing.T) {
+	loop := llmtest.Turn{Calls: []llmtest.Call{{Name: "t", Args: map[string]int{}}}}
+	srv := llmtest.New(t, loop, loop, loop)
+	n := 0
+	a := newAgent(t, srv, counter{name: "t", calls: &n})
+	a.Limits.MaxTokens = 200 // each turn reports 110: over budget after turn 2
+	if _, err := a.Run(context.Background(), "s", "u"); !errors.Is(err, llm.ErrLimit) {
+		t.Fatalf("err=%v", err)
+	}
+	if n != 1 {
+		t.Fatalf("tool ran %d times; the over-budget turn's calls must not run", n)
+	}
+}
+
+func TestSecretAtTruncationBoundaryIsMasked(t *testing.T) {
+	const secret = "super-secret-token-value"
+	srv := llmtest.New(t,
+		llmtest.Turn{Calls: []llmtest.Call{{Name: "t", Args: map[string]int{}}}},
+		llmtest.Turn{Final: "done"},
+	)
+	n := 0
+	// The secret starts 10 bytes before the cut.
+	out := strings.Repeat("x", 90) + secret + strings.Repeat("y", 50)
+	a := newAgent(t, srv, counter{name: "t", calls: &n, out: out})
+	a.Limits.MaxToolResultBytes = 100
+	a.Redact = func(s string) string { return strings.ReplaceAll(s, secret, "[REDACTED]") }
+	if _, err := a.Run(context.Background(), "s", "u"); err != nil {
+		t.Fatal(err)
+	}
+	got := srv.Requests[1].Messages[3].Text()
+	if strings.Contains(got, secret[:10]) {
+		t.Fatalf("partial secret leaked: %q", got)
+	}
+}
+
+func TestCutOffAnswerIsAnError(t *testing.T) {
+	srv := llmtest.New(t, llmtest.Turn{Final: "the root cause is", FinishReason: "length"})
+	res, err := newAgent(t, srv).Run(context.Background(), "s", "u")
+	if !errors.Is(err, llm.ErrLimit) || res.Final != "the root cause is" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}

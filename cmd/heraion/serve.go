@@ -55,7 +55,7 @@ func cmdServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	d := &dispatch.Dispatcher{Client: kc, Namespace: ns, Template: tmpl, MaxActive: cfg.Gateway.MaxConcurrentJobs}
+	d := &dispatch.Dispatcher{Client: kc, Namespace: ns, Template: tmpl, MaxActive: cfg.Gateway.MaxConcurrentJobs, Log: log}
 	srv, err := hooks.New(cfg.Gateway, pbs, d, log)
 	if err != nil {
 		return err

@@ -26,6 +26,7 @@ import (
 	"github.com/muskats/heraion/internal/atlassian"
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/llm"
+	"github.com/muskats/heraion/internal/textutil"
 )
 
 // Client reads one Confluence site.
@@ -270,29 +271,34 @@ type Reader interface {
 }
 
 // Tools returns confluence_search and confluence_get_page, limited to spaces.
-func Tools(r Reader, baseURL string, spaces []string, maxPageBytes int) []llm.Tool {
-	t := &tools{r: r, base: strings.TrimRight(baseURL, "/"), spaces: spaces, max: maxPageBytes}
+// redact (nil: none) masks secrets in a page before it is cut at
+// maxPageBytes, so a secret at the cut cannot leak as a partial value.
+func Tools(r Reader, baseURL string, spaces []string, maxPageBytes int, redact func(string) string) []llm.Tool {
+	t := &tools{r: r, base: strings.TrimRight(baseURL, "/"), spaces: spaces, max: maxPageBytes, redact: redact}
 	if t.max == 0 {
 		t.max = 32 << 10
 	}
+	if t.redact == nil {
+		t.redact = func(s string) string { return s }
+	}
 	enum, _ := json.Marshal(spaces)
 	return []llm.Tool{
-		&fnTool{
-			name: "confluence_search",
-			desc: "List Confluence pages recently changed in the allowed spaces, newest first, e.g. " +
+		&llm.FuncTool{
+			ToolName: "confluence_search",
+			Desc: "List Confluence pages recently changed in the allowed spaces, newest first, e.g. " +
 				"runbooks, change logs and postmortems.",
-			schema: `{"type":"object","properties":{
+			Params: `{"type":"object","properties":{
 				"space":{"type":"string","enum":` + string(enum) + `,"description":"One space; omit for all allowed spaces"},
 				"days":{"type":"integer","minimum":1,"maximum":365,"description":"Look back this many days, default 30"},
 				"text":{"type":"string","description":"Optional full-text filter, e.g. 'rollback payments'"},
 				"limit":{"type":"integer","minimum":1,"maximum":50,"description":"Default 20"}}}`,
-			call: t.search,
+			Fn: t.search,
 		},
-		&fnTool{
-			name:   "confluence_get_page",
-			desc:   "Read one Confluence page from the allowed spaces as plain text.",
-			schema: `{"type":"object","properties":{"id":{"type":"string","description":"Page id from confluence_search, e.g. 98765"}},"required":["id"]}`,
-			call:   t.get,
+		&llm.FuncTool{
+			ToolName: "confluence_get_page",
+			Desc:     "Read one Confluence page from the allowed spaces as plain text.",
+			Params:   `{"type":"object","properties":{"id":{"type":"string","description":"Page id from confluence_search, e.g. 98765"}},"required":["id"]}`,
+			Fn:       t.get,
 		},
 	}
 }
@@ -302,6 +308,7 @@ type tools struct {
 	base   string
 	spaces []string
 	max    int
+	redact func(string) string
 }
 
 func (t *tools) search(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -319,8 +326,8 @@ func (t *tools) search(ctx context.Context, raw json.RawMessage) (string, error)
 		}
 		spaces = []string{a.Space}
 	}
-	days := clamp(a.Days, 30, 1, 365)
-	limit := clamp(a.Limit, 20, 1, 50)
+	days := atlassian.Clamp(a.Days, 30, 1, 365)
+	limit := atlassian.Clamp(a.Limit, 20, 1, 50)
 	// Built here, never taken from the model, so it cannot leave the allowed spaces.
 	cql := fmt.Sprintf(`space in (%s) AND type = page AND lastmodified >= now("-%dd")`, atlassian.QuoteList(spaces), days)
 	if strings.TrimSpace(a.Text) != "" {
@@ -362,29 +369,10 @@ func (t *tools) get(ctx context.Context, raw json.RawMessage) (string, error) {
 	if !slices.Contains(t.spaces, p.Space) {
 		return "", fmt.Errorf("page %s is in space %s, which is not allowed", a.ID, p.Space)
 	}
-	text := p.Text
-	if len(text) > t.max {
-		text = text[:t.max] + fmt.Sprintf("\n...[truncated at %d of %d bytes]", t.max, len(p.Text))
+	text := t.redact(p.Text)
+	if total := len(text); total > t.max {
+		text = textutil.Truncate(text, t.max) + fmt.Sprintf("\n...[truncated at %d of %d bytes]", t.max, total)
 	}
 	return fmt.Sprintf("%s (space %s, version %d, changed %s, untrusted content)\nURL: %s/pages/viewpage.action?pageId=%s\n\n%s\n",
 		p.Title, p.Space, p.Version, p.Modified, t.base, p.ID, text), nil
-}
-
-func clamp(v, def, lo, hi int) int {
-	if v == 0 {
-		v = def
-	}
-	return max(lo, min(hi, v))
-}
-
-type fnTool struct {
-	name, desc, schema string
-	call               func(context.Context, json.RawMessage) (string, error)
-}
-
-func (t *fnTool) Name() string            { return t.name }
-func (t *fnTool) Description() string     { return t.desc }
-func (t *fnTool) Schema() json.RawMessage { return json.RawMessage(t.schema) }
-func (t *fnTool) Call(ctx context.Context, a json.RawMessage) (string, error) {
-	return t.call(ctx, a)
 }

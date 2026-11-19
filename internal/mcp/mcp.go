@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
 	"sort"
 	"strings"
@@ -89,9 +90,26 @@ func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServe
 	// the Connect context, so cancelling it would close the session.
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.ResponseHeaderTimeout = 30 * time.Second
-	hc := &http.Client{Transport: &headerTransport{
-		base: base, static: srv.Headers, secrets: srv.SecretHeaders, prefixes: srv.HeaderPrefixes,
-	}}
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		return nil, fmt.Errorf("url: %w", err)
+	}
+	hc := &http.Client{
+		Transport: &headerTransport{
+			host: u.Host, base: base, static: srv.Headers, secrets: srv.SecretHeaders, prefixes: srv.HeaderPrefixes,
+		},
+		// The transport adds headers per request, so a redirect elsewhere
+		// would carry the API keys along. Stay on the configured host.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if !strings.EqualFold(req.URL.Host, u.Host) {
+				return fmt.Errorf("refusing redirect from %s to another host %s", u.Host, req.URL.Host)
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		},
+	}
 	var t sdk.Transport
 	switch srv.Transport {
 	case "sse":
@@ -136,7 +154,8 @@ func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServe
 
 func filter(name string, allow, deny []string) bool {
 	for _, p := range deny {
-		if ok, _ := path.Match(p, name); ok {
+		// A malformed deny pattern denies everything rather than nothing.
+		if ok, err := path.Match(p, name); ok || err != nil {
 			return false
 		}
 	}
@@ -151,9 +170,12 @@ func filter(name string, allow, deny []string) bool {
 	return false
 }
 
-// headerTransport sets headers on every request. Secret values are read per
-// request, so a rotated ServiceAccount token is used as soon as it changes.
+// headerTransport sets headers on every request to host. Secret values are
+// read per request, so a rotated ServiceAccount token is used as soon as it
+// changes. Requests to other hosts, e.g. an SSE endpoint the server points
+// elsewhere, get no headers.
 type headerTransport struct {
+	host     string
 	base     http.RoundTripper
 	static   map[string]string
 	secrets  map[string]*secret.Source
@@ -161,7 +183,7 @@ type headerTransport struct {
 }
 
 func (h *headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if len(h.static)+len(h.secrets) == 0 {
+	if len(h.static)+len(h.secrets) == 0 || !strings.EqualFold(r.URL.Host, h.host) {
 		return h.base.RoundTrip(r)
 	}
 	r = r.Clone(r.Context())

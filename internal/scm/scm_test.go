@@ -3,10 +3,14 @@ package scm_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/guardrails"
@@ -175,6 +179,116 @@ func TestBranchName(t *testing.T) {
 	for in, want := range cases {
 		if got := scm.BranchName("pb", in); got != want {
 			t.Errorf("BranchName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCIFilesAreNeverWritten(t *testing.T) {
+	_, tools, _, _ := setup(t, true, 1)
+	for _, p := range []string{".github/workflows/ci.yml", ".GITHUB/workflows/x.yml", "CODEOWNERS", ".gitlab-ci.yml", "sub/.git/config"} {
+		if _, err := call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": p, "content": "x"}); err == nil {
+			t.Errorf("write to %s must be refused", p)
+		}
+	}
+}
+
+func TestSymlinkIntoWorkflowsIsCaughtAtOpenPR(t *testing.T) {
+	tb, tools, prs, _ := setup(t, false, 1)
+	// Clone, then plant a symlink as if the repo contained one.
+	if _, err := call(t, tools["repo_list"], map[string]any{"repo": repo}); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := tb.Workspaces.Get(context.Background(), repo)
+	if err := os.MkdirAll(filepath.Join(r.Dir, ".github", "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".github/workflows", filepath.Join(r.Dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "link/evil.yml", "content": "on: pull_request"}); err != nil {
+		t.Fatal(err) // allowed by name; the file lands in .github/workflows
+	}
+	_, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b"})
+	if err == nil || !strings.Contains(err.Error(), ".github/workflows/evil.yml") {
+		t.Fatalf("open_pr must refuse the workflow change, got %v", err)
+	}
+	if len(prs.Created) != 0 {
+		t.Fatal("no PR may be created")
+	}
+}
+
+func TestClosedPRCooldown(t *testing.T) {
+	branch := "heraion/trivy-remediate/bump"
+	for _, tc := range []struct {
+		name        string
+		state       string
+		closedAgo   time.Duration
+		reopenAfter time.Duration
+		wantOpened  bool
+	}{
+		{"closed in window", scm.PRStateClosed, time.Hour, 7 * 24 * time.Hour, false},
+		{"closed after window", scm.PRStateClosed, 8 * 24 * time.Hour, 7 * 24 * time.Hour, true},
+		{"never reopen", scm.PRStateClosed, 365 * 24 * time.Hour, 0, false},
+		{"merged does not block", scm.PRStateMerged, time.Hour, 7 * 24 * time.Hour, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tb, tools, prs, _ := setup(t, false, 1)
+			tb.ReopenAfter = tc.reopenAfter
+			prs.Closed = map[string][]scm.PR{repo + " " + branch: {{Number: 9, URL: "https://git.example/pull/9", State: tc.state, Closed: time.Now().Add(-tc.closedAgo)}}}
+			_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
+			out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b", "branch": "bump"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opened := len(prs.Created) == 1; opened != tc.wantOpened {
+				t.Fatalf("opened=%v want %v: %s", opened, tc.wantOpened, out)
+			}
+			if !tc.wantOpened && (!tb.Opened[0].Rejected || !strings.Contains(out, "closed without merging")) {
+				t.Fatalf("rejection not reported: %q %+v", out, tb.Opened)
+			}
+		})
+	}
+}
+
+func TestOpenPRRefusesSecretInChange(t *testing.T) {
+	tb, tools, prs, _ := setup(t, false, 1)
+	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "deploy/values.yaml", "content": "image: app:1\ntoken: supersecret-token\n"})
+	_, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b"})
+	if err == nil || strings.Contains(err.Error(), "supersecret-token") {
+		t.Fatalf("want a refusal that does not echo the secret, got %v", err)
+	}
+	if len(prs.Created) != 0 {
+		t.Fatal("no PR may be created")
+	}
+	// The budget is returned.
+	if err := tb.Guard.ReservePR(); err != nil {
+		t.Fatalf("budget not released: %v", err)
+	}
+}
+
+func TestCloneURLResolver(t *testing.T) {
+	base := t.TempDir()
+	url := scmtest.NewRemote(t, base, "PROJ/app", map[string]string{"a": "b"})
+	ws := scm.NewWorkspaces(config.Git{CloneBaseURL: "https://wrong.example"}, t.TempDir()).
+		WithResolver(func(_ context.Context, repo string) (string, error) {
+			return url + "/" + repo + ".git", nil // e.g. https://bitbucket/scm/PROJ/app.git
+		})
+	t.Cleanup(ws.Close)
+	r, err := ws.Get(context.Background(), "PROJ/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := r.ReadFile("a", 10); got != "b" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestSameBranchKeyTwiceInOneRun(t *testing.T) {
+	_, tools, _, _ := setup(t, true, 2)
+	for i := range 2 {
+		_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": fmt.Sprintf("FROM alpine:3.2%d\n", i)})
+		if _, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b", "branch": "bump"}); err != nil {
+			t.Fatalf("call %d: %v", i, err)
 		}
 	}
 }

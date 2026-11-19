@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/muskats/heraion/internal/secret"
+	"github.com/muskats/heraion/internal/textutil"
 )
 
 // Client sends authenticated JSON requests to one Atlassian site.
@@ -134,9 +135,7 @@ func ErrorText(raw []byte) string {
 // `say "hi"` -> `say \"hi\"`. Long input is cut to 200 characters.
 func QuoteText(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > 200 {
-		s = s[:200]
-	}
+	s = textutil.Truncate(s, 200)
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s)
 }
 
@@ -148,4 +147,13 @@ func QuoteList(keys []string) string {
 		q[i] = `"` + k + `"`
 	}
 	return strings.Join(q, ", ")
+}
+
+// Clamp returns v within [lo, hi], or def when v is 0, e.g. for the days and
+// limit arguments of the search tools.
+func Clamp(v, def, lo, hi int) int {
+	if v == 0 {
+		v = def
+	}
+	return max(lo, min(hi, v))
 }

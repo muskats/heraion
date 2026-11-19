@@ -152,6 +152,12 @@ mcpServers:
 
 A stdio-only server needs a stdio-to-HTTP adapter in its image.
 
+Only connect servers you trust. A server's tool names and descriptions go to the model as
+they are, so a hostile server can try to steer it ("tool poisoning"). Narrow each server with
+`allowTools`, and remember that the guardrails (repo allowlist, write paths, budgets, no merge)
+hold whatever the model is told. Secret headers are sent only to the host in `url`; redirects
+to another host are refused.
+
 ## LLM providers
 
 `llm.baseURL` is any OpenAI-compatible endpoint with tool calling:

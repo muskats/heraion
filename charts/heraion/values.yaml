@@ -318,6 +318,15 @@ mcpServers:
           stateless = true
           toolsets = ["core"]
           cluster_provider_strategy = "in-cluster"
+          # RBAC refuses these too; this keeps them out if the rules are widened.
+          [[denied_resources]]
+          group = ""
+          version = "v1"
+          kind = "Secret"
+          [[denied_resources]]
+          group = ""
+          version = "v1"
+          kind = "ConfigMap"
       # Read-only. Secrets and ConfigMaps are not readable.
       rbac:
         clusterRules:

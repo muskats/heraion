@@ -6,8 +6,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -16,7 +18,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -26,10 +30,24 @@ const (
 	LabelHook      = "heraion.io/hook"
 	LabelTrigger   = "heraion.io/trigger"
 	ContainerName  = "worker"
-	EnvEvent       = "HERAION_EVENT"
+	EnvEvent       = "HERAION_EVENT" // read by `heraion run`; no longer set by the gateway
+	EnvEventFile   = "HERAION_EVENT_FILE"
 	EnvPlaybook    = "HERAION_PLAYBOOK"
 	maxJobNameBase = 52 // + "-" + 10 hash chars = 63
 )
+
+// The webhook body is passed in a Secret mounted at EventDir, not in an env
+// var: Linux limits a single env string to 128 KiB (MAX_ARG_STRLEN), and a
+// Secret keeps the untrusted payload out of the Job spec.
+const (
+	EventDir    = "/var/run/heraion/event"
+	EventKey    = "payload"
+	eventVolume = "heraion-event"
+)
+
+// EventSecretName is the Secret holding the payload of Job job, e.g.
+// "heraion-alertmanager-triage-3f9a1c2b7d-event".
+func EventSecretName(job string) string { return job + "-event" }
 
 // ErrAtCapacity means MaxActive worker Jobs are already running.
 var ErrAtCapacity = errors.New("maximum number of concurrent investigations reached")
@@ -44,6 +62,7 @@ type Dispatcher struct {
 	// MaxActive caps unfinished Jobs (0 = no limit). Replicas can race past
 	// it; use a ResourceQuota for a hard cap.
 	MaxActive int
+	Log       *slog.Logger // optional
 }
 
 // LoadTemplate reads a batch/v1 Job manifest and checks that it has a
@@ -110,10 +129,17 @@ func (d *Dispatcher) Build(playbook, hook string, event []byte) *batchv1.Job {
 	c.Args = []string{"run", "--playbook", playbook}
 	env := []corev1.EnvVar{{Name: EnvPlaybook, Value: playbook}}
 	if len(event) > 0 {
-		env = append(env, corev1.EnvVar{Name: EnvEvent, Value: string(event)})
+		env = append(env, corev1.EnvVar{Name: EnvEventFile, Value: EventDir + "/" + EventKey})
+		// 0444: the pod's runAsUser may differ from the file owner, and only
+		// this container mounts the volume.
+		mode := int32(0o444)
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{Name: eventVolume, VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: EventSecretName(job.Name), DefaultMode: &mode},
+		}})
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: eventVolume, MountPath: EventDir, ReadOnly: true})
 	}
 	for _, e := range c.Env {
-		if e.Name != EnvPlaybook && e.Name != EnvEvent {
+		if e.Name != EnvPlaybook && e.Name != EnvEvent && e.Name != EnvEventFile {
 			env = append(env, e)
 		}
 	}
@@ -121,10 +147,17 @@ func (d *Dispatcher) Build(playbook, hook string, event []byte) *batchv1.Job {
 	return job
 }
 
-// Dispatch creates the Job. created is false if this event was already
-// dispatched.
+// Dispatch creates the Job and, for a non-empty event, the Secret holding
+// it. created is false if this event was already dispatched.
 func (d *Dispatcher) Dispatch(ctx context.Context, playbook, hook string, event []byte) (name string, created bool, err error) {
 	job := d.Build(playbook, hook, event)
+	jobs := d.Client.BatchV1().Jobs(d.Namespace)
+	// A redelivery is a duplicate even when at capacity, so check first.
+	if _, err := jobs.Get(ctx, job.Name, metav1.GetOptions{}); err == nil {
+		return job.Name, false, nil
+	} else if !apierrors.IsNotFound(err) {
+		return "", false, fmt.Errorf("get job: %w", err)
+	}
 	if d.MaxActive > 0 {
 		n, err := d.active(ctx)
 		if err != nil {
@@ -134,14 +167,72 @@ func (d *Dispatcher) Dispatch(ctx context.Context, playbook, hook string, event 
 			return "", false, ErrAtCapacity
 		}
 	}
-	_, err = d.Client.BatchV1().Jobs(d.Namespace).Create(ctx, job, metav1.CreateOptions{})
+	ownSecret := false
+	if len(event) > 0 {
+		if ownSecret, err = d.createEventSecret(ctx, job, event); err != nil {
+			return "", false, err
+		}
+	}
+	newJob, err := jobs.Create(ctx, job, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
+		// Another replica won the race; its Job uses the same Secret name
+		// and content, so keep the Secret.
 		return job.Name, false, nil
 	}
 	if err != nil {
+		if ownSecret {
+			_ = d.secrets().Delete(context.WithoutCancel(ctx), EventSecretName(job.Name), metav1.DeleteOptions{})
+		}
 		return "", false, fmt.Errorf("create job: %w", err)
 	}
+	if len(event) > 0 {
+		// The Secret is deleted with the Job (ttlSecondsAfterFinished).
+		if err := d.ownSecret(ctx, newJob); err != nil && d.Log != nil {
+			d.Log.Warn("event secret not owned by its job; it will not be garbage-collected",
+				"secret", EventSecretName(job.Name), "err", err)
+		}
+	}
 	return job.Name, true, nil
+}
+
+func (d *Dispatcher) secrets() corev1client.SecretInterface {
+	return d.Client.CoreV1().Secrets(d.Namespace)
+}
+
+// createEventSecret reports whether it created the Secret; an existing one
+// (same name, so same payload) is reused.
+func (d *Dispatcher) createEventSecret(ctx context.Context, job *batchv1.Job, event []byte) (bool, error) {
+	labels := map[string]string{}
+	for k, v := range job.Labels {
+		labels[k] = v
+	}
+	immutable := true
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: EventSecretName(job.Name), Namespace: d.Namespace, Labels: labels},
+		Type:       corev1.SecretTypeOpaque,
+		Immutable:  &immutable,
+		Data:       map[string][]byte{EventKey: event},
+	}
+	_, err := d.secrets().Create(ctx, sec, metav1.CreateOptions{})
+	switch {
+	case err == nil:
+		return true, nil
+	case apierrors.IsAlreadyExists(err):
+		return false, nil
+	default:
+		return false, fmt.Errorf("create event secret: %w", err)
+	}
+}
+
+func (d *Dispatcher) ownSecret(ctx context.Context, job *batchv1.Job) error {
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"ownerReferences": []metav1.OwnerReference{{
+		APIVersion: "batch/v1", Kind: "Job", Name: job.Name, UID: job.UID,
+	}}}})
+	if err != nil {
+		return err
+	}
+	_, err = d.secrets().Patch(ctx, EventSecretName(job.Name), types.MergePatchType, patch, metav1.PatchOptions{})
+	return err
 }
 
 func (d *Dispatcher) active(ctx context.Context) (int, error) {

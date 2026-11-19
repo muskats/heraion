@@ -172,6 +172,21 @@ func (c *Client) backoff(attempt int, err error) time.Duration {
 	return base + rand.N(base/2+1)
 }
 
+// retryAfter parses Retry-After as seconds ("30") or an HTTP date
+// ("Wed, 21 Oct 2026 07:28:00 GMT"). 0: absent or unparsable.
+func retryAfter(v string, now time.Time) time.Duration {
+	if v == "" {
+		return 0
+	}
+	if s, err := strconv.Atoi(v); err == nil {
+		return time.Duration(s) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return t.Sub(now)
+	}
+	return 0
+}
+
 func (c *Client) do(ctx context.Context, body []byte) (*ChatResponse, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -201,8 +216,8 @@ func (c *Client) do(ctx context.Context, body []byte) (*ChatResponse, error) {
 			snippet = snippet[:2000] + "..."
 		}
 		apiErr := &APIError{StatusCode: resp.StatusCode, Body: snippet}
-		if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil {
-			return nil, &retryAfterError{APIError: apiErr, after: time.Duration(s) * time.Second}
+		if after := retryAfter(resp.Header.Get("Retry-After"), time.Now()); after > 0 {
+			return nil, &retryAfterError{APIError: apiErr, after: after}
 		}
 		return nil, apiErr
 	}

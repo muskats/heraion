@@ -48,7 +48,7 @@ func server(t *testing.T, cloud bool, pageSpace string) (*Client, *[]string) {
 
 func call(t *testing.T, c *Client, name string, args map[string]any) (string, error) {
 	t.Helper()
-	for _, tl := range Tools(c, c.BaseURL, []string{"RUN", "OPS"}, 0) {
+	for _, tl := range Tools(c, c.BaseURL, []string{"RUN", "OPS"}, 0, nil) {
 		if tl.Name() == name {
 			b, _ := json.Marshal(args)
 			return tl.Call(context.Background(), b)

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,8 @@ import (
 type Workspaces struct {
 	git  config.Git
 	root string
+	// resolve, if set, returns a repo's clone URL instead of CloneURL.
+	resolve func(ctx context.Context, repo string) (string, error)
 
 	mu    sync.Mutex
 	repos map[string]*Repo
@@ -48,6 +51,12 @@ func (w *Workspaces) auth() *githttp.BasicAuth {
 	return &githttp.BasicAuth{Username: w.git.Username, Password: tok}
 }
 
+// WithResolver makes Get ask f for clone URLs, e.g. NewCloneURLResolver.
+func (w *Workspaces) WithResolver(f func(ctx context.Context, repo string) (string, error)) *Workspaces {
+	w.resolve = f
+	return w
+}
+
 // CloneURL returns the clone URL for owner/name.
 func (w *Workspaces) CloneURL(repo string) string {
 	return w.git.CloneBaseURL + "/" + repo + ".git"
@@ -65,8 +74,16 @@ func (w *Workspaces) Get(ctx context.Context, repo string) (*Repo, error) {
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, err
 	}
+	cloneURL := w.CloneURL(repo)
+	if w.resolve != nil {
+		u, err := w.resolve(ctx, repo)
+		if err != nil {
+			return nil, fmt.Errorf("clone %s: look up clone URL: %w", repo, err)
+		}
+		cloneURL = u
+	}
 	g, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{
-		URL:          w.CloneURL(repo),
+		URL:          cloneURL,
 		Auth:         w.auth(),
 		Depth:        1,
 		SingleBranch: true,
@@ -123,10 +140,39 @@ func cleanPath(p string) (string, error) {
 	if !filepath.IsLocal(filepath.FromSlash(p)) && p != "." {
 		return "", fmt.Errorf("path %q escapes the repository", p)
 	}
-	if p == ".git" || strings.HasPrefix(p, ".git/") {
-		return "", errors.New("access to .git is not allowed")
+	for _, seg := range strings.Split(p, "/") {
+		if strings.EqualFold(seg, ".git") { // also submodules' .git
+			return "", errors.New("access to .git is not allowed")
+		}
 	}
 	return p, nil
+}
+
+// CleanPath validates a repo-relative path from the model, e.g.
+// "./deploy//values.yaml" -> "deploy/values.yaml".
+func CleanPath(p string) (string, error) { return cleanPath(p) }
+
+// Changed lists the paths that differ from the base commit, including
+// deletions and files that arrived through a symlink.
+func (r *Repo) Changed() ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	wt, err := r.g.Worktree()
+	if err != nil {
+		return nil, err
+	}
+	st, err := wt.Status()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(st))
+	for p, fs := range st {
+		if fs.Worktree != git.Unmodified || fs.Staging != git.Unmodified {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // ReadFile returns a file's content, capped at limit bytes.
@@ -232,6 +278,11 @@ func (r *Repo) Commit(branch, message string) (patch string, changed bool, err e
 		return "", false, nil
 	}
 	ref := plumbing.NewBranchReferenceName(branch)
+	// An earlier open_pr in this run may have left the local branch; we are
+	// on the base branch again (Reset), so start it over.
+	if err := r.g.Storer.RemoveReference(ref); err != nil {
+		return "", false, fmt.Errorf("reset branch %s: %w", branch, err)
+	}
 	if err := wt.Checkout(&git.CheckoutOptions{Branch: ref, Create: true, Keep: true}); err != nil {
 		return "", false, fmt.Errorf("create branch %s: %w", branch, err)
 	}

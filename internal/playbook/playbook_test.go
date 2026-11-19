@@ -108,3 +108,25 @@ func TestExamplesAreValid(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGuardrailDefaultsAndExplicitZero(t *testing.T) {
+	base := "name: x\ntrigger: {manual: true}\ntools: ['*']\nprompt: p\n"
+	p, err := Parse([]byte(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Guardrails.MaxPRs != 1 || p.Guardrails.MaxIssues != 1 || p.Guardrails.MaxFileBytes != 1<<20 ||
+		p.Guardrails.ReopenAfter.Hours() != 168 {
+		t.Errorf("defaults: %+v", p.Guardrails)
+	}
+	p, err = Parse([]byte(base + "guardrails: {maxPRs: 0, maxIssues: 0, reopenAfter: 0s, writePaths: ['deploy/**']}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Guardrails.MaxPRs != 0 || p.Guardrails.MaxIssues != 0 || p.Guardrails.ReopenAfter.Duration != 0 {
+		t.Errorf("explicit zero must be kept: %+v", p.Guardrails)
+	}
+	if _, err := Parse([]byte(base + "guardrails: {denyPaths: ['deploy/[']}\n")); err == nil {
+		t.Error("malformed path pattern must be rejected")
+	}
+}

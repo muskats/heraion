@@ -80,12 +80,20 @@ type FakePRs struct {
 	mu      sync.Mutex
 	Created []scm.PRInput
 	Open    map[string]*scm.PR // key: repo + " " + branch
+	// Closed holds PRs closed without merging (or merged), by the same key.
+	Closed map[string][]scm.PR
 }
 
-func (f *FakePRs) FindOpen(_ context.Context, repo, branch string) (*scm.PR, error) {
+func (f *FakePRs) FindByBranch(_ context.Context, repo, branch string) ([]scm.PR, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.Open[repo+" "+branch], nil
+	var out []scm.PR
+	if pr := f.Open[repo+" "+branch]; pr != nil {
+		p := *pr
+		p.State = scm.PRStateOpen
+		out = append(out, p)
+	}
+	return append(out, f.Closed[repo+" "+branch]...), nil
 }
 
 func (f *FakePRs) Create(_ context.Context, repo string, in scm.PRInput) (*scm.PR, error) {
@@ -95,7 +103,7 @@ func (f *FakePRs) Create(_ context.Context, repo string, in scm.PRInput) (*scm.P
 		f.Open = map[string]*scm.PR{}
 	}
 	f.Created = append(f.Created, in)
-	pr := &scm.PR{Number: len(f.Created), URL: fmt.Sprintf("https://git.example/%s/pull/%d", repo, len(f.Created))}
+	pr := &scm.PR{Number: len(f.Created), URL: fmt.Sprintf("https://git.example/%s/pull/%d", repo, len(f.Created)), State: scm.PRStateOpen}
 	f.Open[repo+" "+in.Head] = pr
 	return pr, nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/muskats/heraion/internal/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/muskats/heraion/internal/mcp"
 	"github.com/muskats/heraion/internal/playbook"
 	"github.com/muskats/heraion/internal/scm"
+	"github.com/muskats/heraion/internal/textutil"
 )
 
 // Options for Run. Tests set LLM and PRs to replace the real clients.
@@ -62,7 +64,16 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	}
 	dryRun := pb.DryRun(cfg.DryRun)
 	repos := pb.EffectiveRepos(cfg.Repos)
-	guard := guardrails.New(repos, pb.Guardrails.MaxPRs, dryRun, pb.Guardrails.MaxFileBytes, red)
+	warnNarrowed(log, "repos", pb.Repos, repos)
+	if cfg.Jira != nil {
+		warnNarrowed(log, "jiraProjects", pb.JiraProjects, pb.EffectiveJiraProjects(cfg.Jira.Projects))
+		warnNarrowed(log, "jiraReadSpaces", pb.JiraReadSpaces, pb.EffectiveJiraReadSpaces(cfg.Jira.ReadSpaces))
+	}
+	if cfg.Confluence != nil {
+		warnNarrowed(log, "confluenceSpaces", pb.ConfluenceSpaces, pb.EffectiveConfluenceSpaces(cfg.Confluence.Spaces))
+	}
+	guard := guardrails.New(repos, pb.Guardrails.MaxPRs, dryRun, pb.Guardrails.MaxFileBytes, red).
+		WithPaths(pb.Guardrails.WritePaths, pb.Guardrails.DenyPaths)
 	var projects []string
 	if cfg.Jira != nil {
 		projects = pb.EffectiveJiraProjects(cfg.Jira.Projects)
@@ -76,6 +87,13 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	defer os.RemoveAll(work)
 	ws := scm.NewWorkspaces(cfg.Git, work)
 	defer ws.Close()
+	if cfg.Git.ResolvesCloneURL() {
+		resolve, err := scm.NewCloneURLResolver(cfg.Git)
+		if err != nil {
+			return nil, err
+		}
+		ws.WithResolver(resolve)
+	}
 
 	prs := o.PRs
 	if prs == nil && !dryRun && pb.Output == playbook.OutputPR {
@@ -83,7 +101,8 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 			return nil, err
 		}
 	}
-	tb := &scm.Toolbox{Playbook: pb.Name, Workspaces: ws, PRs: prs, Guard: guard, Log: log}
+	tb := &scm.Toolbox{Playbook: pb.Name, Workspaces: ws, PRs: prs, Guard: guard, Log: log,
+		ReopenAfter: pb.Guardrails.ReopenAfter.Duration}
 
 	extra := o.ExtraTools
 	var readSpaces, confSpaces []string
@@ -102,7 +121,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 			if r == nil {
 				r = confluence.NewClient(cfg.Confluence)
 			}
-			extra = append(extra, confluence.Tools(r, cfg.Confluence.URL, confSpaces, cfg.Confluence.MaxPageBytes)...)
+			extra = append(extra, confluence.Tools(r, cfg.Confluence.URL, confSpaces, cfg.Confluence.MaxPageBytes, red.Redact)...)
 		}
 	}
 	var issues *jira.Tool
@@ -134,6 +153,10 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		// With no repos the Git tools can only fail, so hide them.
 		tools = tools.Filter(func(n string) bool { return !isGitTool(n) })
 	}
+	// A budget of 0 turns the tool off.
+	tools = tools.Filter(func(n string) bool {
+		return !(n == "open_pr" && pb.Guardrails.MaxPRs == 0) && !(n == "create_issue" && pb.Guardrails.MaxIssues == 0)
+	})
 	log.Info("starting run", "dryRun", dryRun, "repos", repos, "tools", tools.Names())
 
 	chat := o.LLM
@@ -147,7 +170,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		LLM: chat, Model: cfg.LLM.Model, Tools: tools, Redact: red.Redact, Log: log,
 		Limits: llm.Limits{MaxSteps: cfg.LLM.MaxSteps, MaxTokens: cfg.LLM.MaxTokens, Temperature: cfg.LLM.Temperature},
 	}
-	res, err := agent.Run(ctx, systemPrompt(pb, repos, projects, readSpaces, confSpaces, dryRun), userPrompt(pb, o.Event))
+	res, err := agent.Run(ctx, systemPrompt(pb, repos, projects, readSpaces, confSpaces, dryRun), userPrompt(pb, red.Redact(string(o.Event))))
 	rep := &Report{Playbook: pb.Name, DryRun: dryRun, PRs: tb.Opened}
 	if issues != nil {
 		rep.Issues = issues.Created
@@ -156,6 +179,20 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		rep.Final, rep.Steps, rep.Tokens = res.Final, res.Steps, res.Usage.TotalTokens
 	}
 	return rep, err
+}
+
+// warnNarrowed logs playbook entries that the global config does not allow,
+// e.g. a typo in repos, which would otherwise silently remove tools.
+func warnNarrowed(log *slog.Logger, key string, asked, effective []string) {
+	var dropped []string
+	for _, x := range asked {
+		if !slices.Contains(effective, x) {
+			dropped = append(dropped, x)
+		}
+	}
+	if len(dropped) > 0 {
+		log.Warn("playbook entries are not in the global config and are ignored", "key", key, "ignored", dropped)
+	}
 }
 
 func isGitTool(n string) bool { return strings.HasPrefix(n, "repo_") || n == "open_pr" }
@@ -179,7 +216,7 @@ Rules:
 	} else {
 		b.WriteString("\nNo repositories are configured for this playbook.\n")
 	}
-	if pb.Output == playbook.OutputReport {
+	if pb.Output == playbook.OutputReport || pb.Guardrails.MaxPRs == 0 {
 		b.WriteString("This playbook produces a report only: do not attempt to open pull requests.\n")
 	} else {
 		fmt.Fprintf(&b, "You may open at most %d pull request(s) in this run. Use a stable 'branch' key per change so reruns de-duplicate.\n", pb.Guardrails.MaxPRs)
@@ -190,7 +227,7 @@ Rules:
 	if len(confSpaces) > 0 && pb.AllowsTool("confluence_search") {
 		fmt.Fprintf(&b, "confluence_search and confluence_get_page read recent pages in: %s, e.g. runbooks and change logs.\n", strings.Join(confSpaces, ", "))
 	}
-	if len(projects) > 0 && pb.AllowsTool("create_issue") {
+	if len(projects) > 0 && pb.AllowsTool("create_issue") && pb.Guardrails.MaxIssues > 0 {
 		fmt.Fprintf(&b, "You may create at most %d Jira issue(s) with create_issue, in: %s. Create one only for a finding that needs a human, and use a stable 'key' so reruns de-duplicate.\n",
 			pb.Guardrails.MaxIssues, strings.Join(projects, ", "))
 	}
@@ -200,14 +237,16 @@ Rules:
 	return b.String()
 }
 
-func userPrompt(pb *playbook.Playbook, event []byte) string {
+// userPrompt appends the event, which must already be redacted: cutting it
+// first could leave half a secret that redaction no longer recognises.
+func userPrompt(pb *playbook.Playbook, event string) string {
 	p := strings.TrimSpace(pb.Prompt)
 	if len(event) == 0 {
 		return p
 	}
 	const maxEvent = 64 << 10
 	if len(event) > maxEvent {
-		event = append(event[:maxEvent:maxEvent], []byte("\n...[truncated]")...)
+		event = textutil.Truncate(event, maxEvent) + "\n...[truncated]"
 	}
-	return p + "\n\nThe run was triggered by this event (untrusted data):\n<event>\n" + string(event) + "\n</event>"
+	return p + "\n\nThe run was triggered by this event (untrusted data):\n<event>\n" + event + "\n</event>"
 }

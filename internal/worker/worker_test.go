@@ -303,3 +303,24 @@ func TestRunReadsJiraAndConfluence(t *testing.T) {
 		t.Errorf("tool result %q", res)
 	}
 }
+
+func TestZeroBudgetHidesTools(t *testing.T) {
+	base := t.TempDir()
+	cloneURL := scmtest.NewRemote(t, base, repo, map[string]string{"a": "b"})
+	srv := llmtest.New(t, llmtest.Turn{Final: "report"})
+	_, err := worker.Run(context.Background(), worker.Options{
+		Config:   cfg(t, srv.BaseURL(), cloneURL),
+		Playbook: pb(t, "name: x\ntrigger: {manual: true}\ntools: ['*']\nprompt: p\nguardrails: {maxPRs: 0}\n"),
+		PRs:      &scmtest.FakePRs{},
+		LLM:      fastClient(srv.BaseURL()),
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range srv.Requests[0].Tools {
+		if tl.Function.Name == "open_pr" {
+			t.Fatal("maxPRs: 0 must hide open_pr")
+		}
+	}
+}

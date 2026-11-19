@@ -151,6 +151,20 @@ func TestAllowList(t *testing.T) {
 	}
 }
 
+func TestMalformedDenyPatternDeniesAll(t *testing.T) {
+	url, _ := start(t, false)
+	servers := map[string]*config.MCPServer{"k8s": {URL: url, Transport: "streamable", DenyTools: []string{"[pods"},
+		Timeout: config.Duration{Duration: time.Second}}}
+	m, tools, err := mcp.Connect(context.Background(), servers, nil, "test", quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if len(tools) != 0 {
+		t.Fatalf("a malformed deny pattern must fail closed, got %d tools", len(tools))
+	}
+}
+
 func TestUnreachable(t *testing.T) {
 	dead := map[string]*config.MCPServer{"grafana": {URL: "http://127.0.0.1:1/mcp", Transport: "streamable"}}
 	m, tools, err := mcp.Connect(context.Background(), dead, nil, "test", quiet)
@@ -222,5 +236,39 @@ func TestBearerPrefixFromTokenFile(t *testing.T) {
 	mu.Unlock()
 	if first != "Bearer sa-token-1" {
 		t.Fatalf("Authorization = %q", first)
+	}
+}
+
+func TestSecretHeaderNotSentAcrossRedirect(t *testing.T) {
+	var mu sync.Mutex
+	var leaked []string
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		leaked = append(leaked, r.Header.Get("DD-API-KEY"))
+		mu.Unlock()
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(evil.Close)
+	// 127.0.0.1 vs localhost: a different host with the same listener.
+	evilURL := strings.Replace(evil.URL, "127.0.0.1", "localhost", 1)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evilURL+"/mcp", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+
+	servers := map[string]*config.MCPServer{"datadog": {
+		URL: redirector.URL + "/mcp", Transport: "streamable", Required: true,
+		Timeout:       config.Duration{Duration: time.Second},
+		SecretHeaders: map[string]*secret.Source{"DD-API-KEY": secret.Static("dd-secret-key")},
+	}}
+	if _, _, err := mcp.Connect(context.Background(), servers, nil, "test", quiet); err == nil {
+		t.Fatal("expected the cross-host redirect to fail")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, v := range leaked {
+		if v != "" {
+			t.Fatalf("secret header sent to the redirect target: %q", v)
+		}
 	}
 }

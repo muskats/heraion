@@ -78,6 +78,7 @@ ConfigMaps, a ServiceAccount, NetworkPolicies and the k8s MCP server.
 | Ingress, HPA, PDB | `gateway.ingress`, `.autoscaling`, `.podDisruptionBudget` enabled | `<release>-heraion-gateway` |
 | MCP server Deployment, Service, RBAC | `mcpServers.<name>.enabled` and `mode: deploy` | `<release>-heraion-mcp-<name>` |
 | Secret | Any credential has a `value` | `<release>-heraion-secrets` |
+| Secret per webhook Job | A webhook with a body arrives; deleted with its Job | `heraion-<playbook>-<hash>-event` |
 | ResourceQuota | `resourceQuota.enabled` | `<release>-heraion` |
 | Test Pod | `helm test` (`tests.enabled`) | `<release>-heraion-check` |
 
@@ -449,7 +450,11 @@ Notes:
 
 The `k8s` server is read-only: `read_only = true`, and a ClusterRole with `get`, `list` and
 `watch` on workloads, pods and their logs, events and Trivy reports. It cannot read Secrets or
-ConfigMaps. To limit it to one namespace:
+ConfigMaps: RBAC refuses them, and `denied_resources` in its config refuses them again if you
+widen the rules. Pod, Deployment and Job specs are readable, so a secret written as a literal
+`env` value there reaches the model unless the redactor recognises it (a configured credential
+or a known token shape). Use `valueFrom.secretKeyRef` in your workloads. To limit it to one
+namespace:
 
 ```yaml
 mcpServers:
@@ -498,10 +503,15 @@ litellm:
 |---|---|
 | Pods | Non-root (65532), read-only root filesystem, all capabilities dropped, seccomp `RuntimeDefault` |
 | Workers | No ServiceAccount token, `emptyDir` workspace, deny all ingress |
-| Gateway RBAC | `create` Jobs, plus `list` Jobs when `maxConcurrentJobs` > 0, in its own namespace |
+| Gateway RBAC | `get` and `create` Jobs, plus `list` when `maxConcurrentJobs` > 0; `create`, `patch`, `delete` Secrets (one per webhook Job, holding its payload); all in its own namespace |
 | MCP servers | Their own ServiceAccount; a token only if RBAC rules are set; ingress only from workers |
 | Secrets | Never in ConfigMaps; masked in prompts, PR text and logs |
-| Git | Pushes only `heraion/<playbook>/...` branches; no merge |
+| Git | Pushes only `heraion/<playbook>/...` branches; never CI or CODEOWNERS files; no merge |
+
+The gateway can create any Job, and Secrets, in its namespace. Install HeraIon in a namespace
+of its own. To pin what those Jobs may run, add a ValidatingAdmissionPolicy that only admits Jobs
+with the `heraion.io/playbook` label whose pod uses the worker ServiceAccount and the HeraIon
+image.
 
 Turn off parts that conflict with your platform with `rbac.create: false` (bring your own
 RBAC), `networkPolicy.enabled: false`, or role-level `podSecurityContext` and
@@ -607,7 +617,10 @@ rejected by [values.schema.json](values.schema.json).
 | `jira.token` | `{}` | Credential, see [Secrets](#secrets) |
 | `playbooks.<name>.jiraProjects` | `[]` | Narrows `jira.projects` for one playbook |
 | `playbooks.<name>.jiraReadSpaces` | `[]` | Narrows `jira.readSpaces` for one playbook |
-| `playbooks.<name>.guardrails.maxIssues` | `1` | New issues per run |
+| `playbooks.<name>.guardrails.maxIssues` | `1` | New issues per run; `0` removes `create_issue` |
+| `playbooks.<name>.guardrails.writePaths` | `[]` | Globs `repo_write_file` may write, e.g. `[Dockerfile, "deploy/**"]`; empty: all but denied |
+| `playbooks.<name>.guardrails.denyPaths` | `[]` | Added to the built-in denylist of CI and CODEOWNERS files |
+| `playbooks.<name>.guardrails.reopenAfter` | `168h` | A PR closed without merging blocks the same branch this long; `0s`: forever |
 
 ### Confluence
 
@@ -650,7 +663,7 @@ rejected by [values.schema.json](values.schema.json).
 | `gateway.hooks.<name>.secret` | `{}` | Credential |
 | `gateway.replicas` | `1` | Ignored with autoscaling |
 | `gateway.maxConcurrentJobs` | `5` | 0 = no limit |
-| `gateway.maxBodyBytes` | `262144` | Larger bodies get 413 |
+| `gateway.maxBodyBytes` | `262144` | Larger bodies get 413. Max 1032192: the body is stored in a Secret |
 | `gateway.strategy` | RollingUpdate, `maxUnavailable: 0` | |
 | `gateway.revisionHistoryLimit` | `5` | |
 | `gateway.terminationGracePeriodSeconds` | `30` | |
@@ -729,6 +742,13 @@ Go test renders the chart and loads the result with the binary's own config, pla
 Job-template loaders.
 
 ## Upgrading
+
+### To the release with event Secrets
+
+| Change | Action |
+|---|---|
+| The gateway passes a webhook body as a Secret mounted at `/var/run/heraion/event/payload` (`HERAION_EVENT_FILE`), not in `HERAION_EVENT`. Bodies over 128 KiB used to fail with "argument list too long" | Nothing with `rbac.create: true`. With your own RBAC, give the gateway `get` on Jobs and `create`, `patch`, `delete` on Secrets |
+| `gateway.maxBodyBytes` is capped at 1032192 | Lower larger values |
 
 ### To the release with the secret hierarchy
 

@@ -57,3 +57,72 @@ func TestRotatedSecretStaysMasked(t *testing.T) {
 		t.Fatalf("leak: %s", out)
 	}
 }
+
+func TestCheckWritePath(t *testing.T) {
+	g := New(nil, 1, false, 0, nil)
+	for _, p := range []string{
+		".github/workflows/ci.yml", ".GITHUB/Workflows/ci.yml", ".github/workflows",
+		"CODEOWNERS", "docs/CODEOWNERS", ".gitlab-ci.yml", "build/Jenkinsfile", ".gitmodules",
+	} {
+		if g.CheckWritePath(p) == nil {
+			t.Errorf("%s must be refused", p)
+		}
+	}
+	for _, p := range []string{"Dockerfile", "deploy/values.yaml", ".github/dependabot.yml", "workflows/ci.yml"} {
+		if err := g.CheckWritePath(p); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	g.WithPaths([]string{"Dockerfile", "deploy/**"}, []string{"deploy/secrets/**"})
+	if g.CheckWritePath("deploy/a/values.yaml") != nil || g.CheckWritePath("Dockerfile") != nil {
+		t.Error("allowed paths refused")
+	}
+	if g.CheckWritePath("main.go") == nil || g.CheckWritePath("deploy/secrets/x") == nil {
+		t.Error("allow/deny lists not applied")
+	}
+}
+
+func TestMatchPath(t *testing.T) {
+	cases := []struct {
+		pat, name string
+		want      bool
+	}{
+		{"**/values.yaml", "values.yaml", true},
+		{"**/values.yaml", "a/b/values.yaml", true},
+		{"deploy/*.yaml", "deploy/a.yaml", true},
+		{"deploy/*.yaml", "deploy/x/a.yaml", false},
+		{"a/**/b", "a/b", true},
+		{"a/**/b", "a/x/y/b", true},
+		{"[bad", "[bad", false},
+	}
+	for _, c := range cases {
+		if got := MatchPath(c.pat, c.name); got != c.want {
+			t.Errorf("MatchPath(%q, %q) = %v", c.pat, c.name, got)
+		}
+	}
+}
+
+func TestNewPatterns(t *testing.T) {
+	r := NewRedactor()
+	in := "jira=ATATT3xFfGF0abcdefghijklmnopqrstuvwxyz\n" +
+		"sa=eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0.c2lnbmF0dXJlLXZhbHVl\n" +
+		"db=postgres://app:hunter2@db.internal:5432/x"
+	out := r.Redact(in)
+	for _, leak := range []string{"ATATT3", "eyJhbGci", "hunter2"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("leaked %q in %s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "postgres://[REDACTED]@db.internal") {
+		t.Errorf("URL scheme and host must stay: %s", out)
+	}
+}
+
+func TestFindSecretLines(t *testing.T) {
+	r := NewRedactor("supersecret-token")
+	patch := "--- a/f\n+++ b/f\n context ghp_abcdefghijklmnopqrstuvwxyz0123\n-old supersecret-token\n+image: app:2\n+token: supersecret-token\n"
+	got := r.FindSecretLines(patch)
+	if len(got) != 1 || got[0] != "+token: [REDACTED]" {
+		t.Fatalf("got %q", got)
+	}
+}

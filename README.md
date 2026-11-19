@@ -106,7 +106,10 @@ prompt: |
   List VulnerabilityReports with fixable HIGH or CRITICAL CVEs and open one PR per repo
   with the minimal version bump.
 output: pr                             # "report" removes open_pr
-guardrails: { maxPRs: 3 }
+guardrails:
+  maxPRs: 3                            # default 1; 0 removes open_pr
+  writePaths: [Dockerfile, "deploy/**"]  # optional; CI files are always refused
+  reopenAfter: 168h                    # a rejected PR is not reopened for a week
 ```
 
 Built-in tools:
@@ -260,7 +263,7 @@ come from env vars. A secret in the file is rejected.
 | `HERAION_LLM_BASE_URL`, `HERAION_LLM_MODEL` | Override the file, e.g. `http://vllm:8000/v1` |
 | `HERAION_DRY_RUN` | `true` |
 | `HERAION_CONFIG`, `HERAION_PLAYBOOK`, `HERAION_EVENT_FILE` | Defaults for `heraion run` flags |
-| `HERAION_EVENT` | Webhook payload, set by the gateway |
+| `HERAION_EVENT` | Webhook payload inline (older gateways). The gateway now mounts it from a Secret owned by the Job and sets `HERAION_EVENT_FILE` |
 | `HERAION_MCP_<SERVER>_<HEADER>`, `HERAION_HOOK_<NAME>_SECRET` | e.g. `HERAION_MCP_DATADOG_DD_API_KEY` |
 
 ## Limits on what a run can do
@@ -269,13 +272,15 @@ come from env vars. A secret in the file is rejected.
 |---|---|
 | Repo allowlist | With `repos: [acme/web]`, a tool call for `acme/billing` fails |
 | File access | `../../etc/passwd`, `.git/config` and symlinks out of the clone are refused |
-| PR budget | With `maxPRs: 1`, a second `open_pr` call fails |
+| PR budget | With `maxPRs: 1`, a second `open_pr` call fails. `maxPRs: 0` removes `open_pr` |
+| Write paths | CI and ownership files (`.github/workflows/**`, `.gitlab-ci.yml`, `Jenkinsfile`, `CODEOWNERS`, ...) are never written, also not through a symlink. `writePaths: [Dockerfile, "deploy/**"]` narrows further, `denyPaths` adds patterns |
+| Rejected PRs | A PR closed without merging blocks a new PR on the same branch for `reopenAfter` (default `168h`; `0s`: forever) |
 | Jira projects | With `jira.projects: [OPS]`, an issue for `SEC` is refused |
 | Read spaces | With `jira.readSpaces: [CHG]` and `confluence.spaces: [RUNBOOKS]`, reading `HR-1` or a page in `HR` is refused |
-| Issue budget | With `maxIssues: 1`, a second new issue is refused |
+| Issue budget | With `maxIssues: 1`, a second new issue is refused. `maxIssues: 0` removes `create_issue` |
 | Branches | Only `heraion/<playbook>/...` branches are pushed |
-| Duplicates | An open PR on the same branch, or an open issue with the same fingerprint label, is reused |
-| Masking | `ghp_...`, `glpat-...`, `sk-...`, `Bearer ...`, PEM keys and configured secrets become `[REDACTED]` in prompts, PRs, issues and logs |
+| Duplicates | An open PR on the same branch of the same repo (not a fork), or an open issue with the same fingerprint label, is reused |
+| Masking | `ghp_...`, `glpat-...`, `sk-...`, `ATATT3...`, JWTs, `Bearer ...`, `user:password@` in URLs, PEM keys and configured secrets become `[REDACTED]` in prompts, PRs, issues and logs. `open_pr` refuses a change that adds such a value to a file |
 | Run size | `llm.maxSteps`, `llm.maxTokens`, `llm.timeout` |
 | No merge | The code has no merge call |
 

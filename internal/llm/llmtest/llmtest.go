@@ -17,6 +17,8 @@ type Turn struct {
 	Calls  []Call
 	Final  string
 	Status int // non-zero: reply with this HTTP status instead
+	// FinishReason defaults to "stop", e.g. "length" for a cut-off answer.
+	FinishReason string
 }
 
 // Call is a scripted tool call; Args is marshalled to JSON.
@@ -87,9 +89,13 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		msg["tool_calls"] = calls
 	}
+	finish := turn.FinishReason
+	if finish == "" {
+		finish = "stop"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"choices": []any{map[string]any{"message": msg, "finish_reason": "stop"}},
+		"choices": []any{map[string]any{"message": msg, "finish_reason": finish}},
 		"usage":   map[string]int{"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
 	})
 }

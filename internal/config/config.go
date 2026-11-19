@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -182,13 +183,30 @@ type Git struct {
 	// Endpoint is the API URL, e.g. https://git.example.com. Empty means SaaS.
 	Endpoint string `json:"endpoint,omitempty"`
 	// CloneBaseURL builds clone URLs as <base>/<owner>/<repo>.git. Defaults
-	// to Endpoint, or https://github.com for GitHub.
+	// to Endpoint, or https://github.com for GitHub. For stash,
+	// bitbucketserver and azure, unset means: ask the API (see
+	// ResolvesCloneURL).
 	CloneBaseURL string `json:"cloneBaseURL,omitempty"`
 	// Username for clone and push; the token is the password.
 	Username    string         `json:"username,omitempty"`
 	AuthorName  string         `json:"authorName,omitempty"`
 	AuthorEmail string         `json:"authorEmail,omitempty"`
 	Token       *secret.Source `json:"-"` // HERAION_GIT_TOKEN[_FILE|_FALLBACK]
+}
+
+// ResolvesCloneURL reports whether clone URLs come from the Git server's API
+// (cloneBaseURL unset, and a provider whose URLs are not
+// <base>/<owner>/<repo>.git: Bitbucket Server uses /scm/<project>/<repo>.git,
+// Azure DevOps <org>/<project>/_git/<repo>).
+func (g Git) ResolvesCloneURL() bool {
+	if g.CloneBaseURL != "" {
+		return false
+	}
+	switch g.Provider {
+	case "stash", "bitbucketserver", "azure":
+		return true
+	}
+	return false
 }
 
 // Duration is a time.Duration that unmarshals from strings like "15m".
@@ -279,7 +297,7 @@ func (c *Config) applyDefaults() {
 	if c.Git.Provider == "" {
 		c.Git.Provider = "github"
 	}
-	if c.Git.CloneBaseURL == "" {
+	if c.Git.CloneBaseURL == "" && !c.Git.ResolvesCloneURL() {
 		if c.Git.Endpoint == "" && c.Git.Provider == "github" {
 			c.Git.CloneBaseURL = "https://github.com"
 		} else if c.Git.Endpoint == "" && c.Git.Provider == "gitlab" {
@@ -359,6 +377,10 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// MaxBodyBytesLimit is the largest gateway.maxBodyBytes: a Secret holds at
+// most 1 MiB, minus room for its metadata.
+const MaxBodyBytesLimit = 1<<20 - 16<<10
+
 // Hook auth modes.
 const (
 	HookAuthHMAC  = "hmac-sha256"
@@ -409,9 +431,11 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("git.endpoint: %w", err))
 		}
 	}
-	if c.Git.CloneBaseURL == "" {
+	if c.Git.CloneBaseURL == "" && !c.Git.ResolvesCloneURL() {
 		errs = append(errs, errors.New("git.cloneBaseURL (or git.endpoint) is required for this provider"))
-	} else if err := checkURL(c.Git.CloneBaseURL); err != nil {
+	} else if c.Git.CloneBaseURL == "" {
+		// The clone URL is looked up through the API.
+	} else if err := checkURLSchemes(c.Git.CloneBaseURL, true); err != nil {
 		errs = append(errs, fmt.Errorf("git.cloneBaseURL: %w", err))
 	}
 	for _, r := range c.Repos {
@@ -470,14 +494,24 @@ func (c *Config) Validate() error {
 		if m.Transport != "streamable" && m.Transport != "sse" {
 			errs = append(errs, fmt.Errorf("mcpServers.%s.transport %q must be streamable or sse", name, m.Transport))
 		}
+		for _, p := range append(slices.Clone(m.AllowTools), m.DenyTools...) {
+			if _, err := path.Match(p, ""); err != nil {
+				errs = append(errs, fmt.Errorf("mcpServers.%s: tool pattern %q: %w", name, p, err))
+			}
+		}
 		// Empty secret env vars are checked by the pod that uses them: the
 		// gateway has no MCP secrets and workers have no hook secrets.
+	}
+	// The body is stored in a Secret, whose data is capped at 1 MiB.
+	if c.Gateway.MaxBodyBytes < 0 || c.Gateway.MaxBodyBytes > MaxBodyBytesLimit {
+		errs = append(errs, fmt.Errorf("gateway.maxBodyBytes must be between 1 and %d", MaxBodyBytesLimit))
 	}
 	for name, h := range c.Gateway.Hooks {
 		if !serverNameRE.MatchString(name) {
 			errs = append(errs, fmt.Errorf("gateway.hooks: name %q must be a lowercase DNS label", name))
 		}
 		if h == nil {
+			errs = append(errs, fmt.Errorf("gateway.hooks.%s: empty", name))
 			continue
 		}
 		if h.Auth != HookAuthHMAC && h.Auth != HookAuthToken {
@@ -504,12 +538,17 @@ func ValidateRepoName(r string) error {
 	return nil
 }
 
-func checkURL(s string) error {
+// checkURL accepts http and https URLs.
+func checkURL(s string) error { return checkURLSchemes(s, false) }
+
+// checkURLSchemes also accepts file:// URLs when allowFile is set (local
+// bare repositories as git.cloneBaseURL, e.g. in tests).
+func checkURLSchemes(s string, allowFile bool) error {
 	u, err := url.Parse(s)
 	if err != nil {
 		return err
 	}
-	if u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "file" {
+	if u.Scheme != "http" && u.Scheme != "https" && !(allowFile && u.Scheme == "file") {
 		return fmt.Errorf("unsupported scheme %q", u.Scheme)
 	}
 	if u.Scheme != "file" && u.Host == "" {

@@ -191,22 +191,22 @@ func ReadTools(r Reader, baseURL string, spaces []string) []llm.Tool {
 	rt := &readTools{r: r, base: strings.TrimRight(baseURL, "/"), spaces: spaces}
 	enum, _ := json.Marshal(spaces)
 	return []llm.Tool{
-		&fnTool{
-			name: "jira_search",
-			desc: "List Jira issues recently created or changed in the allowed spaces, newest first. " +
+		&llm.FuncTool{
+			ToolName: "jira_search",
+			Desc: "List Jira issues recently created or changed in the allowed spaces, newest first. " +
 				"Use it to learn about recent changes, incidents and known problems.",
-			schema: `{"type":"object","properties":{
+			Params: `{"type":"object","properties":{
 				"space":{"type":"string","enum":` + string(enum) + `,"description":"One space; omit for all allowed spaces"},
 				"days":{"type":"integer","minimum":1,"maximum":90,"description":"Look back this many days, default 7"},
 				"text":{"type":"string","description":"Optional full-text filter, e.g. 'ingress'"},
 				"limit":{"type":"integer","minimum":1,"maximum":50,"description":"Default 20"}}}`,
-			call: rt.search,
+			Fn: rt.search,
 		},
-		&fnTool{
-			name:   "jira_get_issue",
-			desc:   "Read one Jira issue from the allowed spaces: fields, description and the last comments.",
-			schema: `{"type":"object","properties":{"key":{"type":"string","description":"e.g. CHG-42"}},"required":["key"]}`,
-			call:   rt.get,
+		&llm.FuncTool{
+			ToolName: "jira_get_issue",
+			Desc:     "Read one Jira issue from the allowed spaces: fields, description and the last comments.",
+			Params:   `{"type":"object","properties":{"key":{"type":"string","description":"e.g. CHG-42"}},"required":["key"]}`,
+			Fn:       rt.get,
 		},
 	}
 }
@@ -232,8 +232,8 @@ func (t *readTools) search(ctx context.Context, raw json.RawMessage) (string, er
 		}
 		spaces = []string{a.Space}
 	}
-	a.Days = clamp(a.Days, 7, 1, 90)
-	a.Limit = clamp(a.Limit, 20, 1, 50)
+	a.Days = atlassian.Clamp(a.Days, 7, 1, 90)
+	a.Limit = atlassian.Clamp(a.Limit, 20, 1, 50)
 	// Built here, never taken from the model, so it cannot leave the allowed spaces.
 	jql := fmt.Sprintf("project in (%s) AND updated >= -%dd", atlassian.QuoteList(spaces), a.Days)
 	if strings.TrimSpace(a.Text) != "" {
@@ -284,28 +284,9 @@ func (t *readTools) get(ctx context.Context, raw json.RawMessage) (string, error
 	return b.String(), nil
 }
 
-func clamp(v, def, lo, hi int) int {
-	if v == 0 {
-		v = def
-	}
-	return max(lo, min(hi, v))
-}
-
 func orDash(s string) string {
 	if s == "" {
 		return "-"
 	}
 	return s
-}
-
-type fnTool struct {
-	name, desc, schema string
-	call               func(context.Context, json.RawMessage) (string, error)
-}
-
-func (t *fnTool) Name() string            { return t.name }
-func (t *fnTool) Description() string     { return t.desc }
-func (t *fnTool) Schema() json.RawMessage { return json.RawMessage(t.schema) }
-func (t *fnTool) Call(ctx context.Context, a json.RawMessage) (string, error) {
-	return t.call(ctx, a)
 }

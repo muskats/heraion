@@ -162,3 +162,45 @@ func TestConfluenceDefaults(t *testing.T) {
 		t.Error("jira without projects and readSpaces must fail")
 	}
 }
+
+func TestNilHookAndBadToolPatternRejected(t *testing.T) {
+	_, err := Load(write(t, `
+llm: {baseURL: http://x, model: m}
+mcpServers:
+  k8s: {url: http://k8s/mcp, denyTools: ["[pods"]}
+gateway:
+  hooks:
+    empty:
+`))
+	if err == nil {
+		t.Fatal("expected errors")
+	}
+	for _, want := range []string{"gateway.hooks.empty: empty", `tool pattern "[pods"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
+	}
+}
+
+func TestStashResolvesCloneURL(t *testing.T) {
+	c, err := Load(write(t, "llm: {baseURL: http://x, model: m}\ngit: {provider: stash, endpoint: https://bitbucket.example}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Git.CloneBaseURL != "" || !c.Git.ResolvesCloneURL() {
+		t.Fatalf("stash must look clone URLs up, got base %q", c.Git.CloneBaseURL)
+	}
+	c, err = Load(write(t, "llm: {baseURL: http://x, model: m}\ngit: {provider: stash, endpoint: https://b.example, cloneBaseURL: https://b.example/scm}\n"))
+	if err != nil || c.Git.ResolvesCloneURL() {
+		t.Fatalf("an explicit cloneBaseURL wins: %v", err)
+	}
+}
+
+func TestFileURLOnlyForCloneBase(t *testing.T) {
+	if _, err := Load(write(t, "llm: {baseURL: file:///etc, model: m}\n")); err == nil {
+		t.Error("file:// must be refused for llm.baseURL")
+	}
+	if _, err := Load(write(t, "llm: {baseURL: http://x, model: m}\ngit: {provider: gitea, cloneBaseURL: file:///repos}\n")); err != nil {
+		t.Errorf("file:// cloneBaseURL: %v", err)
+	}
+}

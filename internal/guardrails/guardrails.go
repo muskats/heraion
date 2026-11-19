@@ -24,6 +24,8 @@ type Guard struct {
 	projects  []string
 	maxIssues int
 
+	allowPaths, denyPaths []string
+
 	mu     sync.Mutex
 	prs    int
 	issues int
@@ -123,15 +125,24 @@ func (g *Guard) ReleasePR() {
 const mask = "[REDACTED]"
 
 // Token shapes masked even when the value is unknown, e.g. "ghp_...",
-// "glpat-...", "Bearer ...".
-var patterns = []*regexp.Regexp{
-	regexp.MustCompile(`\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`),
-	regexp.MustCompile(`\bglpat-[A-Za-z0-9_\-]{20,}\b`),
-	regexp.MustCompile(`\bsk-(ant-|proj-)?[A-Za-z0-9_\-]{20,}\b`),
-	regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9\-]{10,}\b`),
-	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
-	regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/\-]{16,}=*`),
-	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`),
+// "glpat-...", "Bearer ...". repl is the replacement ($1 keeps a group).
+var patterns = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	{regexp.MustCompile(`\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`), mask},
+	{regexp.MustCompile(`\bglpat-[A-Za-z0-9_\-]{20,}\b`), mask},
+	{regexp.MustCompile(`\bsk-(ant-|proj-)?[A-Za-z0-9_\-]{20,}\b`), mask},
+	{regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9\-]{10,}\b`), mask},
+	{regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`), mask},
+	// Atlassian API tokens, as used for Jira and Confluence.
+	{regexp.MustCompile(`\bATATT3[A-Za-z0-9_\-=]{20,}`), mask},
+	// JWTs without "Bearer", e.g. a ServiceAccount token in a log line.
+	{regexp.MustCompile(`\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}`), mask},
+	{regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/\-]{16,}=*`), mask},
+	// user:password in a URL, e.g. postgres://app:hunter2@db -> postgres://[REDACTED]@db.
+	{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@`), "${1}" + mask + "@"},
+	{regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`), mask},
 }
 
 // Redactor masks known secret values and common credential patterns.
@@ -191,7 +202,23 @@ func (r *Redactor) Redact(s string) string {
 	}
 	r.mu.RUnlock()
 	for _, p := range patterns {
-		s = p.ReplaceAllString(s, mask)
+		s = p.re.ReplaceAllString(s, p.repl)
 	}
 	return s
+}
+
+// FindSecretLines returns the lines added by a unified diff that hold a
+// secret, e.g. "+token: ghp_...", masked. Context and removed lines are
+// ignored: they are already in the repository.
+func (r *Redactor) FindSecretLines(patch string) []string {
+	var out []string
+	for _, l := range strings.Split(patch, "\n") {
+		if !strings.HasPrefix(l, "+") || strings.HasPrefix(l, "+++ ") {
+			continue
+		}
+		if m := r.Redact(l); m != l {
+			out = append(out, m)
+		}
+	}
+	return out
 }

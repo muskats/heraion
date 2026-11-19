@@ -296,6 +296,18 @@
               "maxIssues": {
                 "type": "integer",
                 "minimum": 0
+              },
+              "writePaths": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "denyPaths": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "reopenAfter": {
+                "type": "string",
+                "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$|^0$"
               }
             }
           },
@@ -472,7 +484,8 @@
         },
         "maxBodyBytes": {
           "type": "integer",
-          "minimum": 1024
+          "minimum": 1024,
+          "maximum": 1032192
         },
         "hooks": {
           "type": "object",

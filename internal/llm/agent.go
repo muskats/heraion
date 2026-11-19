@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/muskats/heraion/internal/textutil"
 )
 
 // Tool is a built-in Git tool or an MCP tool.
@@ -164,24 +166,32 @@ func (a *Agent) Run(ctx context.Context, system, user string) (*Result, error) {
 		res.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		res.Usage.TotalTokens += resp.Usage.TotalTokens
 
-		msg := resp.Choices[0].Message
+		choice := resp.Choices[0]
+		msg := choice.Message
 		msg.Role = "assistant"
 		msgs = append(msgs, msg)
 
 		if len(msg.ToolCalls) == 0 {
 			res.Final = msg.Text()
+			if choice.FinishReason == "length" {
+				return res, fmt.Errorf("%w: the model's answer was cut off at its output limit", ErrLimit)
+			}
 			log.Info("agent finished", "steps", res.Steps, "tokens", res.Usage.TotalTokens)
 			return res, nil
 		}
-		for _, tc := range msg.ToolCalls {
-			out := a.callTool(ctx, log, tools, tc)
-			if len(out) > maxResult {
-				out = out[:maxResult] + fmt.Sprintf("\n...[truncated, %d bytes total]", len(out))
-			}
-			msgs = append(msgs, Message{Role: "tool", ToolCallID: tc.ID, Content: ptr(redact(out))})
-		}
+		// Check the budget before running tools: a call such as open_pr must
+		// not happen once the run is over budget.
 		if a.Limits.MaxTokens > 0 && res.Usage.TotalTokens >= a.Limits.MaxTokens {
 			return res, fmt.Errorf("%w: used %d of %d tokens", ErrLimit, res.Usage.TotalTokens, a.Limits.MaxTokens)
+		}
+		for _, tc := range msg.ToolCalls {
+			// Redact before truncating, so a secret cut in half at the
+			// limit cannot slip through as an unrecognisable prefix.
+			out := redact(a.callTool(ctx, log, tools, tc))
+			if len(out) > maxResult {
+				out = textutil.Truncate(out, maxResult) + fmt.Sprintf("\n...[truncated, %d bytes total]", len(out))
+			}
+			msgs = append(msgs, Message{Role: "tool", ToolCallID: tc.ID, Content: ptr(out)})
 		}
 	}
 	return res, fmt.Errorf("%w: %d steps without a final answer", ErrLimit, a.Limits.MaxSteps)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/llm"
+	"github.com/muskats/heraion/internal/textutil"
 )
 
 // API is what the tool needs from a Jira client. *Client implements it.
@@ -63,7 +64,7 @@ func (t *Tool) Schema() json.RawMessage {
 		"priority":{"type":"string","description":"e.g. High. Leave empty for the project default"},
 		"labels":{"type":"array","items":{"type":"string"},"description":"Extra labels, no spaces"},
 		"key":{"type":"string","description":"Stable key for this finding, e.g. 'oomkilled-payments-api'. Reusing a key de-duplicates."}},
-		"required":["project","summary","description"]}`)
+		"required":["project","summary","description","key"]}`)
 }
 
 type args struct {
@@ -76,12 +77,14 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return "", fmt.Errorf("invalid arguments: %w", err)
 	}
-	a.Summary = strings.TrimSpace(strings.ReplaceAll(a.Summary, "\n", " "))
+	red := t.Guard.Redactor()
+	// Redact before the length cut, so a secret at the cut is masked whole.
+	a.Summary = red.Redact(strings.TrimSpace(strings.ReplaceAll(a.Summary, "\n", " ")))
 	if a.Summary == "" {
 		return "", errors.New("summary is required")
 	}
 	if len(a.Summary) > 255 { // Jira's summary limit
-		a.Summary = a.Summary[:252] + "..."
+		a.Summary = textutil.Truncate(a.Summary, 252) + "..."
 	}
 	if err := t.Guard.CheckProject(a.Project); err != nil {
 		return "", err
@@ -93,14 +96,16 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 	}
 	key := a.Key
 	if key == "" {
+		// The summary usually changes between runs, so reruns may not find
+		// this issue again.
+		t.Log.Warn("create_issue without key: de-duplicating on the summary", "summary", a.Summary)
 		key = a.Summary
 	}
 	fp := Fingerprint(t.Playbook, a.Project, key)
-	red := t.Guard.Redactor()
 	in := NewIssue{
 		Project:     a.Project,
 		Type:        firstNonEmpty(a.IssueType, t.IssueType, "Task"),
-		Summary:     red.Redact(a.Summary),
+		Summary:     a.Summary,
 		Description: red.Redact(a.Description) + "\n\nCreated by HeraIon playbook " + t.Playbook + ".",
 		Priority:    a.Priority,
 		Labels:      dedupe(append(append(append([]string{}, t.Labels...), a.Labels...), fp, "heraion-"+t.Playbook)),
