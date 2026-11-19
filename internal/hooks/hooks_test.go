@@ -17,6 +17,7 @@ import (
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/dispatch"
 	"github.com/muskats/heraion/internal/playbook"
+	"github.com/muskats/heraion/internal/secret"
 )
 
 type fakeDispatch struct {
@@ -48,8 +49,8 @@ var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func gateway() config.Gateway {
 	return config.Gateway{MaxBodyBytes: 100, Hooks: map[string]*config.Hook{
-		"alertmanager": {Auth: config.HookAuthToken, Header: "Authorization", Secret: "am-secret"},
-		"gitea":        {Auth: config.HookAuthHMAC, Header: "X-Gitea-Signature", Secret: "gitea-secret"},
+		"alertmanager": {Auth: config.HookAuthToken, Header: "Authorization", Secret: secret.Static("am-secret")},
+		"gitea":        {Auth: config.HookAuthHMAC, Header: "X-Gitea-Signature", Secret: secret.Static("gitea-secret")},
 	}}
 }
 
@@ -136,7 +137,7 @@ func TestCapacityReturns429(t *testing.T) {
 
 func TestStartupValidation(t *testing.T) {
 	gw := gateway()
-	gw.Hooks["alertmanager"].Secret = ""
+	gw.Hooks["alertmanager"].Secret = secret.FromMap("HERAION_HOOK_ALERTMANAGER_SECRET", nil)
 	_, err := New(gw, pbs(t, "name: triage\ntrigger: {webhook: alertmanager}\ntools: ['*']\nprompt: p\n"), &fakeDispatch{}, quiet)
 	if err == nil {
 		t.Fatal("empty secret must fail startup")

@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/muskats/heraion/internal/secret"
 )
 
 // Guard enforces the limits of a single run. It is safe for concurrent use.
@@ -92,8 +94,9 @@ var patterns = []*regexp.Regexp{
 
 // Redactor masks known secret values and common credential patterns.
 type Redactor struct {
-	mu     sync.RWMutex
-	values []string
+	mu      sync.RWMutex
+	values  []string
+	sources []*secret.Source
 }
 
 // NewRedactor masks the given values. Values under 6 characters are ignored,
@@ -102,6 +105,18 @@ func NewRedactor(secrets ...string) *Redactor {
 	r := &Redactor{}
 	r.Add(secrets...)
 	return r
+}
+
+// AddSources masks the current value of each source. Values seen once stay
+// masked, so a token that was just rotated out is still hidden.
+func (r *Redactor) AddSources(srcs ...*secret.Source) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range srcs {
+		if s != nil {
+			r.sources = append(r.sources, s)
+		}
+	}
 }
 
 // Add registers more secret values.
@@ -120,6 +135,14 @@ func (r *Redactor) Add(secrets ...string) {
 
 // Redact returns s with secrets masked.
 func (r *Redactor) Redact(s string) string {
+	r.mu.RLock()
+	srcs := r.sources
+	r.mu.RUnlock()
+	for _, src := range srcs {
+		if v := src.String(); v != "" {
+			r.Add(v) // no-op when already known
+		}
+	}
 	r.mu.RLock()
 	for _, v := range r.values {
 		s = strings.ReplaceAll(s, v, mask)

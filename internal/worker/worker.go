@@ -50,7 +50,8 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	log = log.With("playbook", pb.Name)
 	red := o.Redactor
 	if red == nil {
-		red = guardrails.NewRedactor(cfg.Secrets()...)
+		red = guardrails.NewRedactor()
+		red.AddSources(cfg.Secrets()...)
 	}
 	dryRun := pb.DryRun(cfg.DryRun)
 	repos := pb.EffectiveRepos(cfg.Repos)

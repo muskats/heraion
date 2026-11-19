@@ -1,0 +1,56 @@
+# No static credentials in the cluster: the pods' ServiceAccount identity is used.
+#
+#   - LLM key and Git token: AWS Secrets Manager via the Secrets Store CSI driver.
+#     The driver authenticates as the ServiceAccount through IRSA.
+#   - Vault MCP server: a projected ServiceAccount token (audience "vault"),
+#     sent as "Authorization: Bearer <token>" and rotated by the kubelet.
+#   - A literal fallback is not set, so a missing secret fails `helm test`.
+#
+# Needs: secrets-store-csi-driver and its AWS provider installed in the cluster.
+llm:
+  baseURL: https://api.openai.com/v1
+  model: gpt-4.1
+  apiKey: { csiKey: llm-api-key }
+git:
+  provider: github
+  token: { csiKey: git-token }
+repos: [acme/web]
+
+secrets:
+  csi:
+    enabled: true
+    secretProviderClass: heraion-aws
+
+worker:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/heraion-worker
+
+playbooks:
+  trivy-remediate: { enabled: true }
+
+mcpServers:
+  k8s: { enabled: true }
+  vault:
+    enabled: true
+    mode: external
+    url: https://vault-mcp.example.internal/mcp
+    secretHeaders:
+      Authorization:
+        serviceAccountToken: { audience: vault, expirationSeconds: 3600 }
+
+extraObjects:
+  - apiVersion: secrets-store.csi.x-k8s.io/v1
+    kind: SecretProviderClass
+    metadata:
+      name: heraion-aws
+    spec:
+      provider: aws
+      parameters:
+        objects: |
+          - objectName: "heraion/llm-api-key"
+            objectType: "secretsmanager"
+            objectAlias: "llm-api-key"
+          - objectName: "heraion/git-token"
+            objectType: "secretsmanager"
+            objectAlias: "git-token"

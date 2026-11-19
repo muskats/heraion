@@ -1,0 +1,42 @@
+suite: images, namespace, helm test
+set:
+  llm: { baseURL: http://x, model: m }
+  playbooks:
+    trivy-remediate: { enabled: true }
+tests:
+  - it: global.imageRegistry replaces the registry of the HeraIon image
+    template: worker.yaml
+    documentSelector: { path: kind, value: CronJob }
+    set:
+      global.imageRegistry: mirror.example.com
+      image.tag: "1.2.3"
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          value: mirror.example.com/muskats/heraion:1.2.3
+  - it: digest wins over tag
+    template: worker.yaml
+    documentSelector: { path: kind, value: CronJob }
+    set:
+      image.digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    asserts:
+      - matchRegex:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          pattern: "^ghcr.io/muskats/heraion@sha256:0+$"
+  - it: namespaceOverride is used for every object
+    template: worker.yaml
+    set:
+      namespaceOverride: other
+    asserts:
+      - equal: { path: metadata.namespace, value: other }
+  - it: helm test pod runs heraion check with the worker spec
+    template: test-check.yaml
+    asserts:
+      - equal: { path: "metadata.annotations[\"helm.sh/hook\"]", value: test }
+      - equal: { path: "spec.containers[0].args", value: [check, --connect] }
+      - equal: { path: "spec.automountServiceAccountToken", value: false }
+  - it: chart Secret changes roll the pods
+    template: worker.yaml
+    documentSelector: { path: kind, value: CronJob }
+    asserts:
+      - exists: { path: "spec.jobTemplate.spec.template.metadata.annotations[\"checksum/secret\"]" }

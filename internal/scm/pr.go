@@ -10,6 +10,7 @@ import (
 	"github.com/jenkins-x/go-scm/scm/factory"
 
 	"github.com/muskats/heraion/internal/config"
+	"github.com/muskats/heraion/internal/secret"
 )
 
 // BranchPrefix starts every branch HeraIon pushes, e.g.
@@ -37,11 +38,22 @@ type PRService interface {
 // NewPRService uses go-scm, so self-hosted servers work, e.g. provider
 // "gitea" with endpoint https://git.example.com.
 func NewPRService(g config.Git) (PRService, error) {
-	c, err := factory.NewClient(g.Provider, g.Endpoint, g.Token)
+	// The token is resolved per request, so a rotating token file works.
+	c, err := factory.NewClientWithTokenSource(g.Provider, g.Endpoint, tokenSource{g.Token})
 	if err != nil {
 		return nil, fmt.Errorf("git provider %s: %w", g.Provider, err)
 	}
 	return &goscmService{c: c}, nil
+}
+
+type tokenSource struct{ src *secret.Source }
+
+func (t tokenSource) Token(context.Context) (*goscm.Token, error) {
+	v, err := t.src.Value()
+	if err != nil {
+		return nil, err
+	}
+	return &goscm.Token{Token: v}, nil
 }
 
 type goscmService struct{ c *goscm.Client }

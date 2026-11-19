@@ -32,7 +32,8 @@ func cmdServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	red := guardrails.NewRedactor(cfg.Secrets()...)
+	red := guardrails.NewRedactor()
+	red.AddSources(cfg.Secrets()...)
 	log := newLogger(*level, red)
 
 	pbs, err := playbook.LoadDir(cfg.PlaybooksDir)

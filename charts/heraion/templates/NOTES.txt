@@ -1,4 +1,4 @@
-HeraIon {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+HeraIon {{ .Chart.AppVersion }} is installed in namespace {{ include "heraion.namespace" . }}.
 {{- $pbs := include "heraion.playbooks" . | fromYaml }}
 {{- if not $pbs }}
 
@@ -16,11 +16,11 @@ DRY-RUN is on: proposed PRs are logged with their diff, nothing is pushed.
 {{- end }}
 
 Run a scheduled playbook now:
-  kubectl -n {{ .Release.Namespace }} create job --from=cronjob/{{ include "heraion.fullname" . }}-<playbook> heraion-manual-$(date +%s)
+  kubectl -n {{ include "heraion.namespace" . }} create job --from=cronjob/{{ include "heraion.fullname" . }}-<playbook> heraion-manual-$(date +%s)
 {{- if include "heraion.gatewayEnabled" . }}
 
-Webhook gateway: http://{{ include "heraion.fullname" . }}-gateway.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.port }}/hooks/<name>
+Webhook gateway: http://{{ include "heraion.fullname" . }}-gateway.{{ include "heraion.namespace" . }}.svc:{{ .Values.gateway.service.port }}/hooks/<name>
 {{- end }}
 
 Follow investigations:
-  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/component=worker,app.kubernetes.io/instance={{ .Release.Name }} -f
+  kubectl -n {{ include "heraion.namespace" . }} logs -l app.kubernetes.io/component=worker,app.kubernetes.io/instance={{ .Release.Name }} -f

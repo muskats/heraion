@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/muskats/heraion/internal/secret"
+
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/llm/llmtest"
 )
@@ -30,7 +32,7 @@ func newAgent(t *testing.T, srv *llmtest.Server, tools ...llm.Tool) *llm.Agent {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := llm.NewClient(srv.BaseURL(), "sk-test")
+	c := llm.NewClient(srv.BaseURL(), secret.Static("sk-test"))
 	c.RetryBase = time.Millisecond
 	return &llm.Agent{LLM: c, Model: "m", Tools: reg, Limits: llm.Limits{MaxSteps: 5}}
 }

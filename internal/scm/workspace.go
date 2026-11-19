@@ -38,11 +38,14 @@ func NewWorkspaces(g config.Git, dir string) *Workspaces {
 	return &Workspaces{git: g, root: dir, repos: map[string]*Repo{}}
 }
 
+// auth reads the token on every call, so a push long after the clone still
+// uses a fresh token. No token means anonymous access (e.g. public repos).
 func (w *Workspaces) auth() *githttp.BasicAuth {
-	if w.git.Token == "" {
+	tok := w.git.Token.String()
+	if tok == "" {
 		return nil
 	}
-	return &githttp.BasicAuth{Username: w.git.Username, Password: w.git.Token}
+	return &githttp.BasicAuth{Username: w.git.Username, Password: tok}
 }
 
 // CloneURL returns the clone URL for owner/name.
@@ -82,7 +85,7 @@ func (w *Workspaces) Get(ctx context.Context, repo string) (*Repo, error) {
 	}
 	r := &Repo{
 		Name: repo, Dir: dir, BaseBranch: head.Name().Short(), baseHash: head.Hash(),
-		g: g, root: root, auth: w.auth(), author: w.git,
+		g: g, root: root, auth: w.auth, author: w.git,
 	}
 	w.repos[repo] = r
 	return r, nil
@@ -107,7 +110,7 @@ type Repo struct {
 	baseHash plumbing.Hash
 	g        *git.Repository
 	root     *os.Root // confines all file access to the clone, symlinks included
-	auth     *githttp.BasicAuth
+	auth     func() *githttp.BasicAuth
 	author   config.Git
 }
 
@@ -265,7 +268,7 @@ func (r *Repo) Push(ctx context.Context, branch string) error {
 	err := r.g.PushContext(ctx, &git.PushOptions{
 		RemoteName: "origin",
 		RefSpecs:   []gitcfg.RefSpec{gitcfg.RefSpec("+" + ref + ":" + ref)},
-		Auth:       r.auth,
+		Auth:       r.auth(),
 	})
 	if errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return nil

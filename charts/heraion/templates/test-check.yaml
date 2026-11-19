@@ -1,0 +1,17 @@
+{{- if .Values.tests.enabled }}
+# helm test <release>: validates config, playbooks and secrets, and connects
+# to the MCP servers and the LLM endpoint with the worker's own pod spec.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "heraion.fullname" . }}-check
+  namespace: {{ include "heraion.namespace" . }}
+  labels:
+    {{- include "heraion.componentSelector" (dict "root" $ "component" "worker") | nindent 4 }}
+    heraion.io/test: "true"
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  {{- include "heraion.workerPodSpec" (dict "root" $ "args" (concat (list "check") .Values.tests.args)) | nindent 2 }}
+{{- end }}

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +20,7 @@ import (
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/mcp"
+	"github.com/muskats/heraion/internal/secret"
 )
 
 type listArgs struct {
@@ -88,7 +91,7 @@ func TestConnectFilterAndCall(t *testing.T) {
 				URL: url, Transport: transport,
 				Headers:        map[string]string{"X-Static": "s"},
 				HeadersFromEnv: map[string]string{"DD-API-KEY": "ENV"},
-				SecretHeaders:  map[string]string{"DD-API-KEY": "secret-key"},
+				SecretHeaders:  map[string]*secret.Source{"DD-API-KEY": secret.Static("secret-key")},
 				DenyTools:      []string{"*_delete"},
 				Timeout:        config.Duration{Duration: 5 * time.Second},
 			}}
@@ -164,7 +167,7 @@ func TestUnreachable(t *testing.T) {
 func TestMissingSecretHeader(t *testing.T) {
 	url, _ := start(t, false)
 	servers := map[string]*config.MCPServer{"dd": {URL: url, Transport: "streamable", Required: true,
-		HeadersFromEnv: map[string]string{"DD-API-KEY": "HERAION_DD"}, SecretHeaders: map[string]string{"DD-API-KEY": ""}}}
+		HeadersFromEnv: map[string]string{"DD-API-KEY": "HERAION_DD"}, SecretHeaders: map[string]*secret.Source{"DD-API-KEY": secret.FromMap("HERAION_DD", nil)}}}
 	if _, _, err := mcp.Connect(context.Background(), servers, nil, "test", quiet); err == nil || !strings.Contains(err.Error(), "HERAION_DD") {
 		t.Fatalf("expected empty-env error, got %v", err)
 	}
@@ -187,5 +190,37 @@ func TestNeededBy(t *testing.T) {
 		if got := mcp.NeededBy(c.patterns, c.server); got != c.want {
 			t.Errorf("NeededBy(%v, %s) = %v", c.patterns, c.server, got)
 		}
+	}
+}
+
+func TestBearerPrefixFromTokenFile(t *testing.T) {
+	srv := newServer()
+	var mu sync.Mutex
+	var seen []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
+		sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil).ServeHTTP(w, r)
+	}))
+	t.Cleanup(ts.Close)
+
+	tok := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tok, []byte("sa-token-1"), 0o600)
+	servers := map[string]*config.MCPServer{"k8s": {
+		URL: ts.URL, Transport: "streamable", Timeout: config.Duration{Duration: 5 * time.Second},
+		SecretHeaders:  map[string]*secret.Source{"Authorization": secret.FromMap("T", map[string]string{"T_FILE": tok})},
+		HeaderPrefixes: map[string]string{"Authorization": "Bearer "},
+	}}
+	m, _, err := mcp.Connect(context.Background(), servers, nil, "test", quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	mu.Lock()
+	first := seen[0]
+	mu.Unlock()
+	if first != "Bearer sa-token-1" {
+		t.Fatalf("Authorization = %q", first)
 	}
 }

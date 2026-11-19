@@ -16,6 +16,8 @@
 {{- end }}
 {{- end }}
 
+{{- define "heraion.namespace" -}}{{ .Values.namespaceOverride | default .Release.Namespace }}{{- end }}
+
 {{- define "heraion.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "heraion.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -30,7 +32,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- define "heraion.labels" -}}
 {{ include "heraion.componentSelector" . }}
 helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
-app.kubernetes.io/version: {{ .root.Chart.AppVersion | quote }}
+app.kubernetes.io/version: {{ .root.Values.image.tag | default .root.Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .root.Release.Service }}
 app.kubernetes.io/part-of: heraion
 {{- with .root.Values.commonLabels }}
@@ -38,10 +40,10 @@ app.kubernetes.io/part-of: heraion
 {{- end }}
 {{- end }}
 
-{{/* Metadata block: dict "root" $ "component" c "name" n */}}
+{{/* dict "root" $ "component" "gateway" "name" "x-heraion-gateway" */}}
 {{- define "heraion.metadata" -}}
 name: {{ .name }}
-namespace: {{ .root.Release.Namespace }}
+namespace: {{ include "heraion.namespace" .root }}
 labels:
   {{- include "heraion.labels" . | nindent 2 }}
 {{- with .root.Values.commonAnnotations }}
@@ -50,12 +52,18 @@ annotations:
 {{- end }}
 {{- end }}
 
-{{/* dict "image" .image "root" $ */}}
+{{/*
+image.registry + image.repository, then @digest or :tag. global.imageRegistry
+replaces image.registry (e.g. a mirror); images without a registry field are
+used as given.
+*/}}
 {{- define "heraion.image" -}}
+{{- $repo := .image.repository -}}
+{{- with .image.registry }}{{ $repo = printf "%s/%s" ($.root.Values.global.imageRegistry | default .) $repo }}{{ end -}}
 {{- if .image.digest -}}
-{{ .image.repository }}@{{ .image.digest }}
+{{ $repo }}@{{ .image.digest }}
 {{- else -}}
-{{ .image.repository }}:{{ .image.tag | default .root.Chart.AppVersion }}
+{{ $repo }}:{{ .image.tag | default .root.Chart.AppVersion }}
 {{- end }}
 {{- end }}
 
@@ -76,47 +84,123 @@ annotations:
 
 {{- define "heraion.mcpName" -}}{{ printf "%s-mcp-%s" (include "heraion.fullname" .root) .name | trunc 63 | trimSuffix "-" }}{{- end }}
 
-{{/* ---------- secrets ---------- */}}
+{{/* ---------- credentials ----------
+Each credential is resolved by the binary at runtime, first hit wins:
+  1. <ENV>_FILE      serviceAccountToken (projected token) or csiKey (Secrets Store CSI file)
+  2. <ENV>           existingSecret / key, default secrets.existingSecret; optional key
+  3. <ENV>_FALLBACK  value, stored in the chart's Secret
+*/}}
 
+{{/* datadog + DD-API-KEY -> dd-api-key */}}
+{{- define "heraion.keySuffix" -}}{{ regexReplaceAll "[^a-z0-9.-]" (lower .) "-" }}{{- end }}
 {{/* datadog + DD-API-KEY -> HERAION_MCP_DATADOG_DD_API_KEY */}}
 {{- define "heraion.mcpHeaderEnv" -}}
 {{- regexReplaceAll "[^A-Z0-9_]" (printf "HERAION_MCP_%s_%s" .server .header | upper) "_" }}
 {{- end }}
-{{- define "heraion.secretKeySuffix" -}}{{ regexReplaceAll "[^a-z0-9.-]" (lower .) "-" }}{{- end }}
-
-{{/* Inline secret values by Secret key, e.g. {llm-api-key: sk-..., hook-alertmanager: ...}. */}}
-{{- define "heraion.inlineSecrets" -}}
-{{- $v := .Values -}}
-{{- $out := dict -}}
-{{- with $v.llm.apiKey.value }}{{ $_ := set $out "llm-api-key" . }}{{ end -}}
-{{- with $v.git.token.value }}{{ $_ := set $out "git-token" . }}{{ end -}}
-{{- range $n, $h := $v.gateway.hooks }}{{ with ($h.secret | default dict).value }}{{ $_ := set $out (printf "hook-%s" $n) . }}{{ end }}{{ end -}}
-{{- range $n, $s := $v.mcpServers }}{{ if $s.enabled -}}
-{{- range $h, $ref := $s.secretHeaders }}{{ with $ref.value }}{{ $_ := set $out (printf "mcp-%s-h-%s" $n (include "heraion.secretKeySuffix" $h)) . }}{{ end }}{{ end -}}
-{{- if eq $s.mode "deploy" }}{{ range $e, $ref := ($s.deploy.secretEnv | default dict) }}{{ with $ref.value }}{{ $_ := set $out (printf "mcp-%s-env-%s" $n (include "heraion.secretKeySuffix" $e)) . }}{{ end }}{{ end }}{{ end -}}
-{{- end }}{{ end -}}
-{{- toYaml $out }}
-{{- end }}
+{{- define "heraion.hookEnv" -}}{{ printf "HERAION_HOOK_%s_SECRET" (. | upper | replace "-" "_") }}{{- end }}
 
 {{/*
-Env entry for a secret ref; nothing if the ref is empty. Example:
-  include "heraion.secretEnv" (dict "root" $ "env" "HERAION_GIT_TOKEN" "ref" .Values.git.token "key" "git-token")
+Credentials of a role as {items: [{env, key, ref}]}. key is the default key
+in secrets.existingSecret and in the chart Secret, e.g. llm-api-key.
+dict "root" $ "role" "worker"|"gateway"
 */}}
-{{- define "heraion.secretEnv" -}}
-{{- $ref := .ref | default dict -}}
-{{- if $ref.existingSecret }}
-- name: {{ .env }}
-  valueFrom:
-    secretKeyRef:
-      name: {{ $ref.existingSecret }}
-      key: {{ required (printf "%s: key is required with existingSecret" .env) $ref.key }}
-{{- else if $ref.value }}
-- name: {{ .env }}
-  valueFrom:
-    secretKeyRef:
-      name: {{ include "heraion.secretName" .root }}
-      key: {{ .key }}
+{{- define "heraion.credentials" -}}
+{{- $v := .root.Values -}}
+{{- $out := list -}}
+{{- if eq .role "worker" -}}
+{{- $out = append $out (dict "env" "HERAION_LLM_API_KEY" "key" "llm-api-key" "ref" $v.llm.apiKey) -}}
+{{- $out = append $out (dict "env" "HERAION_GIT_TOKEN" "key" "git-token" "ref" $v.git.token) -}}
+{{- range $n, $s := $v.mcpServers }}{{ if $s.enabled }}{{ range $h, $ref := $s.secretHeaders -}}
+{{- $out = append $out (dict "env" (include "heraion.mcpHeaderEnv" (dict "server" $n "header" $h)) "key" (printf "mcp-%s-%s" $n (include "heraion.keySuffix" $h)) "ref" $ref) -}}
+{{- end }}{{ end }}{{ end -}}
+{{- else -}}
+{{- range $n, $h := $v.gateway.hooks -}}
+{{- $out = append $out (dict "env" (include "heraion.hookEnv" $n) "key" (printf "hook-%s" $n) "ref" ($h.secret | default dict)) -}}
+{{- end -}}
+{{- end -}}
+{{- toYaml (dict "items" $out) }}
 {{- end }}
+
+{{/* "true" if a ref has any source. dict "root" $ "ref" ref */}}
+{{- define "heraion.credConfigured" -}}
+{{- $r := .ref | default dict -}}
+{{- if or ($r.serviceAccountToken | default dict).audience $r.csiKey $r.existingSecret .root.Values.secrets.existingSecret $r.value }}true{{ end -}}
+{{- end }}
+
+{{/* Env entries for a credential list. dict "root" $ "items" list */}}
+{{- define "heraion.credEnv" -}}
+{{- $root := .root -}}
+{{- $csi := $root.Values.secrets.csi -}}
+{{- range .items }}
+{{- $env := .env }}{{ $key := .key }}{{ $ref := .ref | default dict }}
+{{- $sa := $ref.serviceAccountToken | default dict }}
+{{- if $sa.audience }}
+- name: {{ $env }}_FILE
+  value: /var/run/secrets/heraion/sa/{{ $key }}
+{{- else if $ref.csiKey }}
+{{- if not $csi.enabled }}{{ fail (printf "%s uses csiKey %q but secrets.csi.enabled is false" $env $ref.csiKey) }}{{ end }}
+- name: {{ $env }}_FILE
+  value: {{ $csi.mountPath }}/{{ $ref.csiKey }}
+{{- end }}
+{{- $name := $ref.existingSecret | default $root.Values.secrets.existingSecret }}
+{{- if $name }}
+- name: {{ $env }}
+  valueFrom:
+    secretKeyRef: { name: {{ tpl $name $root }}, key: {{ $ref.key | default $key }}, optional: true }
+{{- end }}
+{{- if $ref.value }}
+- name: {{ $env }}_FALLBACK
+  valueFrom:
+    secretKeyRef: { name: {{ include "heraion.secretName" $root }}, key: {{ $key }} }
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/* Volumes for a credential list: projected SA tokens and the CSI mount. */}}
+{{- define "heraion.credVolumes" -}}
+{{- $sources := list -}}
+{{- range .items }}{{ $key := .key }}{{ with (.ref | default dict).serviceAccountToken }}{{ if .audience -}}
+{{- $sources = append $sources (dict "serviceAccountToken" (dict "audience" .audience "expirationSeconds" (.expirationSeconds | default 3600 | int) "path" $key)) -}}
+{{- end }}{{ end }}{{ end -}}
+{{- if $sources }}
+- name: sa-tokens
+  projected:
+    sources:
+      {{- toYaml $sources | nindent 6 }}
+{{- end }}
+{{- with .root.Values.secrets.csi }}{{ if .enabled }}
+- name: csi-secrets
+  csi:
+    driver: secrets-store.csi.k8s.io
+    readOnly: true
+    volumeAttributes:
+      secretProviderClass: {{ required "secrets.csi.secretProviderClass is required" .secretProviderClass }}
+{{- end }}{{ end }}
+{{- end }}
+
+{{- define "heraion.credMounts" -}}
+{{- $sa := false -}}
+{{- range .items }}{{ if ((.ref | default dict).serviceAccountToken | default dict).audience }}{{ $sa = true }}{{ end }}{{ end -}}
+{{- if $sa }}
+- { name: sa-tokens, mountPath: /var/run/secrets/heraion/sa, readOnly: true }
+{{- end }}
+{{- if .root.Values.secrets.csi.enabled }}
+- { name: csi-secrets, mountPath: {{ .root.Values.secrets.csi.mountPath }}, readOnly: true }
+{{- end }}
+{{- end }}
+
+{{/* Inline values by chart Secret key, e.g. {llm-api-key: sk-..., mcp-custom-env-api-token: ...}. */}}
+{{- define "heraion.inlineSecrets" -}}
+{{- $out := dict -}}
+{{- range $role := list "worker" "gateway" }}
+{{- range (include "heraion.credentials" (dict "root" $ "role" $role) | fromYaml).items }}
+{{- $key := .key }}{{ with (.ref | default dict).value }}{{ $_ := set $out $key . }}{{ end }}
+{{- end }}
+{{- end }}
+{{- range $n, $s := .Values.mcpServers }}{{ if and $s.enabled (eq $s.mode "deploy") }}
+{{- range $e, $ref := ($s.deploy.secretEnv | default dict) }}{{ with $ref.value }}{{ $_ := set $out (printf "mcp-%s-env-%s" $n (include "heraion.keySuffix" $e)) . }}{{ end }}{{ end }}
+{{- end }}{{ end }}
+{{- toYaml $out }}
 {{- end }}
 
 {{/* ---------- playbooks ---------- */}}
@@ -156,20 +240,26 @@ Env entry for a secret ref; nothing if the ref is empty. Example:
 {{- range $n, $s := $v.mcpServers }}{{ if $s.enabled -}}
 {{- $url := "" -}}
 {{- if eq $s.mode "deploy" -}}
-{{- $url = printf "http://%s.%s.svc:%v%s" (include "heraion.mcpName" (dict "root" $ "name" $n)) $.Release.Namespace $s.deploy.port ($s.path | default "/mcp") -}}
+{{- $url = printf "http://%s.%s.svc:%v%s" (include "heraion.mcpName" (dict "root" $ "name" $n)) (include "heraion.namespace" $) $s.deploy.port ($s.path | default "/mcp") -}}
 {{- else -}}
 {{- $url = tpl (required (printf "mcpServers.%s.url is required for mode %s" $n $s.mode) $s.url) $ -}}
 {{- end -}}
 {{- $e := dict "url" $url "transport" ($s.transport | default "streamable") -}}
 {{- range $k := list "allowTools" "denyTools" "headers" "timeout" "required" }}{{ with index $s $k }}{{ $_ := set $e $k . }}{{ end }}{{ end -}}
-{{- $hdrs := dict -}}
-{{- range $h, $ref := $s.secretHeaders }}{{ if or $ref.existingSecret $ref.value }}{{ $_ := set $hdrs $h (include "heraion.mcpHeaderEnv" (dict "server" $n "header" $h)) }}{{ end }}{{ end -}}
+{{- $hdrs := dict -}}{{- $prefixes := dict -}}
+{{- range $h, $ref := $s.secretHeaders }}{{ if include "heraion.credConfigured" (dict "root" $ "ref" $ref) -}}
+{{- $_ := set $hdrs $h (include "heraion.mcpHeaderEnv" (dict "server" $n "header" $h)) -}}
+{{- $prefix := $ref.prefix -}}
+{{- if and (not (hasKey $ref "prefix")) ($ref.serviceAccountToken | default dict).audience (eq (lower $h) "authorization") }}{{ $prefix = "Bearer " }}{{ end -}}
+{{- with $prefix }}{{ $_ := set $prefixes $h . }}{{ end -}}
+{{- end }}{{ end -}}
 {{- if $hdrs }}{{ $_ := set $e "headersFromEnv" $hdrs }}{{ end -}}
+{{- if $prefixes }}{{ $_ := set $e "headerPrefixes" $prefixes }}{{ end -}}
 {{- $_ := set $mcp $n $e -}}
 {{- end }}{{ end -}}
 {{- $hooks := dict -}}
 {{- range $n, $h := $v.gateway.hooks -}}
-{{- $e := dict "auth" ($h.auth | default "hmac-sha256") "secretEnv" (printf "HERAION_HOOK_%s_SECRET" ($n | upper | replace "-" "_")) -}}
+{{- $e := dict "auth" ($h.auth | default "hmac-sha256") "secretEnv" (include "heraion.hookEnv" $n) -}}
 {{- with $h.header }}{{ $_ := set $e "header" . }}{{ end -}}
 {{- $_ := set $hooks $n $e -}}
 {{- end -}}
@@ -181,8 +271,19 @@ Env entry for a secret ref; nothing if the ref is empty. Example:
 {{- toYaml $cfg }}
 {{- end }}
 
+{{/* Restart pods when config, playbooks or chart-managed secrets change. */}}
+{{- define "heraion.checksums" -}}
+checksum/config: {{ include "heraion.config" . | sha256sum }}
+checksum/playbooks: {{ include "heraion.playbooks" . | sha256sum }}
+checksum/secret: {{ include "heraion.inlineSecrets" . | sha256sum }}
+{{- end }}
+
 {{/* ---------- scheduling (role value, else global) ---------- */}}
-{{/* dict "root" $ "role" .Values.worker */}}
+{{/*
+dict "root" $ "role" .Values.gateway "component" "gateway"
+A topologySpreadConstraint without labelSelector gets the component's labels,
+so values can stay generic.
+*/}}
 {{- define "heraion.podScheduling" -}}
 {{- $g := .root.Values.global -}}
 {{- with (.role.nodeSelector | default $g.nodeSelector) }}
@@ -198,8 +299,11 @@ affinity:
   {{- toYaml . | nindent 2 }}
 {{- end }}
 {{- with (.role.topologySpreadConstraints | default $g.topologySpreadConstraints) }}
+{{- $sel := include "heraion.componentSelector" (dict "root" $.root "component" ($.component | default "worker")) | fromYaml }}
 topologySpreadConstraints:
-  {{- toYaml . | nindent 2 }}
+  {{- range . }}
+  - {{- toYaml (merge (deepCopy .) (dict "labelSelector" (dict "matchLabels" $sel))) | nindent 4 }}
+  {{- end }}
 {{- end }}
 {{- with (.role.priorityClassName | default $g.priorityClassName) }}
 priorityClassName: {{ . }}
@@ -217,90 +321,94 @@ securityContext:
 {{- end }}
 
 {{/* ---------- worker ---------- */}}
-{{/* Shared env for workers: config path + every credential they need. */}}
-{{- define "heraion.workerEnv" -}}
-- name: HERAION_CONFIG
-  value: /etc/heraion/conf/config.yaml
-{{- include "heraion.secretEnv" (dict "root" . "env" "HERAION_LLM_API_KEY" "ref" .Values.llm.apiKey "key" "llm-api-key") }}
-{{- include "heraion.secretEnv" (dict "root" . "env" "HERAION_GIT_TOKEN" "ref" .Values.git.token "key" "git-token") }}
-{{- range $n, $s := .Values.mcpServers }}{{ if $s.enabled }}
-{{- range $h, $ref := $s.secretHeaders }}
-{{- include "heraion.secretEnv" (dict "root" $ "env" (include "heraion.mcpHeaderEnv" (dict "server" $n "header" $h)) "ref" $ref "key" (printf "mcp-%s-h-%s" $n (include "heraion.secretKeySuffix" $h))) }}
+
+{{/* Worker pod spec. dict "root" $ "args" (list "run" "--playbook" "x") */}}
+{{- define "heraion.workerPodSpec" -}}
+{{- $root := .root -}}
+{{- $w := $root.Values.worker -}}
+{{- $creds := include "heraion.credentials" (dict "root" $root "role" "worker") | fromYaml -}}
+restartPolicy: Never
+serviceAccountName: {{ include "heraion.workerSA" $root }}
+automountServiceAccountToken: {{ $w.automountServiceAccountToken }}
+{{- include "heraion.podScheduling" (dict "root" $root "role" $w "component" "worker") }}
+{{- with $w.initContainers }}
+initContainers:
+  {{- toYaml . | nindent 2 }}
 {{- end }}
-{{- end }}{{ end }}
-{{- with .Values.worker.extraEnv }}
-{{ toYaml . }}
+containers:
+  - name: worker
+    image: {{ include "heraion.image" (dict "image" $root.Values.image "root" $root) }}
+    imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+    args: {{ toJson .args }}
+    env:
+      - name: HERAION_CONFIG
+        value: /etc/heraion/conf/config.yaml
+      {{- include "heraion.credEnv" (dict "root" $root "items" $creds.items) | nindent 6 }}
+      {{- with $w.extraEnv }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+    {{- with $w.extraEnvFrom }}
+    envFrom:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    resources:
+      {{- toYaml $w.resources | nindent 6 }}
+    securityContext:
+      {{- include "heraion.containerSecurityContext" (dict "root" $root "role" $w) | nindent 6 }}
+    volumeMounts:
+      - { name: config, mountPath: /etc/heraion/conf, readOnly: true }
+      - { name: playbooks, mountPath: /etc/heraion/playbooks, readOnly: true }
+      - { name: workspace, mountPath: /workspace }
+      - { name: tmp, mountPath: /tmp }
+      {{- include "heraion.credMounts" (dict "root" $root "items" $creds.items) | nindent 6 }}
+      {{- with $w.extraVolumeMounts }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+  {{- with $w.extraContainers }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+volumes:
+  - name: config
+    configMap: { name: {{ include "heraion.configName" $root }} }
+  - name: playbooks
+    configMap: { name: {{ include "heraion.playbooksName" $root }} }
+  - name: workspace
+    emptyDir: { sizeLimit: {{ $w.workspaceSizeLimit }} }
+  - name: tmp
+    emptyDir: { sizeLimit: 256Mi }
+  {{- include "heraion.credVolumes" (dict "root" $root "items" $creds.items) | nindent 2 }}
+  {{- with $w.extraVolumes }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
 {{- end }}
+
+{{- define "heraion.workerPodMetadata" -}}
+labels:
+  {{- include "heraion.componentSelector" (dict "root" .root "component" "worker") | nindent 2 }}
+  {{- with .playbook }}
+  heraion.io/playbook: {{ . }}
+  {{- end }}
+  {{- with .root.Values.worker.podLabels }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+annotations:
+  {{- include "heraion.checksums" .root | nindent 2 }}
+  {{- with .root.Values.worker.podAnnotations }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
 {{- end }}
 
 {{/* Worker Job spec. dict "root" $ "playbook" name ("" for the gateway template) */}}
 {{- define "heraion.workerJobSpec" -}}
-{{- $root := .root -}}
-{{- $w := $root.Values.worker -}}
+{{- $w := .root.Values.worker -}}
+{{- $args := list "run" -}}
+{{- with .playbook }}{{ $args = list "run" "--playbook" . }}{{ end -}}
 backoffLimit: {{ $w.backoffLimit }}
 activeDeadlineSeconds: {{ $w.activeDeadlineSeconds }}
 ttlSecondsAfterFinished: {{ $w.ttlSecondsAfterFinished }}
 template:
   metadata:
-    labels:
-      {{- include "heraion.componentSelector" (dict "root" $root "component" "worker") | nindent 6 }}
-      {{- with .playbook }}
-      heraion.io/playbook: {{ . }}
-      {{- end }}
-      {{- with $w.podLabels }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
-    annotations:
-      checksum/config: {{ include "heraion.config" $root | sha256sum }}
-      checksum/playbooks: {{ include "heraion.playbooks" $root | sha256sum }}
-      {{- with $w.podAnnotations }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
+    {{- include "heraion.workerPodMetadata" . | nindent 4 }}
   spec:
-    restartPolicy: Never
-    serviceAccountName: {{ include "heraion.workerSA" $root }}
-    automountServiceAccountToken: {{ $w.automountServiceAccountToken }}
-    {{- include "heraion.podScheduling" (dict "root" $root "role" $w) | nindent 4 }}
-    {{- with $w.initContainers }}
-    initContainers:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
-    containers:
-      - name: worker
-        image: {{ include "heraion.image" (dict "image" $root.Values.image "root" $root) }}
-        imagePullPolicy: {{ $root.Values.image.pullPolicy }}
-        args: ["run"{{ with .playbook }}, "--playbook", {{ . | quote }}{{ end }}]
-        env:
-          {{- include "heraion.workerEnv" $root | nindent 10 }}
-        {{- with $w.extraEnvFrom }}
-        envFrom:
-          {{- toYaml . | nindent 10 }}
-        {{- end }}
-        resources:
-          {{- toYaml $w.resources | nindent 10 }}
-        securityContext:
-          {{- include "heraion.containerSecurityContext" (dict "root" $root "role" $w) | nindent 10 }}
-        volumeMounts:
-          - { name: config, mountPath: /etc/heraion/conf, readOnly: true }
-          - { name: playbooks, mountPath: /etc/heraion/playbooks, readOnly: true }
-          - { name: workspace, mountPath: /workspace }
-          - { name: tmp, mountPath: /tmp }
-          {{- with $w.extraVolumeMounts }}
-          {{- toYaml . | nindent 10 }}
-          {{- end }}
-      {{- with $w.extraContainers }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
-    volumes:
-      - name: config
-        configMap: { name: {{ include "heraion.configName" $root }} }
-      - name: playbooks
-        configMap: { name: {{ include "heraion.playbooksName" $root }} }
-      - name: workspace
-        emptyDir: { sizeLimit: {{ $w.workspaceSizeLimit }} }
-      - name: tmp
-        emptyDir: { sizeLimit: 256Mi }
-      {{- with $w.extraVolumes }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
+    {{- include "heraion.workerPodSpec" (dict "root" .root "args" $args) | nindent 4 }}
 {{- end }}

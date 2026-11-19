@@ -33,10 +33,11 @@ its diff:
 
 ```sh
 kubectl create namespace heraion
-kubectl -n heraion create secret generic heraion-llm --from-literal=api-key=sk-...
-kubectl -n heraion create secret generic heraion-git --from-literal=token=...
+kubectl -n heraion create secret generic heraion \
+  --from-literal=llm-api-key=sk-... --from-literal=git-token=ghp_...
 helm install heraion oci://ghcr.io/muskats/charts/heraion -n heraion \
   -f examples/helm/values-minimal.yaml
+helm test heraion -n heraion   # runs `heraion check --connect` with the worker's pod spec
 ```
 
 | Values file | Installs |
@@ -44,6 +45,7 @@ helm install heraion oci://ghcr.io/muskats/charts/heraion -n heraion \
 | [values-minimal.yaml](examples/helm/values-minimal.yaml) | A CronJob for `trivy-remediate` and the read-only k8s MCP server |
 | [values-selfhosted.yaml](examples/helm/values-selfhosted.yaml) | Gitea, LiteLLM, and a webhook gateway for Alertmanager |
 | [values-integrations.yaml](examples/helm/values-integrations.yaml) | Jira, Grafana and Datadog servers, plus report and webhook playbooks |
+| [values-identity.yaml](examples/helm/values-identity.yaml) | No static secrets: AWS Secrets Manager via CSI and IRSA, and a projected token for an MCP server |
 
 What runs in the cluster:
 
@@ -53,8 +55,42 @@ What runs in the cluster:
 | Gateway Deployment | A webhook playbook is enabled | RBAC: `create` and `list` on Jobs, nothing else |
 | MCP server | `mcpServers.<name>.enabled: true` | Its own ServiceAccount and RBAC; only worker pods can connect |
 
-Secrets are referenced as `{ existingSecret: name, key: key }` or given inline as
-`{ value: ... }`, in which case the chart creates a Secret. They never go into a ConfigMap.
+## Secrets
+
+Every credential (`llm.apiKey`, `git.token`, `gateway.hooks.<name>.secret`,
+`mcpServers.<name>.secretHeaders.<header>`) takes up to three sources. The first one that
+yields a value at runtime wins:
+
+| Order | Values | Pod gets | Example |
+|---|---|---|---|
+| 1 | `serviceAccountToken: { audience: vault }` | `<ENV>_FILE`, a projected ServiceAccount token, rotated | An MCP server or LLM gateway that trusts the cluster's OIDC issuer |
+| 1 | `csiKey: llm-api-key` | `<ENV>_FILE` from the Secrets Store CSI driver | AWS Secrets Manager, Azure Key Vault or Google Secret Manager, via IRSA or Workload Identity |
+| 2 | `existingSecret: llm`, `key: api-key` | `<ENV>` from an optional `secretKeyRef` | A Secret from External Secrets or Sealed Secrets |
+| 3 | `value: sk-...` | `<ENV>_FALLBACK` from the chart's own Secret | Quick tests |
+
+`secrets.existingSecret` is the default Secret for level 2, with keys `llm-api-key`,
+`git-token`, `hook-<name>` and `mcp-<server>-<header>`. A key missing from it is skipped:
+
+```yaml
+secrets:
+  existingSecret: heraion        # holds git-token and hook-alertmanager
+llm:
+  apiKey:
+    csiKey: llm-api-key          # 1: from the cloud secret manager
+    value: sk-local-dev          # 3: used only when the CSI file is missing
+```
+
+Token files are re-read, so rotation needs no restart. Changing a chart-managed value rolls
+the pods (`checksum/secret`). `heraion check` lists the source of each secret, never the value:
+
+```
+ok    secret     HERAION_LLM_API_KEY (file) for llm
+ok    secret     HERAION_GIT_TOKEN (env) for git
+```
+
+Servers deployed by the chart (`mcpServers.<name>.deploy.secretEnv`) read plain env vars, so
+the source is picked when the chart is rendered: their own `existingSecret`, then `value`,
+then `secrets.existingSecret`.
 
 ## Playbooks
 
@@ -106,8 +142,8 @@ come from env vars. A secret in the file is rejected.
 
 | Env var | Example |
 |---|---|
-| `HERAION_LLM_API_KEY` | `sk-...` |
-| `HERAION_GIT_TOKEN` | A token that can push branches and open PRs |
+| `HERAION_LLM_API_KEY` | `sk-...`; also `_FILE` and `_FALLBACK`, see [Secrets](#secrets) |
+| `HERAION_GIT_TOKEN` | A token that can push branches and open PRs; also `_FILE` and `_FALLBACK` |
 | `HERAION_LLM_BASE_URL`, `HERAION_LLM_MODEL` | Override the file, e.g. `http://vllm:8000/v1` |
 | `HERAION_DRY_RUN` | `true` |
 | `HERAION_CONFIG`, `HERAION_PLAYBOOK`, `HERAION_EVENT_FILE` | Defaults for `heraion run` flags |
@@ -130,6 +166,7 @@ come from env vars. A secret in the file is rejected.
 ## Development
 
 ```sh
+heraion check --config examples/config.yaml   # config, playbooks and secret sources
 make test         # Go tests with the race detector
 make chart-test   # helm lint, chart cross-check, helm-unittest
 make lint

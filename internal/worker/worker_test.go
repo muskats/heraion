@@ -19,6 +19,7 @@ import (
 	"github.com/muskats/heraion/internal/llm/llmtest"
 	"github.com/muskats/heraion/internal/playbook"
 	"github.com/muskats/heraion/internal/scm/scmtest"
+	"github.com/muskats/heraion/internal/secret"
 	"github.com/muskats/heraion/internal/worker"
 )
 
@@ -27,9 +28,9 @@ const repo = "acme/app"
 func cfg(t *testing.T, llmURL, cloneURL string) *config.Config {
 	t.Helper()
 	return &config.Config{
-		LLM: config.LLM{BaseURL: llmURL, Model: "m", APIKey: "sk-live-abcdef", MaxSteps: 10,
+		LLM: config.LLM{BaseURL: llmURL, Model: "m", APIKey: secret.Static("sk-live-abcdef"), MaxSteps: 10,
 			Timeout: config.Duration{Duration: time.Minute}},
-		Git:     config.Git{Provider: "gitea", CloneBaseURL: cloneURL, AuthorName: "HeraIon", AuthorEmail: "h@x", Token: "git-token-123456"},
+		Git:     config.Git{Provider: "gitea", CloneBaseURL: cloneURL, AuthorName: "HeraIon", AuthorEmail: "h@x", Token: secret.Static("git-token-123456")},
 		Repos:   []string{repo},
 		WorkDir: t.TempDir(),
 	}
@@ -45,7 +46,7 @@ func pb(t *testing.T, src string) *playbook.Playbook {
 }
 
 func fastClient(url string) llm.Chatter {
-	c := llm.NewClient(url, "sk-live-abcdef")
+	c := llm.NewClient(url, secret.Static("sk-live-abcdef"))
 	c.RetryBase = time.Millisecond
 	return c
 }
@@ -70,7 +71,7 @@ tools: [repo_*, open_pr]
 prompt: Fix fixable HIGH CVEs.
 `),
 		Event:    []byte(`{"alert":"token git-token-123456"}`),
-		Redactor: guardrails.NewRedactor(c.Secrets()...),
+		Redactor: redactor(c),
 		LLM:      fastClient(srv.BaseURL()),
 		PRs:      prs,
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -168,7 +169,7 @@ func TestRunWithMCPServer(t *testing.T) {
 	rep, err := worker.Run(context.Background(), worker.Options{
 		Config:   c,
 		Playbook: pb(t, "name: scan\ntrigger: {manual: true}\ntools: [k8s.resources_*]\noutput: report\nprompt: p\n"),
-		Redactor: guardrails.NewRedactor(c.Secrets()...),
+		Redactor: redactor(c),
 		LLM:      fastClient(llmSrv.BaseURL()),
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -182,4 +183,10 @@ func TestRunWithMCPServer(t *testing.T) {
 	if !strings.Contains(result, "VulnerabilityReport: CVE-2024-1") || strings.Contains(result, "git-token-123456") {
 		t.Fatalf("tool result %q", result)
 	}
+}
+
+func redactor(c *config.Config) *guardrails.Redactor {
+	r := guardrails.NewRedactor()
+	r.AddSources(c.Secrets()...)
+	return r
 }

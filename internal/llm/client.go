@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/muskats/heraion/internal/secret"
 )
 
 // Message is a chat message.
@@ -89,15 +91,15 @@ type Chatter interface {
 
 // Client is an HTTP client for an OpenAI-compatible endpoint.
 type Client struct {
-	BaseURL    string // e.g. https://api.openai.com/v1
-	APIKey     string
+	BaseURL    string         // e.g. https://api.openai.com/v1
+	APIKey     *secret.Source // nil or unset: no Authorization header (e.g. Ollama)
 	HTTPClient *http.Client
 	MaxRetries int
 	RetryBase  time.Duration // first backoff delay, doubled per attempt
 }
 
 // NewClient returns a Client with sensible defaults.
-func NewClient(baseURL, apiKey string) *Client {
+func NewClient(baseURL string, apiKey *secret.Source) *Client {
 	return &Client{
 		BaseURL:    baseURL,
 		APIKey:     apiKey,
@@ -176,8 +178,13 @@ func (c *Client) do(ctx context.Context, body []byte) (*ChatResponse, error) {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey.Set() {
+		// Read per request: a projected ServiceAccount token rotates.
+		key, err := c.APIKey.Value()
+		if err != nil {
+			return nil, &APIError{StatusCode: http.StatusUnauthorized, Body: "llm api key: " + err.Error()}
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {

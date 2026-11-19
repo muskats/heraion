@@ -35,7 +35,7 @@ repos: [acme/app, group/sub/svc]
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.LLM.APIKey != "sk-test-key" || c.Git.Token != "git-token-value" {
+	if c.LLM.APIKey.String() != "sk-test-key" || c.Git.Token.String() != "git-token-value" {
 		t.Error("secrets not read from env")
 	}
 	if !c.DryRun {
@@ -98,5 +98,23 @@ func TestEnvOverridesFile(t *testing.T) {
 func TestExampleConfigIsValid(t *testing.T) {
 	if _, err := Load("../../examples/config.yaml"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSecretHierarchy(t *testing.T) {
+	tok := filepath.Join(t.TempDir(), "token")
+	_ = os.WriteFile(tok, []byte("from-sa-token"), 0o600)
+	t.Setenv(EnvLLMAPIKey+"_FILE", tok)
+	t.Setenv(EnvLLMAPIKey, "from-secret")
+	t.Setenv(EnvGitToken+"_FALLBACK", "literal-token")
+	c, err := Load(write(t, "llm: {baseURL: http://x, model: m}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LLM.APIKey.String() != "from-sa-token" || c.LLM.APIKey.Origin() != "file" {
+		t.Errorf("llm key %q from %s", c.LLM.APIKey.String(), c.LLM.APIKey.Origin())
+	}
+	if c.Git.Token.String() != "literal-token" || c.Git.Token.Origin() != "fallback" {
+		t.Errorf("git token %q from %s", c.Git.Token.String(), c.Git.Token.Origin())
 	}
 }

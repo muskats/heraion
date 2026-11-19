@@ -42,6 +42,9 @@
             "IfNotPresent",
             "Never"
           ]
+        },
+        "registry": {
+          "type": "string"
         }
       }
     },
@@ -71,6 +74,9 @@
         },
         "priorityClassName": {
           "type": "string"
+        },
+        "imageRegistry": {
+          "type": "string"
         }
       }
     },
@@ -88,6 +94,22 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "serviceAccountToken": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "audience": {
+                  "type": "string"
+                },
+                "expirationSeconds": {
+                  "type": "integer",
+                  "minimum": 600
+                }
+              }
+            },
+            "csiKey": {
+              "type": "string"
+            },
             "existingSecret": {
               "type": "string"
             },
@@ -154,6 +176,22 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "serviceAccountToken": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "audience": {
+                  "type": "string"
+                },
+                "expirationSeconds": {
+                  "type": "integer",
+                  "minimum": 600
+                }
+              }
+            },
+            "csiKey": {
+              "type": "string"
+            },
             "existingSecret": {
               "type": "string"
             },
@@ -420,9 +458,7 @@
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "secret"
-            ],
+            "required": [],
             "properties": {
               "auth": {
                 "enum": [
@@ -437,6 +473,22 @@
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
+                  "serviceAccountToken": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "audience": {
+                        "type": "string"
+                      },
+                      "expirationSeconds": {
+                        "type": "integer",
+                        "minimum": 600
+                      }
+                    }
+                  },
+                  "csiKey": {
+                    "type": "string"
+                  },
                   "existingSecret": {
                     "type": "string"
                   },
@@ -517,6 +569,12 @@
                 "integer",
                 "string"
               ]
+            },
+            "maxUnavailable": {
+              "type": [
+                "integer",
+                "string"
+              ]
             }
           }
         },
@@ -588,6 +646,20 @@
               "type": "object"
             }
           }
+        },
+        "revisionHistoryLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "strategy": {
+          "type": "object"
+        },
+        "startupProbe": {
+          "type": "object"
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
@@ -657,6 +729,22 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "serviceAccountToken": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "audience": {
+                      "type": "string"
+                    },
+                    "expirationSeconds": {
+                      "type": "integer",
+                      "minimum": 600
+                    }
+                  }
+                },
+                "csiKey": {
+                  "type": "string"
+                },
                 "existingSecret": {
                   "type": "string"
                 },
@@ -664,6 +752,9 @@
                   "type": "string"
                 },
                 "value": {
+                  "type": "string"
+                },
+                "prefix": {
                   "type": "string"
                 }
               }
@@ -689,6 +780,9 @@
                     "type": "string"
                   },
                   "pullPolicy": {
+                    "type": "string"
+                  },
+                  "registry": {
                     "type": "string"
                   }
                 }
@@ -939,6 +1033,66 @@
       "type": "array",
       "items": {
         "type": "object"
+      }
+    },
+    "namespaceOverride": {
+      "type": "string"
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "csi": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretProviderClass": {
+              "type": "string"
+            },
+            "mountPath": {
+              "type": "string",
+              "pattern": "^/"
+            }
+          },
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "secretProviderClass": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     }
   }

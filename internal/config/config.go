@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/muskats/heraion/internal/secret"
 )
 
 // Environment variables read by Load.
@@ -51,8 +53,12 @@ type MCPServer struct {
 	// Headers are plain headers, e.g. {"X-Org": "acme"}.
 	Headers map[string]string `json:"headers,omitempty"`
 	// HeadersFromEnv reads secret header values from env vars, e.g.
-	// {"DD-API-KEY": "HERAION_MCP_DATADOG_API_KEY"}.
+	// {"DD-API-KEY": "HERAION_MCP_DATADOG_API_KEY"}. Each also accepts
+	// <ENV>_FILE and <ENV>_FALLBACK, see package secret.
 	HeadersFromEnv map[string]string `json:"headersFromEnv,omitempty"`
+	// HeaderPrefixes are put before a secret header value, e.g.
+	// {"Authorization": "Bearer "} when the value is a raw token file.
+	HeaderPrefixes map[string]string `json:"headerPrefixes,omitempty"`
 	// AllowTools and DenyTools filter tools by name, e.g. ["pods_*"].
 	// Deny wins. An empty allow list allows every tool.
 	AllowTools []string `json:"allowTools,omitempty"`
@@ -63,7 +69,7 @@ type MCPServer struct {
 	// is skipped with a warning.
 	Required bool `json:"required,omitempty"`
 
-	SecretHeaders map[string]string `json:"-"` // resolved from HeadersFromEnv
+	SecretHeaders map[string]*secret.Source `json:"-"` // from HeadersFromEnv
 }
 
 // Gateway configures `heraion serve`.
@@ -97,18 +103,18 @@ type Hook struct {
 	// Insecure skips authentication. Local testing only.
 	Insecure bool `json:"insecure,omitempty"`
 
-	Secret string `json:"-"` // resolved from SecretEnv
+	Secret *secret.Source `json:"-"` // from SecretEnv
 }
 
 // LLM configures the OpenAI-compatible chat-completions endpoint.
 type LLM struct {
-	BaseURL     string   `json:"baseURL"`
-	Model       string   `json:"model"`
-	APIKey      string   `json:"-"` // from env only
-	MaxSteps    int      `json:"maxSteps,omitempty"`
-	MaxTokens   int      `json:"maxTokens,omitempty"` // total token budget per run
-	Timeout     Duration `json:"timeout,omitempty"`
-	Temperature *float64 `json:"temperature,omitempty"`
+	BaseURL     string         `json:"baseURL"`
+	Model       string         `json:"model"`
+	APIKey      *secret.Source `json:"-"` // HERAION_LLM_API_KEY[_FILE|_FALLBACK]
+	MaxSteps    int            `json:"maxSteps,omitempty"`
+	MaxTokens   int            `json:"maxTokens,omitempty"` // total token budget per run
+	Timeout     Duration       `json:"timeout,omitempty"`
+	Temperature *float64       `json:"temperature,omitempty"`
 }
 
 // Git configures the Git hosting provider.
@@ -122,10 +128,10 @@ type Git struct {
 	// to Endpoint, or https://github.com for GitHub.
 	CloneBaseURL string `json:"cloneBaseURL,omitempty"`
 	// Username for clone and push; the token is the password.
-	Username    string `json:"username,omitempty"`
-	AuthorName  string `json:"authorName,omitempty"`
-	AuthorEmail string `json:"authorEmail,omitempty"`
-	Token       string `json:"-"` // from env only
+	Username    string         `json:"username,omitempty"`
+	AuthorName  string         `json:"authorName,omitempty"`
+	AuthorEmail string         `json:"authorEmail,omitempty"`
+	Token       *secret.Source `json:"-"` // HERAION_GIT_TOKEN[_FILE|_FALLBACK]
 }
 
 // Duration is a time.Duration that unmarshals from strings like "15m".
@@ -168,8 +174,8 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) applyEnv(getenv func(string) string) {
-	c.LLM.APIKey = getenv(EnvLLMAPIKey)
-	c.Git.Token = getenv(EnvGitToken)
+	c.LLM.APIKey = secret.New(EnvLLMAPIKey, getenv)
+	c.Git.Token = secret.New(EnvGitToken, getenv)
 	if v := getenv(EnvLLMBaseURL); v != "" {
 		c.LLM.BaseURL = v
 	}
@@ -180,14 +186,14 @@ func (c *Config) applyEnv(getenv func(string) string) {
 		if m == nil {
 			continue
 		}
-		m.SecretHeaders = map[string]string{}
+		m.SecretHeaders = map[string]*secret.Source{}
 		for h, env := range m.HeadersFromEnv {
-			m.SecretHeaders[h] = getenv(env)
+			m.SecretHeaders[h] = secret.New(env, getenv)
 		}
 	}
 	for _, h := range c.Gateway.Hooks {
 		if h != nil && h.SecretEnv != "" {
-			h.Secret = getenv(h.SecretEnv)
+			h.Secret = secret.New(h.SecretEnv, getenv)
 		}
 	}
 	switch strings.ToLower(getenv(EnvDryRun)) {
@@ -377,19 +383,19 @@ func checkURL(s string) error {
 	return nil
 }
 
-// Secrets returns the values to mask in prompts and logs.
-func (c *Config) Secrets() []string {
-	out := []string{c.LLM.APIKey, c.Git.Token}
+// Secrets returns the credentials to mask in prompts and logs.
+func (c *Config) Secrets() []*secret.Source {
+	out := []*secret.Source{c.LLM.APIKey, c.Git.Token}
 	for _, m := range c.MCPServers {
 		if m == nil {
 			continue
 		}
 		for _, v := range m.SecretHeaders {
-			out = append(out, v, strings.TrimPrefix(v, "Bearer "))
+			out = append(out, v)
 		}
 	}
 	for _, h := range c.Gateway.Hooks {
-		if h != nil {
+		if h != nil && h.Secret != nil {
 			out = append(out, h.Secret)
 		}
 	}

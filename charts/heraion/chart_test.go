@@ -11,11 +11,14 @@ import (
 	"strings"
 	"testing"
 
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/dispatch"
 	"github.com/muskats/heraion/internal/playbook"
+	"github.com/muskats/heraion/internal/secret"
 )
 
 type object struct {
@@ -120,7 +123,9 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
 		env[e.Name] = true
 	}
-	for _, want := range []string{"HERAION_CONFIG", "HERAION_LLM_API_KEY", "HERAION_GIT_TOKEN", "HERAION_MCP_DATADOG_DD_API_KEY", "HERAION_MCP_DATADOG_DD_APPLICATION_KEY"} {
+	// existingSecret refs arrive as <ENV>, inline values as <ENV>_FALLBACK.
+	for _, want := range []string{"HERAION_CONFIG", "HERAION_LLM_API_KEY", "HERAION_GIT_TOKEN_FALLBACK",
+		"HERAION_MCP_DATADOG_DD_API_KEY", "HERAION_MCP_DATADOG_DD_APPLICATION_KEY_FALLBACK"} {
 		if !env[want] {
 			t.Errorf("worker env missing %s", want)
 		}
@@ -216,5 +221,77 @@ func TestLiteLLMDefaultURL(t *testing.T) {
 	cm := find(objs, "ConfigMap", "t-heraion-config")
 	if !svc || !strings.Contains(cm.Data["config.yaml"], "baseURL: http://t-litellm-gateway:4000/v1") {
 		t.Fatalf("service found=%v, config:\n%s", svc, cm.Data["config.yaml"])
+	}
+}
+
+// All three levels on one credential, plus a shared Secret for the others.
+// The rendered env is then resolved with the binary's own resolver.
+func TestSecretHierarchy(t *testing.T) {
+	objs := render(t, "--set", "llm.baseURL=http://x", "--set", "llm.model=m",
+		"--set", "playbooks.trivy-remediate.enabled=true",
+		"--set", "secrets.existingSecret=shared",
+		"--set", "llm.apiKey.serviceAccountToken.audience=litellm",
+		"--set", "llm.apiKey.existingSecret=llm", "--set", "llm.apiKey.key=api-key",
+		"--set", "llm.apiKey.value=sk-literal")
+	var cron object
+	for _, o := range objs {
+		if o.Kind == "CronJob" {
+			cron = o
+		}
+	}
+	var cj batchv1.CronJob
+	if err := yaml.Unmarshal(cron.Raw, &cj); err != nil {
+		t.Fatal(err)
+	}
+	pod := cj.Spec.JobTemplate.Spec.Template.Spec
+	env := map[string]corev1.EnvVar{}
+	for _, e := range pod.Containers[0].Env {
+		env[e.Name] = e
+	}
+
+	if got := env["HERAION_LLM_API_KEY_FILE"].Value; got != "/var/run/secrets/heraion/sa/llm-api-key" {
+		t.Errorf("_FILE = %q", got)
+	}
+	ref := env["HERAION_LLM_API_KEY"].ValueFrom.SecretKeyRef
+	if ref.Name != "llm" || ref.Key != "api-key" || ref.Optional == nil || !*ref.Optional {
+		t.Errorf("existingSecret ref %+v", ref)
+	}
+	if fb := env["HERAION_LLM_API_KEY_FALLBACK"].ValueFrom.SecretKeyRef; fb.Name != "t-heraion-secrets" || fb.Key != "llm-api-key" {
+		t.Errorf("fallback ref %+v", fb)
+	}
+	// git.token sets nothing itself: it uses the shared Secret's default key.
+	if g := env["HERAION_GIT_TOKEN"].ValueFrom.SecretKeyRef; g.Name != "shared" || g.Key != "git-token" {
+		t.Errorf("shared secret ref %+v", g)
+	}
+
+	var sa *corev1.ServiceAccountTokenProjection
+	for _, v := range pod.Volumes {
+		if v.Projected != nil {
+			sa = v.Projected.Sources[0].ServiceAccountToken
+		}
+	}
+	if sa == nil || sa.Audience != "litellm" || sa.Path != "llm-api-key" {
+		t.Fatalf("projected token %+v", sa)
+	}
+
+	// Runtime: no token file and the optional key missing -> the literal wins.
+	src := secret.FromMap("HERAION_LLM_API_KEY", map[string]string{
+		"HERAION_LLM_API_KEY_FILE":     "/nonexistent/llm-api-key",
+		"HERAION_LLM_API_KEY":          "",
+		"HERAION_LLM_API_KEY_FALLBACK": "sk-literal",
+	})
+	if v, _ := src.Value(); v != "sk-literal" || src.Origin() != secret.OriginFallback {
+		t.Errorf("runtime resolution: %q from %s", v, src.Origin())
+	}
+}
+
+func TestCSIRequiresProviderClass(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	out, err := exec.Command("helm", "template", "t", ".", "--set", "llm.baseURL=http://x", "--set", "llm.model=m",
+		"--set", "playbooks.trivy-remediate.enabled=true", "--set", "llm.apiKey.csiKey=llm-api-key").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "secrets.csi.enabled") {
+		t.Fatalf("csiKey without secrets.csi must fail, got %v\n%s", err, out)
 	}
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/llm"
+	"github.com/muskats/heraion/internal/secret"
 )
 
 // Manager holds open MCP sessions for one run.
@@ -79,9 +80,9 @@ func Connect(ctx context.Context, servers map[string]*config.MCPServer, needed f
 }
 
 func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServer, version string) ([]llm.Tool, error) {
-	for h, v := range srv.SecretHeaders {
-		if v == "" {
-			return nil, fmt.Errorf("header %s: env %s is empty", h, srv.HeadersFromEnv[h])
+	for h, src := range srv.SecretHeaders {
+		if _, err := src.Value(); err != nil {
+			return nil, fmt.Errorf("header %s: %w", h, err)
 		}
 	}
 	// Time out in the transport, not with a context: SSE ties its stream to
@@ -89,8 +90,7 @@ func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServe
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.ResponseHeaderTimeout = 30 * time.Second
 	hc := &http.Client{Transport: &headerTransport{
-		base:    base,
-		headers: merge(srv.Headers, srv.SecretHeaders),
+		base: base, static: srv.Headers, secrets: srv.SecretHeaders, prefixes: srv.HeaderPrefixes,
 	}}
 	var t sdk.Transport
 	switch srv.Transport {
@@ -151,28 +151,29 @@ func filter(name string, allow, deny []string) bool {
 	return false
 }
 
-func merge(a, b map[string]string) map[string]string {
-	out := make(map[string]string, len(a)+len(b))
-	for k, v := range a {
-		out[k] = v
-	}
-	for k, v := range b {
-		out[k] = v
-	}
-	return out
-}
-
+// headerTransport sets headers on every request. Secret values are read per
+// request, so a rotated ServiceAccount token is used as soon as it changes.
 type headerTransport struct {
-	base    http.RoundTripper
-	headers map[string]string
+	base     http.RoundTripper
+	static   map[string]string
+	secrets  map[string]*secret.Source
+	prefixes map[string]string
 }
 
 func (h *headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if len(h.headers) > 0 {
-		r = r.Clone(r.Context())
-		for k, v := range h.headers {
-			r.Header.Set(k, v)
+	if len(h.static)+len(h.secrets) == 0 {
+		return h.base.RoundTrip(r)
+	}
+	r = r.Clone(r.Context())
+	for k, v := range h.static {
+		r.Header.Set(k, v)
+	}
+	for k, src := range h.secrets {
+		v, err := src.Value()
+		if err != nil {
+			return nil, fmt.Errorf("header %s: %w", k, err)
 		}
+		r.Header.Set(k, h.prefixes[k]+v)
 	}
 	return h.base.RoundTrip(r)
 }

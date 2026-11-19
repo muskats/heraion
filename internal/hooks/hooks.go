@@ -51,9 +51,11 @@ func New(gw config.Gateway, pbs map[string]*playbook.Playbook, d Dispatcher, log
 			errs = append(errs, fmt.Errorf("playbook %s uses webhook %q, but gateway.hooks.%s is not configured", pb.Name, name, name))
 			continue
 		}
-		if !h.Insecure && h.Secret == "" {
-			errs = append(errs, fmt.Errorf("gateway.hooks.%s: env %s is empty", name, h.SecretEnv))
-			continue
+		if !h.Insecure {
+			if _, err := h.Secret.Value(); err != nil {
+				errs = append(errs, fmt.Errorf("gateway.hooks.%s: %w", name, err))
+				continue
+			}
 		}
 		s.playbooks[name] = append(s.playbooks[name], pb.Name)
 	}
@@ -137,20 +139,21 @@ func (s *Server) handleHook(w http.ResponseWriter, r *http.Request) {
 // verify checks the request against the hook's secret in constant time.
 func verify(h *config.Hook, hdr http.Header, body []byte) bool {
 	got := strings.TrimSpace(hdr.Get(h.Header))
-	if got == "" || h.Secret == "" {
+	want := h.Secret.String() // re-read per request, so rotation needs no restart
+	if got == "" || want == "" {
 		return false
 	}
 	switch h.Auth {
 	case config.HookAuthToken:
 		got = strings.TrimPrefix(got, "Bearer ")
-		return subtle.ConstantTimeCompare([]byte(got), []byte(h.Secret)) == 1
+		return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 	default: // hmac-sha256
 		got = strings.TrimPrefix(got, "sha256=")
 		sig, err := hex.DecodeString(got)
 		if err != nil {
 			return false
 		}
-		mac := hmac.New(sha256.New, []byte(h.Secret))
+		mac := hmac.New(sha256.New, []byte(want))
 		mac.Write(body)
 		return hmac.Equal(sig, mac.Sum(nil))
 	}

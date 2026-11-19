@@ -2,6 +2,7 @@
 //
 //	heraion run   --playbook NAME   run one investigation (worker Job / CronJob)
 //	heraion serve                   webhook gateway that creates worker Jobs
+//	heraion check --connect         validate the setup (used by helm test)
 //	heraion version
 package main
 
@@ -31,6 +32,7 @@ const usage = `HeraIon investigates problems with an LLM and proposes fixes as p
 Usage:
   heraion run --playbook NAME [flags]   run one investigation
   heraion serve [flags]                 webhook gateway: creates one worker Job per event
+  heraion check [--connect]             validate config, playbooks, secrets (and connectivity)
   heraion version                       print the version
 
 Run "heraion run -h" or "heraion serve -h" for flags.
@@ -50,6 +52,8 @@ func main() {
 		err = cmdRun(ctx, os.Args[2:])
 	case "serve":
 		err = cmdServe(ctx, os.Args[2:])
+	case "check":
+		err = cmdCheck(ctx, os.Args[2:])
 	case "version", "--version":
 		fmt.Println(version)
 	case "-h", "--help", "help":
@@ -99,7 +103,8 @@ func cmdRun(ctx context.Context, args []string) error {
 	if *dir != "" {
 		cfg.PlaybooksDir = *dir
 	}
-	red := guardrails.NewRedactor(cfg.Secrets()...)
+	red := guardrails.NewRedactor()
+	red.AddSources(cfg.Secrets()...)
 	log := newLogger(*level, red)
 	slog.SetDefault(log)
 

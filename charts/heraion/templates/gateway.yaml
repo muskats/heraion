@@ -3,12 +3,16 @@
 {{- $name := printf "%s-gateway" (include "heraion.fullname" .) }}
 {{- range $n, $p := (include "heraion.playbooks" . | fromYaml) }}
 {{- with ($p.trigger | default dict).webhook }}
-{{- $h := index $g.hooks . | default dict }}
-{{- if not (or ($h.secret | default dict).existingSecret ($h.secret | default dict).value) }}
-{{- fail (printf "playbook %s uses webhook %q: set gateway.hooks.%s.secret (existingSecret or value)" $n . .) }}
+{{- $h := index $g.hooks . }}
+{{- if not $h }}
+{{- fail (printf "playbook %s uses webhook %q: add gateway.hooks.%s" $n . .) }}
+{{- end }}
+{{- if not (include "heraion.credConfigured" (dict "root" $ "ref" $h.secret)) }}
+{{- fail (printf "gateway.hooks.%s.secret: set serviceAccountToken, csiKey, existingSecret or value (or secrets.existingSecret)" .) }}
 {{- end }}
 {{- end }}
 {{- end }}
+{{- $creds := include "heraion.credentials" (dict "root" $ "role" "gateway") | fromYaml }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -56,7 +60,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "heraion.gatewaySA" . }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ include "heraion.namespace" . }}
 {{- end }}
 ---
 apiVersion: apps/v1
@@ -67,6 +71,9 @@ spec:
   {{- if not $g.autoscaling.enabled }}
   replicas: {{ $g.replicas }}
   {{- end }}
+  revisionHistoryLimit: {{ $g.revisionHistoryLimit }}
+  strategy:
+    {{- toYaml $g.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "heraion.componentSelector" (dict "root" $ "component" "gateway") | nindent 6 }}
@@ -78,15 +85,15 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        checksum/config: {{ include "heraion.config" . | sha256sum }}
-        checksum/playbooks: {{ include "heraion.playbooks" . | sha256sum }}
+        {{- include "heraion.checksums" . | nindent 8 }}
         checksum/job-template: {{ include "heraion.workerJobSpec" (dict "root" $ "playbook" "") | sha256sum }}
         {{- with $g.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
       serviceAccountName: {{ include "heraion.gatewaySA" . }}
-      {{- include "heraion.podScheduling" (dict "root" $ "role" $g) | nindent 6 }}
+      terminationGracePeriodSeconds: {{ $g.terminationGracePeriodSeconds }}
+      {{- include "heraion.podScheduling" (dict "root" $ "role" $g "component" "gateway") | nindent 6 }}
       {{- with $g.initContainers }}
       initContainers:
         {{- toYaml . | nindent 8 }}
@@ -103,9 +110,7 @@ spec:
               value: /etc/heraion/conf/config.yaml
             - name: POD_NAMESPACE
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
-            {{- range $n, $h := $g.hooks }}
-            {{- include "heraion.secretEnv" (dict "root" $ "env" (printf "HERAION_HOOK_%s_SECRET" ($n | upper | replace "-" "_")) "ref" $h.secret "key" (printf "hook-%s" $n)) | nindent 12 }}
-            {{- end }}
+            {{- include "heraion.credEnv" (dict "root" $ "items" $creds.items) | nindent 12 }}
             {{- with $g.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -117,6 +122,10 @@ spec:
             {{- toYaml $g.livenessProbe | nindent 12 }}
           readinessProbe:
             {{- toYaml $g.readinessProbe | nindent 12 }}
+          {{- with $g.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml $g.resources | nindent 12 }}
           securityContext:
@@ -125,6 +134,7 @@ spec:
             - { name: config, mountPath: /etc/heraion/conf, readOnly: true }
             - { name: playbooks, mountPath: /etc/heraion/playbooks, readOnly: true }
             - { name: job-template, mountPath: /etc/heraion/job, readOnly: true }
+            {{- include "heraion.credMounts" (dict "root" $ "items" $creds.items) | nindent 12 }}
             {{- with $g.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -138,6 +148,7 @@ spec:
           configMap: { name: {{ include "heraion.playbooksName" . }} }
         - name: job-template
           configMap: { name: {{ include "heraion.jobTemplateName" . }} }
+        {{- include "heraion.credVolumes" (dict "root" $ "items" $creds.items) | nindent 8 }}
         {{- with $g.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -215,7 +226,12 @@ kind: PodDisruptionBudget
 metadata:
   {{- include "heraion.metadata" (dict "root" $ "component" "gateway" "name" $name) | nindent 2 }}
 spec:
+  {{- if hasKey $g.podDisruptionBudget "maxUnavailable" }}
+  maxUnavailable: {{ $g.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
   minAvailable: {{ $g.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       {{- include "heraion.componentSelector" (dict "root" $ "component" "gateway") | nindent 6 }}

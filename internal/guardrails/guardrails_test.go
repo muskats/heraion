@@ -3,6 +3,8 @@ package guardrails
 import (
 	"strings"
 	"testing"
+
+	"github.com/muskats/heraion/internal/secret"
 )
 
 func TestRedact(t *testing.T) {
@@ -41,5 +43,17 @@ func TestGuard(t *testing.T) {
 	g.ReleasePR()
 	if g.ReservePR() != nil {
 		t.Error("release must free a slot")
+	}
+}
+
+func TestRotatedSecretStaysMasked(t *testing.T) {
+	env := map[string]string{"K": "first-token-value"}
+	r := NewRedactor()
+	r.AddSources(secret.FromMap("K", env))
+	_ = r.Redact("warm up")
+	env["K"] = "second-token-value"
+	out := r.Redact("old=first-token-value new=second-token-value")
+	if strings.Contains(out, "first-token") || strings.Contains(out, "second-token") {
+		t.Fatalf("leak: %s", out)
 	}
 }

@@ -1,7 +1,11 @@
 llm:
   baseURL: http://litellm.example:4000/v1
   model: gpt-4.1
-  apiKey: { existingSecret: llm-creds, key: api-key }
+  apiKey:
+    csiKey: llm-api-key                    # 1. from the CSI mount
+    existingSecret: llm-creds              # 2. optional key
+    key: api-key
+    value: sk-literal-fallback             # 3. literal
 git:
   provider: gitea
   endpoint: https://git.example.internal
@@ -35,6 +39,13 @@ mcpServers:
     secretHeaders:
       DD-API-KEY: { existingSecret: datadog, key: api-key }
       DD-APPLICATION-KEY: { value: dd-app-key-value }
+  vault:
+    enabled: true
+    mode: external
+    url: https://vault-mcp.example.internal/mcp
+    secretHeaders:
+      Authorization:
+        serviceAccountToken: { audience: vault }   # sent as "Bearer <token>"
   custom:
     enabled: true
     mode: deploy
@@ -45,6 +56,11 @@ mcpServers:
       secretEnv:
         API_TOKEN: { value: custom-token-value }
 resourceQuota: { enabled: true }
+secrets:
+  existingSecret: heraion-shared
+  csi:
+    enabled: true
+    secretProviderClass: heraion-aws
 extraObjects:
   - apiVersion: v1
     kind: ConfigMap
