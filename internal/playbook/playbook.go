@@ -40,11 +40,14 @@ type Playbook struct {
 	JiraProjects []string `json:"jiraProjects,omitempty"`
 	// JiraReadSpaces narrows jira.readSpaces, ConfluenceSpaces narrows
 	// confluence.spaces. Empty: all of them.
-	JiraReadSpaces   []string   `json:"jiraReadSpaces,omitempty"`
-	ConfluenceSpaces []string   `json:"confluenceSpaces,omitempty"`
-	Prompt           string     `json:"prompt"`
-	Output           string     `json:"output,omitempty"`
-	Guardrails       Guardrails `json:"guardrails,omitempty"`
+	JiraReadSpaces   []string `json:"jiraReadSpaces,omitempty"`
+	ConfluenceSpaces []string `json:"confluenceSpaces,omitempty"`
+	Prompt           string   `json:"prompt"`
+	Output           string   `json:"output,omitempty"`
+	// Mode is safe, full or yolo, see config.Mode. Empty: the global mode.
+	// A riskier mode than the global one is narrowed to it.
+	Mode       config.Mode `json:"mode,omitempty"`
+	Guardrails Guardrails  `json:"guardrails,omitempty"`
 }
 
 // Trigger says how a playbook is started. Exactly one field must be set.
@@ -124,6 +127,11 @@ func (p *Playbook) Validate() error {
 	if p.Output != OutputPR && p.Output != OutputReport {
 		errs = append(errs, fmt.Errorf("output %q must be %q or %q", p.Output, OutputPR, OutputReport))
 	}
+	if p.Mode != "" {
+		if err := config.ValidateMode("mode", p.Mode); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if len(p.Tools) == 0 {
 		errs = append(errs, errors.New("tools allowlist must not be empty"))
 	}
@@ -177,16 +185,7 @@ func (p *Playbook) AllowsTool(name string) bool {
 // EffectiveRepos intersects the playbook repos with the global list. No
 // playbook repos means all global repos; no global repos means none.
 func (p *Playbook) EffectiveRepos(global []string) []string {
-	if len(p.Repos) == 0 {
-		return slices.Clone(global)
-	}
-	var out []string
-	for _, r := range p.Repos {
-		if slices.Contains(global, r) {
-			out = append(out, r)
-		}
-	}
-	return out
+	return intersect(p.Repos, global)
 }
 
 // EffectiveJiraProjects works like EffectiveRepos, for jira.projects.
@@ -215,6 +214,19 @@ func (p *Playbook) EffectiveJiraReadSpaces(global []string) []string {
 // EffectiveConfluenceSpaces works like EffectiveRepos, for confluence.spaces.
 func (p *Playbook) EffectiveConfluenceSpaces(global []string) []string {
 	return intersect(p.ConfluenceSpaces, global)
+}
+
+// EffectiveMode is the playbook mode narrowed to the global one, e.g.
+// playbook yolo with global full gives full. No playbook mode: global.
+// An empty global mode (a Config not built by config.Load) counts as full.
+func (p *Playbook) EffectiveMode(global config.Mode) config.Mode {
+	if global == "" {
+		global = config.ModeFull
+	}
+	if p.Mode == "" {
+		return global
+	}
+	return config.Safer(p.Mode, global)
 }
 
 // DryRun is true if the global flag or the playbook asks for it.

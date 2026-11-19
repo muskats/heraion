@@ -25,8 +25,9 @@ confluence:
   spaces: [RUN, OPS]
   token: { existingSecret: atlassian, key: api-token }   # same token as Jira on Cloud
 dryRun: true
+mode: yolo
 playbooks:
-  trivy-remediate: { enabled: true }
+  trivy-remediate: { enabled: true, mode: safe }
   alertmanager-triage: { enabled: true }
   custom-report:
     trigger: { manual: true }

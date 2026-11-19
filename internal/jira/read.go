@@ -51,19 +51,11 @@ type rawFields struct {
 }
 
 func (f rawFields) summary(key string) Summary {
-	s := Summary{Key: key, Type: f.IssueType.Name, Status: f.Status.Name, Updated: shortTime(f.Updated), Summary: f.Summary}
+	s := Summary{Key: key, Type: f.IssueType.Name, Status: f.Status.Name, Updated: atlassian.ShortTime(f.Updated), Summary: f.Summary}
 	if f.Priority != nil {
 		s.Priority = f.Priority.Name
 	}
 	return s
-}
-
-// shortTime trims "2026-11-18T10:02:33.123+0000" to "2026-11-18T10:02".
-func shortTime(t string) string {
-	if len(t) >= 16 {
-		return t[:16]
-	}
-	return t
 }
 
 var searchFields = []string{"summary", "status", "issuetype", "priority", "updated"}
@@ -108,7 +100,7 @@ func (c *Client) Get(ctx context.Context, key string, maxComments int) (*Detail,
 		cs = cs[len(cs)-maxComments:]
 	}
 	for _, cm := range cs {
-		d.Comments = append(d.Comments, Comment{Created: shortTime(cm.Created), Body: richText(cm.Body)})
+		d.Comments = append(d.Comments, Comment{Created: atlassian.ShortTime(cm.Created), Body: richText(cm.Body)})
 	}
 	return d, nil
 }
@@ -128,7 +120,7 @@ func richText(raw json.RawMessage) string {
 	}
 	var b strings.Builder
 	adfText(&b, doc)
-	return strings.TrimSpace(collapseBlank(b.String()))
+	return strings.TrimSpace(atlassian.CollapseBlank(b.String()))
 }
 
 // adfText walks ADF: text nodes are written, block nodes end with a newline,
@@ -173,13 +165,6 @@ func adfText(b *strings.Builder, n map[string]any) {
 	}
 }
 
-func collapseBlank(s string) string {
-	for strings.Contains(s, "\n\n\n") {
-		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
-	}
-	return s
-}
-
 // Reader is what the read tools need. *Client implements it.
 type Reader interface {
 	Search(ctx context.Context, jql string, limit int) ([]Summary, error)
@@ -222,15 +207,12 @@ func (t *readTools) search(ctx context.Context, raw json.RawMessage) (string, er
 		Space, Text string
 		Days, Limit int
 	}
-	if err := json.Unmarshal(raw, &a); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := llm.DecodeArgs(raw, &a); err != nil {
+		return "", err
 	}
-	spaces := t.spaces
-	if a.Space != "" {
-		if !slices.Contains(t.spaces, a.Space) {
-			return "", fmt.Errorf("space %q is not allowed; allowed: %v", a.Space, t.spaces)
-		}
-		spaces = []string{a.Space}
+	spaces, err := atlassian.PickSpaces(t.spaces, a.Space)
+	if err != nil {
+		return "", err
 	}
 	a.Days = atlassian.Clamp(a.Days, 7, 1, 90)
 	a.Limit = atlassian.Clamp(a.Limit, 20, 1, 50)
@@ -257,8 +239,8 @@ func (t *readTools) search(ctx context.Context, raw json.RawMessage) (string, er
 
 func (t *readTools) get(ctx context.Context, raw json.RawMessage) (string, error) {
 	var a struct{ Key string }
-	if err := json.Unmarshal(raw, &a); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := llm.DecodeArgs(raw, &a); err != nil {
+		return "", err
 	}
 	key := strings.ToUpper(strings.TrimSpace(a.Key))
 	space, _, ok := strings.Cut(key, "-")

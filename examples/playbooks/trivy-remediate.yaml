@@ -18,4 +18,5 @@ prompt: |
      severities, affected workloads, installed and fixed versions.
   If nothing is fixable, open no PR and say so.
 output: pr
+mode: safe     # only same-major version bumps, lockfiles and .trivyignore entries
 guardrails: { maxPRs: 3, dryRun: false }

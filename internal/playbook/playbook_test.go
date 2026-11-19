@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/muskats/heraion/internal/config"
 )
 
 const trivy = `
@@ -128,5 +130,26 @@ func TestGuardrailDefaultsAndExplicitZero(t *testing.T) {
 	}
 	if _, err := Parse([]byte(base + "guardrails: {denyPaths: ['deploy/[']}\n")); err == nil {
 		t.Error("malformed path pattern must be rejected")
+	}
+}
+
+func TestEffectiveMode(t *testing.T) {
+	for _, c := range []struct{ pb, global, want config.Mode }{
+		{"", config.ModeYolo, config.ModeYolo},
+		{"", "", config.ModeFull},
+		{config.ModeSafe, config.ModeFull, config.ModeSafe},
+		{config.ModeYolo, config.ModeFull, config.ModeFull},
+		{config.ModeYolo, config.ModeYolo, config.ModeYolo},
+	} {
+		p := &Playbook{Mode: c.pb}
+		if got := p.EffectiveMode(c.global); got != c.want {
+			t.Errorf("playbook %q, global %q: %q, want %q", c.pb, c.global, got, c.want)
+		}
+	}
+	if _, err := Parse([]byte("name: a\ntrigger: {manual: true}\ntools: [x]\nprompt: p\nmode: reckless\n")); err == nil {
+		t.Error("invalid mode must be rejected")
+	}
+	if p, err := Parse([]byte("name: a\ntrigger: {manual: true}\ntools: [x]\nprompt: p\nmode: safe\n")); err != nil || p.Mode != config.ModeSafe {
+		t.Errorf("mode: %v %v", p, err)
 	}
 }

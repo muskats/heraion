@@ -81,6 +81,8 @@ reject "no llm.model" --set llm.model=
 reject "unknown top-level key" --set notAKey=1
 reject "unknown guardrail key" --set playbooks.trivy-remediate.enabled=true --set playbooks.trivy-remediate.guardrails.maxPR=1
 reject "reopenAfter is not a duration" --set playbooks.trivy-remediate.enabled=true --set playbooks.trivy-remediate.guardrails.reopenAfter=week
+reject "unknown mode" --set mode=reckless
+reject "unknown playbook mode" --set playbooks.trivy-remediate.enabled=true --set playbooks.trivy-remediate.mode=reckless
 reject "maxBodyBytes over the Secret limit" --set gateway.maxBodyBytes=2000000
 reject "webhook playbook without a hook" --set playbooks.alertmanager-triage.enabled=true
 reject "csiKey without secrets.csi" --set llm.apiKey.csiKey=llm-api-key --set playbooks.trivy-remediate.enabled=true

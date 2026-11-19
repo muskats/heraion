@@ -18,7 +18,6 @@ import (
 	"syscall"
 
 	"github.com/muskats/heraion/internal/config"
-	"github.com/muskats/heraion/internal/dispatch"
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/playbook"
 	"github.com/muskats/heraion/internal/worker"
@@ -61,9 +60,9 @@ func main() {
 	case "check":
 		err = cmdCheck(ctx, os.Args[2:])
 	case "version", "--version":
-		fmt.Println(version)
+		fmt.Fprintln(stdout, version)
 	case "-h", "--help", "help":
-		fmt.Print(usage)
+		fmt.Fprint(stdout, usage)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)
@@ -83,14 +82,38 @@ func envOr(k, def string) string {
 	return def
 }
 
+// configFlag adds --config, default $HERAION_CONFIG or /etc/heraion/config.yaml.
+func configFlag(fs *flag.FlagSet) *string {
+	return fs.String("config", envOr("HERAION_CONFIG", "/etc/heraion/config.yaml"), "config file (env HERAION_CONFIG)")
+}
+
+// logLevelFlag adds --log-level, default $HERAION_LOG_LEVEL or info.
+func logLevelFlag(fs *flag.FlagSet) *string {
+	return fs.String("log-level", envOr("HERAION_LOG_LEVEL", "info"), "debug, info, warn or error")
+}
+
+// load reads the config and returns a redactor for its secrets and a
+// logger that uses it. The logger also becomes slog's default.
+func load(cfgPath, level string) (*config.Config, *guardrails.Redactor, *slog.Logger, error) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	red := guardrails.NewRedactor()
+	red.AddSources(cfg.Secrets()...)
+	log := newLogger(level, red)
+	slog.SetDefault(log)
+	return cfg, red, log, nil
+}
+
 func cmdRun(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	cfgPath := fs.String("config", envOr("HERAION_CONFIG", "/etc/heraion/config.yaml"), "config file (env HERAION_CONFIG)")
+	cfgPath := configFlag(fs)
 	name := fs.String("playbook", os.Getenv("HERAION_PLAYBOOK"), "playbook name (env HERAION_PLAYBOOK)")
 	dir := fs.String("playbooks-dir", "", "playbooks directory (overrides config playbooksDir)")
 	eventPath := fs.String("event", os.Getenv("HERAION_EVENT_FILE"), "file with the trigger payload, '-' for stdin (env HERAION_EVENT_FILE)")
 	dryRun := fs.Bool("dry-run", false, "log proposed PRs instead of opening them")
-	level := fs.String("log-level", envOr("HERAION_LOG_LEVEL", "info"), "debug, info, warn or error")
+	level := logLevelFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -99,7 +122,7 @@ func cmdRun(ctx context.Context, args []string) error {
 		return errors.New("--playbook is required")
 	}
 
-	cfg, err := config.Load(*cfgPath)
+	cfg, red, log, err := load(*cfgPath, *level)
 	if err != nil {
 		return err
 	}
@@ -109,10 +132,6 @@ func cmdRun(ctx context.Context, args []string) error {
 	if *dir != "" {
 		cfg.PlaybooksDir = *dir
 	}
-	red := guardrails.NewRedactor()
-	red.AddSources(cfg.Secrets()...)
-	log := newLogger(*level, red)
-	slog.SetDefault(log)
 
 	pbs, err := playbook.LoadDir(cfg.PlaybooksDir)
 	if err != nil {
@@ -125,9 +144,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	var event []byte
 	switch *eventPath {
 	case "":
-		// Gateway Jobs set HERAION_EVENT_FILE (the default of --event);
-		// HERAION_EVENT is still read for Jobs created by older gateways.
-		event = []byte(os.Getenv(dispatch.EnvEvent))
+		// No event, e.g. a scheduled run.
 	case "-":
 		event, err = io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
 	default:
@@ -139,7 +156,7 @@ func cmdRun(ctx context.Context, args []string) error {
 
 	rep, err := worker.Run(ctx, worker.Options{Config: cfg, Playbook: pb, Event: event, Redactor: red, Log: log, Version: version})
 	if rep != nil {
-		log.Info("run finished", "dryRun", rep.DryRun, "steps", rep.Steps, "tokens", rep.Tokens,
+		log.Info("run finished", "dryRun", rep.DryRun, "mode", rep.Mode, "steps", rep.Steps, "tokens", rep.Tokens,
 			"prs", rep.PRs, "issues", rep.Issues, "summary", rep.Final)
 	}
 	return err

@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -24,7 +23,7 @@ import (
 //
 //	$ heraion check --connect
 //	ok    config     /etc/heraion/conf/config.yaml
-//	ok    playbooks  alertmanager-triage, trivy-remediate
+//	ok    playbooks  alertmanager-triage (full), trivy-remediate (safe)
 //	ok    secret     HERAION_LLM_API_KEY (file)
 //	warn  secret     HERAION_GIT_TOKEN not set
 //	ok    mcp        k8s: 18 tools
@@ -33,7 +32,7 @@ import (
 //	ok    confluence https://acme.atlassian.net/wiki (cloud), spaces [RUNBOOKS]
 func cmdCheck(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
-	cfgPath := fs.String("config", envOr("HERAION_CONFIG", "/etc/heraion/config.yaml"), "config file (env HERAION_CONFIG)")
+	cfgPath := configFlag(fs)
 	role := fs.String("role", "worker", "worker or gateway: which secrets must be present")
 	connect := fs.Bool("connect", false, "also connect to the MCP servers and the LLM endpoint")
 	if err := fs.Parse(args); err != nil {
@@ -52,7 +51,10 @@ func cmdCheck(ctx context.Context, args []string) error {
 		c.fail("playbooks", err.Error())
 	} else {
 		names := make([]string, 0, len(pbs))
-		for n := range pbs {
+		for n, p := range pbs {
+			if p.Output == playbook.OutputPR {
+				n += " (" + string(p.EffectiveMode(cfg.Mode)) + ")"
+			}
 			names = append(names, n)
 		}
 		sort.Strings(names)
@@ -85,12 +87,8 @@ func cmdCheck(ctx context.Context, args []string) error {
 	if *connect && *role != "gateway" {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
-		quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 		for name, srv := range cfg.MCPServers {
-			one := map[string]*config.MCPServer{name: {}}
-			*one[name] = *srv
-			one[name].Required = true
-			m, tools, err := mcp.Connect(ctx, one, nil, version, quiet)
+			sess, tools, err := mcp.Dial(ctx, name, srv, version)
 			switch {
 			case err != nil && srv.Required:
 				c.fail("mcp", err.Error())
@@ -98,7 +96,7 @@ func cmdCheck(ctx context.Context, args []string) error {
 				c.warn("mcp", err.Error()+" (optional: runs continue without it)")
 			default:
 				c.ok("mcp", fmt.Sprintf("%s: %d tools", name, len(tools)))
-				m.Close()
+				_ = sess.Close()
 			}
 		}
 		c.llm(ctx, cfg)

@@ -49,20 +49,28 @@ type PRService interface {
 // NewPRService uses go-scm, so self-hosted servers work, e.g. provider
 // "gitea" with endpoint https://git.example.com.
 func NewPRService(g config.Git) (PRService, error) {
-	// The token is resolved per request, so a rotating token file works.
-	c, err := factory.NewClientWithTokenSource(g.Provider, g.Endpoint, tokenSource{g.Token})
+	c, err := newGoSCMClient(g)
 	if err != nil {
-		return nil, fmt.Errorf("git provider %s: %w", g.Provider, err)
+		return nil, err
 	}
 	return &goscmService{c: c}, nil
 }
 
-// NewCloneURLResolver asks the Git server for a repo's HTTPS clone URL. It
-// only reads, so it is used in dry-run too.
-func NewCloneURLResolver(g config.Git) (func(ctx context.Context, repo string) (string, error), error) {
+// newGoSCMClient resolves the token per request, so a rotating token file works.
+func newGoSCMClient(g config.Git) (*goscm.Client, error) {
 	c, err := factory.NewClientWithTokenSource(g.Provider, g.Endpoint, tokenSource{g.Token})
 	if err != nil {
 		return nil, fmt.Errorf("git provider %s: %w", g.Provider, err)
+	}
+	return c, nil
+}
+
+// NewCloneURLResolver asks the Git server for a repo's HTTPS clone URL. It
+// only reads, so it is used in dry-run too.
+func NewCloneURLResolver(g config.Git) (CloneURLFunc, error) {
+	c, err := newGoSCMClient(g)
+	if err != nil {
+		return nil, err
 	}
 	return func(ctx context.Context, repo string) (string, error) {
 		r, _, err := c.Repositories.Find(ctx, repo)

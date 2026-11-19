@@ -10,116 +10,127 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/secret"
 )
 
+// Options configure a Guard. Zero values mean: no repos, no PRs, no issues,
+// no file size limit, full mode.
+type Options struct {
+	Repos        []string
+	MaxPRs       int
+	DryRun       bool
+	MaxFileBytes int       // 0: no limit
+	Redactor     *Redactor // nil: a new one
+	// AllowPaths limits writes, e.g. ["deploy/**"]. Empty: any path, or
+	// SafePaths in safe mode. DenyPaths adds to DefaultDenyPaths.
+	AllowPaths, DenyPaths []string
+	Mode                  config.Mode // empty: full
+	// JiraProjects create_issue may write to, e.g. [OPS], at most MaxIssues times.
+	JiraProjects []string
+	MaxIssues    int
+}
+
 // Guard enforces the limits of a single run. It is safe for concurrent use.
 type Guard struct {
-	repos        []string
-	maxPRs       int
-	dryRun       bool
-	maxFileBytes int
-	redactor     *Redactor
-
-	projects  []string
-	maxIssues int
-
-	allowPaths, denyPaths []string
-
-	mu     sync.Mutex
-	prs    int
-	issues int
+	o      Options
+	prs    budget
+	issues budget
 }
 
-// New creates a Guard.
-func New(repos []string, maxPRs int, dryRun bool, maxFileBytes int, r *Redactor) *Guard {
-	if r == nil {
-		r = NewRedactor()
+// New creates a Guard, e.g. New(Options{Repos: []string{"acme/web"}, MaxPRs: 1}).
+func New(o Options) *Guard {
+	if o.Redactor == nil {
+		o.Redactor = NewRedactor()
 	}
-	return &Guard{repos: repos, maxPRs: maxPRs, dryRun: dryRun, maxFileBytes: maxFileBytes, redactor: r}
+	if o.Mode == "" {
+		o.Mode = config.ModeFull
+	}
+	if o.Mode == config.ModeSafe && len(o.AllowPaths) == 0 {
+		o.AllowPaths = SafePaths
+	}
+	return &Guard{
+		o:      o,
+		prs:    budget{max: o.MaxPRs, full: "PR budget exhausted: this playbook may open at most %d PR(s) per run"},
+		issues: budget{max: o.MaxIssues, full: "issue budget exhausted: this playbook may create at most %d issue(s) per run"},
+	}
 }
 
-// WithIssues allows creating up to max issues in the given Jira projects,
-// e.g. WithIssues([]string{"OPS"}, 1).
-func (g *Guard) WithIssues(projects []string, max int) *Guard {
-	g.projects, g.maxIssues = projects, max
-	return g
+// budget counts what a run creates, e.g. at most 1 PR.
+type budget struct {
+	mu   sync.Mutex
+	used int
+	max  int
+	full string // error format, gets max
 }
+
+func (b *budget) reserve() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.used >= b.max {
+		return fmt.Errorf(b.full, b.max)
+	}
+	b.used++
+	return nil
+}
+
+func (b *budget) release() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.used > 0 {
+		b.used--
+	}
+}
+
+// ReservePR takes one PR from the budget. Call ReleasePR if no PR was opened.
+func (g *Guard) ReservePR() error { return g.prs.reserve() }
+
+// ReleasePR returns a slot taken by ReservePR.
+func (g *Guard) ReleasePR() { g.prs.release() }
+
+// ReserveIssue takes one issue from the budget. Call ReleaseIssue if none was created.
+func (g *Guard) ReserveIssue() error { return g.issues.reserve() }
+
+// ReleaseIssue returns a slot taken by ReserveIssue.
+func (g *Guard) ReleaseIssue() { g.issues.release() }
 
 // Projects returns the Jira projects issues may be created in.
-func (g *Guard) Projects() []string { return slices.Clone(g.projects) }
+func (g *Guard) Projects() []string { return slices.Clone(g.o.JiraProjects) }
 
 // CheckProject fails unless project is allowlisted.
 func (g *Guard) CheckProject(project string) error {
-	if !slices.Contains(g.projects, project) {
-		return fmt.Errorf("jira project %q is not allowed; allowed: %v", project, g.projects)
+	if !slices.Contains(g.o.JiraProjects, project) {
+		return fmt.Errorf("jira project %q is not allowed; allowed: %v", project, g.o.JiraProjects)
 	}
 	return nil
-}
-
-// ReserveIssue takes one issue from the budget. Call ReleaseIssue if none was created.
-func (g *Guard) ReserveIssue() error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.issues >= g.maxIssues {
-		return fmt.Errorf("issue budget exhausted: this playbook may create at most %d issue(s) per run", g.maxIssues)
-	}
-	g.issues++
-	return nil
-}
-
-// ReleaseIssue returns a slot taken by ReserveIssue.
-func (g *Guard) ReleaseIssue() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.issues > 0 {
-		g.issues--
-	}
 }
 
 // DryRun reports whether changes must only be logged, not pushed.
-func (g *Guard) DryRun() bool { return g.dryRun }
+func (g *Guard) DryRun() bool { return g.o.DryRun }
+
+// Mode returns the run's mode.
+func (g *Guard) Mode() config.Mode { return g.o.Mode }
 
 // Repos returns the allowed repositories.
-func (g *Guard) Repos() []string { return slices.Clone(g.repos) }
+func (g *Guard) Repos() []string { return slices.Clone(g.o.Repos) }
 
 // Redactor returns the run's redactor.
-func (g *Guard) Redactor() *Redactor { return g.redactor }
+func (g *Guard) Redactor() *Redactor { return g.o.Redactor }
 
 // CheckRepo fails unless repo is allowlisted.
 func (g *Guard) CheckRepo(repo string) error {
-	if !slices.Contains(g.repos, repo) {
-		return fmt.Errorf("repository %q is not in this playbook's allowlist %v", repo, g.repos)
+	if !slices.Contains(g.o.Repos, repo) {
+		return fmt.Errorf("repository %q is not in this playbook's allowlist %v", repo, g.o.Repos)
 	}
 	return nil
 }
 
 // CheckFileSize fails if a write exceeds the per-file limit.
 func (g *Guard) CheckFileSize(n int) error {
-	if g.maxFileBytes > 0 && n > g.maxFileBytes {
-		return fmt.Errorf("file of %d bytes exceeds the %d byte limit", n, g.maxFileBytes)
+	if g.o.MaxFileBytes > 0 && n > g.o.MaxFileBytes {
+		return fmt.Errorf("file of %d bytes exceeds the %d byte limit", n, g.o.MaxFileBytes)
 	}
 	return nil
-}
-
-// ReservePR takes one PR from the budget. Call ReleasePR if no PR was opened.
-func (g *Guard) ReservePR() error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.prs >= g.maxPRs {
-		return fmt.Errorf("PR budget exhausted: this playbook may open at most %d PR(s) per run", g.maxPRs)
-	}
-	g.prs++
-	return nil
-}
-
-// ReleasePR returns a slot taken by ReservePR.
-func (g *Guard) ReleasePR() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.prs > 0 {
-		g.prs--
-	}
 }
 
 const mask = "[REDACTED]"
@@ -176,14 +187,18 @@ func (r *Redactor) AddSources(srcs ...*secret.Source) {
 func (r *Redactor) Add(secrets ...string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	added := false
 	for _, s := range secrets {
 		s = strings.TrimSpace(s)
 		if len(s) >= 6 && !slices.Contains(r.values, s) {
 			r.values = append(r.values, s)
+			added = true
 		}
 	}
-	// Longest first: with "abc123" and "abc123xyz", the longer one is masked whole.
-	sort.Slice(r.values, func(i, j int) bool { return len(r.values[i]) > len(r.values[j]) })
+	if added {
+		// Longest first: with "abc123" and "abc123xyz", the longer one is masked whole.
+		sort.Slice(r.values, func(i, j int) bool { return len(r.values[i]) > len(r.values[j]) })
+	}
 }
 
 // Redact returns s with secrets masked.

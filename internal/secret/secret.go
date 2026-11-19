@@ -46,9 +46,6 @@ type Source struct {
 	expires time.Time
 }
 
-// FromEnv returns the Source for env var name.
-func FromEnv(name string) *Source { return New(name, os.Getenv) }
-
 // New returns a Source that looks env vars up with getenv.
 func New(name string, getenv func(string) string) *Source {
 	return &Source{Name: name, getenv: getenv}

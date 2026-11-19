@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/textutil"
@@ -36,8 +37,18 @@ type Tool struct {
 // Created is the outcome of one create_issue call.
 type Created struct {
 	Project, Key, URL, Summary string
-	Duplicate, DryRun          bool
+	Outcome                    Outcome
 }
+
+// Outcome is what one create_issue call did.
+type Outcome string
+
+// Outcomes.
+const (
+	OutcomeCreated   Outcome = "created"
+	OutcomeDuplicate Outcome = "duplicate" // an open issue with the same fingerprint exists
+	OutcomeDryRun    Outcome = "dry-run"   // logged, not created
+)
 
 // Fingerprint is the label that identifies the same finding across runs, e.g.
 // Fingerprint("trivy-remediate", "OPS", "CVE-2024-1234 in web") = "heraion-1b2c3d4e5f60".
@@ -74,8 +85,8 @@ type args struct {
 
 func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 	var a args
-	if err := json.Unmarshal(raw, &a); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := llm.DecodeArgs(raw, &a); err != nil {
+		return "", err
 	}
 	red := t.Guard.Redactor()
 	// Redact before the length cut, so a secret at the cut is masked whole.
@@ -90,7 +101,7 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	for _, l := range a.Labels {
-		if l == "" || strings.ContainsAny(l, " \t\n") {
+		if !config.ValidLabel(l) {
 			return "", fmt.Errorf("label %q must not contain spaces", l)
 		}
 	}
@@ -114,7 +125,7 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 
 	if t.Guard.DryRun() {
 		log.Info("dry-run: would create issue", "summary", in.Summary, "type", in.Type, "labels", in.Labels, "description", in.Description)
-		t.Created = append(t.Created, Created{Project: a.Project, Summary: in.Summary, DryRun: true})
+		t.Created = append(t.Created, Created{Project: a.Project, Summary: in.Summary, Outcome: OutcomeDryRun})
 		return fmt.Sprintf("dry-run: issue %q in %s was logged, not created", in.Summary, a.Project), nil
 	}
 	if t.API == nil {
@@ -128,7 +139,7 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 	}
 	if existing != nil {
 		log.Info("issue already open, skipping", "key", existing.Key)
-		t.Created = append(t.Created, Created{Project: a.Project, Key: existing.Key, URL: existing.URL, Summary: in.Summary, Duplicate: true})
+		t.Created = append(t.Created, Created{Project: a.Project, Key: existing.Key, URL: existing.URL, Summary: in.Summary, Outcome: OutcomeDuplicate})
 		return fmt.Sprintf("an open issue for this finding already exists: %s %s (not created again)", existing.Key, existing.URL), nil
 	}
 	if err := t.Guard.ReserveIssue(); err != nil {
@@ -140,7 +151,7 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	log.Info("created issue", "key", issue.Key, "url", issue.URL)
-	t.Created = append(t.Created, Created{Project: a.Project, Key: issue.Key, URL: issue.URL, Summary: in.Summary})
+	t.Created = append(t.Created, Created{Project: a.Project, Key: issue.Key, URL: issue.URL, Summary: in.Summary, Outcome: OutcomeCreated})
 	return fmt.Sprintf("created %s: %s", issue.Key, issue.URL), nil
 }
 

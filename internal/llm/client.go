@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/muskats/heraion/internal/secret"
+	"github.com/muskats/heraion/internal/textutil"
 )
 
 // Message is a chat message.
@@ -113,6 +114,7 @@ func NewClient(baseURL string, apiKey *secret.Source) *Client {
 type APIError struct {
 	StatusCode int
 	Body       string
+	RetryAfter time.Duration // from the Retry-After header; 0: none
 }
 
 func (e *APIError) Error() string {
@@ -130,6 +132,15 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 	if err != nil {
 		return nil, err
 	}
+	auth := ""
+	if c.APIKey.Set() {
+		// Read per call: a projected ServiceAccount token rotates.
+		key, err := c.APIKey.Value()
+		if err != nil {
+			return nil, fmt.Errorf("llm api key: %w", err)
+		}
+		auth = "Bearer " + key
+	}
 	var lastErr error
 	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -140,7 +151,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 			case <-time.After(wait):
 			}
 		}
-		resp, err := c.do(ctx, body)
+		resp, err := c.do(ctx, body, auth)
 		if err == nil {
 			return resp, nil
 		}
@@ -156,17 +167,10 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 	return nil, fmt.Errorf("after %d retries: %w", c.MaxRetries, lastErr)
 }
 
-type retryAfterError struct {
-	*APIError
-	after time.Duration
-}
-
-func (e *retryAfterError) Unwrap() error { return e.APIError }
-
 func (c *Client) backoff(attempt int, err error) time.Duration {
-	var ra *retryAfterError
-	if errors.As(err, &ra) && ra.after > 0 && ra.after <= time.Minute {
-		return ra.after
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.RetryAfter > 0 && apiErr.RetryAfter <= time.Minute {
+		return apiErr.RetryAfter
 	}
 	base := time.Duration(1<<(attempt-1)) * c.RetryBase
 	return base + rand.N(base/2+1) //nolint:gosec // G404: jitter, not security
@@ -187,19 +191,14 @@ func retryAfter(v string, now time.Time) time.Duration {
 	return 0
 }
 
-func (c *Client) do(ctx context.Context, body []byte) (*ChatResponse, error) {
+func (c *Client) do(ctx context.Context, body []byte, auth string) (*ChatResponse, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey.Set() {
-		// Read per request: a projected ServiceAccount token rotates.
-		key, err := c.APIKey.Value()
-		if err != nil {
-			return nil, &APIError{StatusCode: http.StatusUnauthorized, Body: "llm api key: " + err.Error()}
-		}
-		httpReq.Header.Set("Authorization", "Bearer "+key)
+	if auth != "" {
+		httpReq.Header.Set("Authorization", auth)
 	}
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -213,20 +212,14 @@ func (c *Client) do(ctx context.Context, body []byte) (*ChatResponse, error) {
 	if resp.StatusCode/100 != 2 {
 		snippet := string(raw)
 		if len(snippet) > 2000 {
-			snippet = snippet[:2000] + "..."
+			snippet = textutil.Truncate(snippet, 2000) + "..."
 		}
-		apiErr := &APIError{StatusCode: resp.StatusCode, Body: snippet}
-		if after := retryAfter(resp.Header.Get("Retry-After"), time.Now()); after > 0 {
-			return nil, &retryAfterError{APIError: apiErr, after: after}
-		}
-		return nil, apiErr
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: snippet,
+			RetryAfter: retryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
 	out := &ChatResponse{}
 	if err := json.Unmarshal(raw, out); err != nil {
 		return nil, fmt.Errorf("decode llm response: %w", err)
-	}
-	if len(out.Choices) == 0 {
-		return nil, errors.New("llm response has no choices")
 	}
 	return out, nil
 }

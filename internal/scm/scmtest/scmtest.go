@@ -53,6 +53,33 @@ func NewRemote(t testing.TB, base, repo string, files map[string]string) string 
 	return "file://" + base
 }
 
+// AdvanceRemote commits files to main of the bare remote, e.g. to make a
+// later push from an older clone a non-fast-forward.
+func AdvanceRemote(t testing.TB, base, repo string, files map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+	r, err := git.PlainClone(dir, false, &git.CloneOptions{URL: filepath.Join(base, filepath.FromSlash(repo)+".git")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, c := range files {
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(p)), []byte(c), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wt, _ := r.Worktree()
+	if err := wt.AddWithOptions(&git.AddOptions{All: true}); err != nil {
+		t.Fatal(err)
+	}
+	sig := &object.Signature{Name: "test", Email: "test@example.com", When: time.Now()}
+	if _, err := wt.Commit("advance", &git.CommitOptions{Author: sig}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Push(&git.PushOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // RemoteBranchFile reads a file from a branch of the bare remote.
 func RemoteBranchFile(t testing.TB, base, repo, branch, path string) (string, error) {
 	t.Helper()

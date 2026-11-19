@@ -26,7 +26,8 @@ func capture(t *testing.T) (out, errOut *bytes.Buffer) {
 	return out, errOut
 }
 
-// setup writes a config and one manual playbook, and returns the config path.
+// setup writes a config and two manual playbooks, triage (pr) and digest
+// (report), and returns the config path.
 func setup(t *testing.T, llmURL, extra string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -36,6 +37,11 @@ func setup(t *testing.T, llmURL, extra string) string {
 	}
 	pb := "name: triage\ntrigger: {manual: true}\ntools: ['*']\nprompt: Triage the event.\n"
 	if err := os.WriteFile(filepath.Join(pbs, "triage.yaml"), []byte(pb), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A report playbook opens no PRs, so check shows no mode for it.
+	rp := "name: digest\ntrigger: {manual: true}\ntools: ['*']\noutput: report\nprompt: Summarize.\n"
+	if err := os.WriteFile(filepath.Join(pbs, "digest.yaml"), []byte(rp), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg := "llm: {baseURL: " + llmURL + ", model: m}\nplaybooksDir: " + pbs + "\nworkDir: " + dir + "\n" + extra
@@ -102,7 +108,7 @@ func TestCheckConnectsToLLM(t *testing.T) {
 		if (err != nil) != tc.wantErr || !strings.Contains(out.String(), tc.wantLine) {
 			t.Errorf("status %d: err=%v\n%s", tc.status, err, out)
 		}
-		if !strings.Contains(out.String(), "ok    playbooks  triage") {
+		if !strings.Contains(out.String(), "ok    playbooks  digest, triage (full)") {
 			t.Errorf("playbooks line missing:\n%s", out)
 		}
 		if strings.Contains(out.String(), "sk-check") {
@@ -164,18 +170,6 @@ func TestRunDryRunWithEventFile(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), `"msg":"run finished"`) || !strings.Contains(errOut.String(), `"dryRun":true`) {
 		t.Errorf("log:\n%s", errOut)
-	}
-}
-
-func TestRunEventFromEnv(t *testing.T) {
-	srv := llmtest.New(t, llmtest.Turn{Final: "ok"})
-	t.Setenv("HERAION_EVENT", `{"legacy":"inline event"}`)
-	capture(t)
-	if err := cmdRun(context.Background(), []string{"--config", setup(t, srv.BaseURL(), ""), "--playbook", "triage", "--dry-run"}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(srv.Requests[0].Messages[1].Text(), "inline event") {
-		t.Error("HERAION_EVENT from older gateways must still be read")
 	}
 }
 

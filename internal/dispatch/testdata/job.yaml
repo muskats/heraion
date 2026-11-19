@@ -15,7 +15,7 @@ spec:
         - name: worker
           image: heraion:test
           env:
-            - name: HERAION_EVENT
+            - name: HERAION_PLAYBOOK
               value: stale
             - name: KEEP
               value: "1"

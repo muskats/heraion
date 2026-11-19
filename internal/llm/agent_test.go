@@ -179,3 +179,27 @@ func TestCutOffAnswerIsAnError(t *testing.T) {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
 }
+
+type emptyChat struct{}
+
+func (emptyChat) Chat(context.Context, llm.ChatRequest) (*llm.ChatResponse, error) {
+	return &llm.ChatResponse{}, nil
+}
+
+func TestNoChoicesIsAnError(t *testing.T) {
+	a := &llm.Agent{LLM: emptyChat{}, Model: "m", Limits: llm.Limits{MaxSteps: 3}}
+	if _, err := a.Run(context.Background(), "s", "u"); err == nil || !strings.Contains(err.Error(), "no choices") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestMissingAPIKeyIsNotRetried(t *testing.T) {
+	srv := llmtest.New(t)
+	c := llm.NewClient(srv.BaseURL(), secret.FromMap("KEY", map[string]string{"KEY_FILE": "/nonexistent"}))
+	if _, err := c.Chat(context.Background(), llm.ChatRequest{Model: "m"}); err == nil || !strings.Contains(err.Error(), "llm api key") {
+		t.Fatalf("got %v", err)
+	}
+	if len(srv.Requests) != 0 {
+		t.Errorf("no request may be sent without a key, got %d", len(srv.Requests))
+	}
+}

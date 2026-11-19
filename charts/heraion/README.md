@@ -265,6 +265,7 @@ playbooks:
   trivy-remediate:
     enabled: true
     trigger: { schedule: "0 3 * * *" }
+    mode: safe               # only non-breaking PRs, see the main README's Modes section
   nightly-digest:
     trigger: { schedule: "0 7 * * 1-5" }
     tools: ["grafana.*"]
@@ -510,7 +511,7 @@ litellm:
 | Gateway RBAC | `get` and `create` Jobs, plus `list` when `maxConcurrentJobs` > 0; `create`, `patch`, `delete` Secrets (one per webhook Job, holding its payload); all in its own namespace |
 | MCP servers | Their own ServiceAccount; a token only if RBAC rules are set; ingress only from workers |
 | Secrets | Never in ConfigMaps; masked in prompts, PR text and logs |
-| Git | Pushes only `heraion/<playbook>/...` branches; never CI or CODEOWNERS files; no merge |
+| Git | Pushes only `heraion/<playbook>/...` branches (with `mode: yolo`, also the default branch, fast-forward only); never CI or CODEOWNERS files; no merge |
 
 The gateway can create any Job, and Secrets, in its namespace. Install HeraIon in a namespace
 of its own. To pin what those Jobs may run, add a ValidatingAdmissionPolicy that only admits Jobs
@@ -604,6 +605,8 @@ rejected by [values.schema.json](values.schema.json).
 | `git.token` | `{}` | Credential |
 | `repos` | `[]` | Repos HeraIon may change; empty means none |
 | `dryRun` | `false` | Log PRs instead of pushing them |
+| `mode` | `full` | `safe`, `full` or `yolo`: how `open_pr` delivers a fix, and the riskiest mode a playbook may use, see [Modes](../../README.md#modes) |
+| `playbooks.<name>.mode` | `""` | Mode for this playbook; empty: `mode`. A riskier mode is narrowed to `mode` |
 | `playbooks.<name>` | two disabled examples | See [Playbooks](#playbooks) |
 | `playbooks.<name>.guardrails.maxPRs` | `1` | PRs per run; `0` removes `open_pr` |
 | `playbooks.<name>.guardrails.maxFileBytes` | `1048576` | Largest file `repo_write_file` may write |

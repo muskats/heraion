@@ -215,6 +215,9 @@
     "dryRun": {
       "type": "boolean"
     },
+    "mode": {
+      "enum": ["safe", "full", "yolo"]
+    },
     "playbooks": {
       "type": "object",
       "propertyNames": {
@@ -277,6 +280,9 @@
               "pr",
               "report"
             ]
+          },
+          "mode": {
+            "enum": ["safe", "full", "yolo"]
           },
           "guardrails": {
             "type": "object",

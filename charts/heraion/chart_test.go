@@ -97,11 +97,14 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 	if h := cfg.MCPServers["datadog"].HeadersFromEnv; h["DD-API-KEY"] != "HERAION_MCP_DATADOG_DD_API_KEY" {
 		t.Errorf("datadog headers %v", h)
 	}
-	if j := cfg.Jira; j == nil || j.Deployment != config.JiraCloud || len(j.Projects) != 2 || len(j.ReadSpaces) != 2 || j.Email == "" {
+	if j := cfg.Jira; j == nil || j.Deployment != config.DeploymentCloud || len(j.Projects) != 2 || len(j.ReadSpaces) != 2 || j.Email == "" {
 		t.Errorf("jira %+v", cfg.Jira)
 	}
 	if cf := cfg.Confluence; cf == nil || cf.Deployment != config.DeploymentCloud || len(cf.Spaces) != 2 || cf.MaxPageBytes != 32768 {
 		t.Errorf("confluence %+v", cfg.Confluence)
+	}
+	if cfg.Mode != config.ModeYolo {
+		t.Errorf("mode %q", cfg.Mode)
 	}
 	if cfg.Gateway.Hooks["alertmanager"].SecretEnv != "HERAION_HOOK_ALERTMANAGER_SECRET" {
 		t.Errorf("hook %+v", cfg.Gateway.Hooks["alertmanager"])
@@ -116,6 +119,9 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 	loaded, err := playbook.LoadDir(pbDir)
 	if err != nil || len(loaded) != 3 {
 		t.Fatalf("playbooks: %v (%d)", err, len(loaded))
+	}
+	if m := loaded["trivy-remediate"].EffectiveMode(cfg.Mode); m != config.ModeSafe {
+		t.Errorf("trivy-remediate mode %q", m)
 	}
 
 	jt := find(objs, "ConfigMap", "t-heraion-job-template")

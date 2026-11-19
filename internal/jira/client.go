@@ -28,7 +28,7 @@ type Client struct {
 
 // NewClient builds a Client from the config.
 func NewClient(c *config.Jira) *Client {
-	return &Client{BaseURL: strings.TrimRight(c.URL, "/"), Cloud: c.Deployment == config.JiraCloud,
+	return &Client{BaseURL: strings.TrimRight(c.URL, "/"), Cloud: c.Deployment == config.DeploymentCloud,
 		HTTP: atlassian.New(c.Email, c.Token)}
 }
 

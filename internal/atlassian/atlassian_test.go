@@ -124,3 +124,28 @@ func TestClamp(t *testing.T) {
 		}
 	}
 }
+
+func TestTextHelpers(t *testing.T) {
+	if got := ShortTime("2026-11-18T10:02:33.123+0000"); got != "2026-11-18T10:02" {
+		t.Errorf("ShortTime = %q", got)
+	}
+	if got := ShortTime("2026"); got != "2026" {
+		t.Errorf("ShortTime short input = %q", got)
+	}
+	if got := CollapseBlank("a  \n\n\n\nb\t\n"); got != "a\n\nb\n" {
+		t.Errorf("CollapseBlank = %q", got)
+	}
+}
+
+func TestPickSpaces(t *testing.T) {
+	allowed := []string{"OPS", "CHG"}
+	if got, err := PickSpaces(allowed, ""); err != nil || strings.Join(got, ",") != "OPS,CHG" {
+		t.Errorf("all: %v %v", got, err)
+	}
+	if got, err := PickSpaces(allowed, "CHG"); err != nil || strings.Join(got, ",") != "CHG" {
+		t.Errorf("one: %v %v", got, err)
+	}
+	if _, err := PickSpaces(allowed, "HR"); err == nil {
+		t.Error("a space outside the allowlist must fail")
+	}
+}

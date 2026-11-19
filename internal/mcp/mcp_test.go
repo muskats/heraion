@@ -95,7 +95,7 @@ func TestConnectFilterAndCall(t *testing.T) {
 				DenyTools:      []string{"*_delete"},
 				Timeout:        config.Duration{Duration: 5 * time.Second},
 			}}
-			m, tools, err := mcp.Connect(context.Background(), servers, nil, "test", quiet)
+			m, tools, err := mcp.Connect(context.Background(), servers, []string{"*"}, "test", quiet)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -141,7 +141,7 @@ func TestAllowList(t *testing.T) {
 	url, _ := start(t, false)
 	servers := map[string]*config.MCPServer{"k8s": {URL: url, Transport: "streamable", AllowTools: []string{"pods_*"},
 		Timeout: config.Duration{Duration: time.Second}}}
-	m, tools, err := mcp.Connect(context.Background(), servers, nil, "test", quiet)
+	m, tools, err := mcp.Connect(context.Background(), servers, []string{"*"}, "test", quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestMalformedDenyPatternDeniesAll(t *testing.T) {
 	url, _ := start(t, false)
 	servers := map[string]*config.MCPServer{"k8s": {URL: url, Transport: "streamable", DenyTools: []string{"[pods"},
 		Timeout: config.Duration{Duration: time.Second}}}
-	m, tools, err := mcp.Connect(context.Background(), servers, nil, "test", quiet)
+	m, tools, err := mcp.Connect(context.Background(), servers, []string{"*"}, "test", quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,13 +167,13 @@ func TestMalformedDenyPatternDeniesAll(t *testing.T) {
 
 func TestUnreachable(t *testing.T) {
 	dead := map[string]*config.MCPServer{"grafana": {URL: "http://127.0.0.1:1/mcp", Transport: "streamable"}}
-	m, tools, err := mcp.Connect(context.Background(), dead, nil, "test", quiet)
+	m, tools, err := mcp.Connect(context.Background(), dead, []string{"*"}, "test", quiet)
 	if err != nil || len(tools) != 0 {
 		t.Fatalf("optional server must be skipped: %v", err)
 	}
 	m.Close()
 	dead["grafana"].Required = true
-	if _, _, err := mcp.Connect(context.Background(), dead, nil, "test", quiet); err == nil {
+	if _, _, err := mcp.Connect(context.Background(), dead, []string{"*"}, "test", quiet); err == nil {
 		t.Fatal("required server must fail the run")
 	}
 }
@@ -182,7 +182,7 @@ func TestMissingSecretHeader(t *testing.T) {
 	url, _ := start(t, false)
 	servers := map[string]*config.MCPServer{"dd": {URL: url, Transport: "streamable", Required: true,
 		HeadersFromEnv: map[string]string{"DD-API-KEY": "HERAION_DD"}, SecretHeaders: map[string]*secret.Source{"DD-API-KEY": secret.FromMap("HERAION_DD", nil)}}}
-	if _, _, err := mcp.Connect(context.Background(), servers, nil, "test", quiet); err == nil || !strings.Contains(err.Error(), "HERAION_DD") {
+	if _, _, err := mcp.Connect(context.Background(), servers, []string{"*"}, "test", quiet); err == nil || !strings.Contains(err.Error(), "HERAION_DD") {
 		t.Fatalf("expected empty-env error, got %v", err)
 	}
 }
@@ -226,7 +226,7 @@ func TestBearerPrefixFromTokenFile(t *testing.T) {
 		SecretHeaders:  map[string]*secret.Source{"Authorization": secret.FromMap("T", map[string]string{"T_FILE": tok})},
 		HeaderPrefixes: map[string]string{"Authorization": "Bearer "},
 	}}
-	m, _, err := mcp.Connect(context.Background(), servers, nil, "test", quiet)
+	m, _, err := mcp.Connect(context.Background(), servers, []string{"*"}, "test", quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestSecretHeaderNotSentAcrossRedirect(t *testing.T) {
 		Timeout:       config.Duration{Duration: time.Second},
 		SecretHeaders: map[string]*secret.Source{"DD-API-KEY": secret.Static("dd-secret-key")},
 	}}
-	if _, _, err := mcp.Connect(context.Background(), servers, nil, "test", quiet); err == nil {
+	if _, _, err := mcp.Connect(context.Background(), servers, []string{"*"}, "test", quiet); err == nil {
 		t.Fatal("expected the cross-host redirect to fail")
 	}
 	mu.Lock()

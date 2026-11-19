@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -123,7 +124,7 @@ func ErrorText(raw []byte) string {
 	}
 	s := strings.TrimSpace(string(raw))
 	if len(s) > 500 {
-		s = s[:500] + "..."
+		s = textutil.Truncate(s, 500) + "..."
 	}
 	if s == "" {
 		s = "no details"
@@ -147,6 +148,47 @@ func QuoteList(keys []string) string {
 		q[i] = `"` + k + `"`
 	}
 	return strings.Join(q, ", ")
+}
+
+// ShortTime trims "2026-11-18T10:02:33.123+0000" to "2026-11-18T10:02".
+func ShortTime(t string) string {
+	if len(t) >= 16 {
+		return t[:16]
+	}
+	return t
+}
+
+// CollapseBlank trims trailing spaces and keeps at most one blank line in a
+// row, e.g. "a  \n\n\n\nb" -> "a\n\nb".
+func CollapseBlank(s string) string {
+	lines := strings.Split(s, "\n")
+	out := lines[:0]
+	blank := 0
+	for _, l := range lines {
+		l = strings.TrimRight(l, " \t")
+		if strings.TrimSpace(l) == "" {
+			blank++
+			if blank > 1 {
+				continue
+			}
+		} else {
+			blank = 0
+		}
+		out = append(out, l)
+	}
+	return strings.Join(out, "\n")
+}
+
+// PickSpaces returns the spaces a search covers: all allowed ones when asked
+// is empty, else just asked, e.g. PickSpaces([OPS CHG], "OPS") = [OPS].
+func PickSpaces(allowed []string, asked string) ([]string, error) {
+	if asked == "" {
+		return allowed, nil
+	}
+	if !slices.Contains(allowed, asked) {
+		return nil, fmt.Errorf("space %q is not allowed; allowed: %v", asked, allowed)
+	}
+	return []string{asked}, nil
 }
 
 // Clamp returns v within [lo, hi], or def when v is 0, e.g. for the days and

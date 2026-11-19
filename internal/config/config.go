@@ -43,6 +43,9 @@ type Config struct {
 	PlaybooksDir string   `json:"playbooksDir,omitempty"`
 	WorkDir      string   `json:"workDir,omitempty"`
 	DryRun       bool     `json:"dryRun,omitempty"`
+	// Mode is the default and the riskiest mode a playbook may use, e.g.
+	// "full" lets a playbook pick safe or full but not yolo. Default full.
+	Mode Mode `json:"mode,omitempty"`
 	// MCPServers maps a name to a server. Server "k8s" exposes tools such
 	// as "k8s.resources_list".
 	MCPServers map[string]*MCPServer `json:"mcpServers,omitempty"`
@@ -87,8 +90,6 @@ type MCPServer struct {
 const (
 	DeploymentCloud      = "cloud"
 	DeploymentDataCenter = "datacenter"
-	JiraCloud            = DeploymentCloud
-	JiraDataCenter       = DeploymentDataCenter
 )
 
 // Confluence is a site the read tools may use, e.g.
@@ -143,7 +144,7 @@ type Gateway struct {
 	// MaxConcurrentJobs caps unfinished worker Jobs (0 = no limit).
 	MaxConcurrentJobs int `json:"maxConcurrentJobs,omitempty"`
 	// MaxBodyBytes caps the webhook body (default 256 KiB). The body is
-	// passed to the Job in an env var, so it has to stay small.
+	// stored in a Secret, which holds at most 1 MiB.
 	MaxBodyBytes int64 `json:"maxBodyBytes,omitempty"`
 	// Hooks maps a name to a webhook served at POST /hooks/<name>.
 	Hooks map[string]*Hook `json:"hooks,omitempty"`
@@ -318,6 +319,9 @@ func (c *Config) applyDefaults() {
 	if c.Git.AuthorEmail == "" {
 		c.Git.AuthorEmail = "heraion@users.noreply.local"
 	}
+	if c.Mode == "" {
+		c.Mode = ModeFull
+	}
 	if c.PlaybooksDir == "" {
 		c.PlaybooksDir = "/etc/heraion/playbooks"
 	}
@@ -414,75 +418,121 @@ var knownProviders = map[string]bool{
 // Validate returns every problem at once.
 func (c *Config) Validate() error {
 	var errs []error
-	if c.LLM.BaseURL == "" {
-		errs = append(errs, errors.New("llm.baseURL is required"))
-	} else if err := checkURL(c.LLM.BaseURL); err != nil {
-		errs = append(errs, fmt.Errorf("llm.baseURL: %w", err))
-	}
-	if c.LLM.Model == "" {
-		errs = append(errs, errors.New("llm.model is required"))
-	}
-	if c.LLM.MaxSteps < 1 {
-		errs = append(errs, errors.New("llm.maxSteps must be >= 1"))
-	}
-	if !knownProviders[c.Git.Provider] {
-		errs = append(errs, fmt.Errorf("git.provider %q is not supported", c.Git.Provider))
-	}
-	if c.Git.Endpoint != "" {
-		if err := checkURL(c.Git.Endpoint); err != nil {
-			errs = append(errs, fmt.Errorf("git.endpoint: %w", err))
-		}
-	}
-	if c.Git.CloneBaseURL == "" && !c.Git.ResolvesCloneURL() {
-		errs = append(errs, errors.New("git.cloneBaseURL (or git.endpoint) is required for this provider"))
-	} else if c.Git.CloneBaseURL == "" {
-		// The clone URL is looked up through the API.
-	} else if err := checkURLSchemes(c.Git.CloneBaseURL, true); err != nil {
-		errs = append(errs, fmt.Errorf("git.cloneBaseURL: %w", err))
-	}
+	errs = append(errs, c.LLM.validate()...)
+	errs = append(errs, c.Git.validate()...)
 	for _, r := range c.Repos {
 		if err := ValidateRepoName(r); err != nil {
 			errs = append(errs, fmt.Errorf("repos: %w", err))
 		}
 	}
-	if j := c.Jira; j != nil {
-		if err := checkURL(j.URL); err != nil || j.URL == "" {
-			errs = append(errs, fmt.Errorf("jira.url: invalid %q", j.URL))
-		}
-		if j.Deployment != JiraCloud && j.Deployment != JiraDataCenter {
-			errs = append(errs, fmt.Errorf("jira.deployment %q must be %s or %s", j.Deployment, JiraCloud, JiraDataCenter))
-		}
-		if len(j.Projects) == 0 && len(j.ReadSpaces) == 0 {
-			errs = append(errs, errors.New("jira: set projects (create issues) and/or readSpaces (read issues), e.g. [OPS]"))
-		}
-		for _, p := range append(slices.Clone(j.Projects), j.ReadSpaces...) {
-			if !projectKeyRE.MatchString(p) {
-				errs = append(errs, fmt.Errorf("jira: %q is not a space (project) key", p))
-			}
-		}
-		for _, l := range j.Labels {
-			if l == "" || strings.ContainsAny(l, " \t\n") {
-				errs = append(errs, fmt.Errorf("jira.labels: %q must not contain spaces", l))
-			}
+	if err := ValidateMode("mode", c.Mode); err != nil {
+		errs = append(errs, err)
+	}
+	if c.Jira != nil {
+		errs = append(errs, c.Jira.validate()...)
+	}
+	if c.Confluence != nil {
+		errs = append(errs, c.Confluence.validate()...)
+	}
+	errs = append(errs, validateMCP(c.MCPServers)...)
+	errs = append(errs, c.Gateway.validate()...)
+	return errors.Join(errs...)
+}
+
+func (l *LLM) validate() []error {
+	var errs []error
+	if l.BaseURL == "" {
+		errs = append(errs, errors.New("llm.baseURL is required"))
+	} else if err := checkURL(l.BaseURL); err != nil {
+		errs = append(errs, fmt.Errorf("llm.baseURL: %w", err))
+	}
+	if l.Model == "" {
+		errs = append(errs, errors.New("llm.model is required"))
+	}
+	if l.MaxSteps < 1 {
+		errs = append(errs, errors.New("llm.maxSteps must be >= 1"))
+	}
+	return errs
+}
+
+func (g *Git) validate() []error {
+	var errs []error
+	if !knownProviders[g.Provider] {
+		errs = append(errs, fmt.Errorf("git.provider %q is not supported", g.Provider))
+	}
+	if g.Endpoint != "" {
+		if err := checkURL(g.Endpoint); err != nil {
+			errs = append(errs, fmt.Errorf("git.endpoint: %w", err))
 		}
 	}
-	if cf := c.Confluence; cf != nil {
-		if err := checkURL(cf.URL); err != nil || cf.URL == "" {
-			errs = append(errs, fmt.Errorf("confluence.url: invalid %q", cf.URL))
+	// An empty cloneBaseURL is fine when the API provides clone URLs.
+	switch {
+	case g.CloneBaseURL != "":
+		if err := checkURLSchemes(g.CloneBaseURL, true); err != nil {
+			errs = append(errs, fmt.Errorf("git.cloneBaseURL: %w", err))
 		}
-		if cf.Deployment != DeploymentCloud && cf.Deployment != DeploymentDataCenter {
-			errs = append(errs, fmt.Errorf("confluence.deployment %q must be %s or %s", cf.Deployment, DeploymentCloud, DeploymentDataCenter))
-		}
-		if len(cf.Spaces) == 0 {
-			errs = append(errs, errors.New("confluence.spaces must list at least one space key, e.g. [OPS]"))
-		}
-		for _, k := range cf.Spaces {
-			if !spaceKeyRE.MatchString(k) {
-				errs = append(errs, fmt.Errorf("confluence.spaces: %q is not a space key", k))
-			}
+	case !g.ResolvesCloneURL():
+		errs = append(errs, errors.New("git.cloneBaseURL (or git.endpoint) is required for this provider"))
+	}
+	return errs
+}
+
+func (j *Jira) validate() []error {
+	var errs []error
+	if err := checkURL(j.URL); err != nil || j.URL == "" {
+		errs = append(errs, fmt.Errorf("jira.url: invalid %q", j.URL))
+	}
+	if err := checkDeployment("jira.deployment", j.Deployment); err != nil {
+		errs = append(errs, err)
+	}
+	if len(j.Projects) == 0 && len(j.ReadSpaces) == 0 {
+		errs = append(errs, errors.New("jira: set projects (create issues) and/or readSpaces (read issues), e.g. [OPS]"))
+	}
+	for _, p := range append(slices.Clone(j.Projects), j.ReadSpaces...) {
+		if !projectKeyRE.MatchString(p) {
+			errs = append(errs, fmt.Errorf("jira: %q is not a space (project) key", p))
 		}
 	}
-	for name, m := range c.MCPServers {
+	for _, l := range j.Labels {
+		if !ValidLabel(l) {
+			errs = append(errs, fmt.Errorf("jira.labels: %q must not contain spaces", l))
+		}
+	}
+	return errs
+}
+
+func (cf *Confluence) validate() []error {
+	var errs []error
+	if err := checkURL(cf.URL); err != nil || cf.URL == "" {
+		errs = append(errs, fmt.Errorf("confluence.url: invalid %q", cf.URL))
+	}
+	if err := checkDeployment("confluence.deployment", cf.Deployment); err != nil {
+		errs = append(errs, err)
+	}
+	if len(cf.Spaces) == 0 {
+		errs = append(errs, errors.New("confluence.spaces must list at least one space key, e.g. [OPS]"))
+	}
+	for _, k := range cf.Spaces {
+		if !spaceKeyRE.MatchString(k) {
+			errs = append(errs, fmt.Errorf("confluence.spaces: %q is not a space key", k))
+		}
+	}
+	return errs
+}
+
+// checkDeployment accepts cloud or datacenter, e.g. for key "jira.deployment".
+func checkDeployment(key, d string) error {
+	if d != DeploymentCloud && d != DeploymentDataCenter {
+		return fmt.Errorf("%s %q must be %s or %s", key, d, DeploymentCloud, DeploymentDataCenter)
+	}
+	return nil
+}
+
+// validateMCP checks each server. Empty secret env vars are checked by the
+// pod that uses them: the gateway has no MCP secrets.
+func validateMCP(servers map[string]*MCPServer) []error {
+	var errs []error
+	for name, m := range servers {
 		if !serverNameRE.MatchString(name) {
 			errs = append(errs, fmt.Errorf("mcpServers: name %q must be a lowercase DNS label (max 32 chars)", name))
 		}
@@ -501,14 +551,19 @@ func (c *Config) Validate() error {
 				errs = append(errs, fmt.Errorf("mcpServers.%s: tool pattern %q: %w", name, p, err))
 			}
 		}
-		// Empty secret env vars are checked by the pod that uses them: the
-		// gateway has no MCP secrets and workers have no hook secrets.
 	}
+	return errs
+}
+
+// validate checks the hooks. Empty secret env vars are checked when the
+// gateway starts: workers have no hook secrets.
+func (gw *Gateway) validate() []error {
+	var errs []error
 	// The body is stored in a Secret, whose data is capped at 1 MiB.
-	if c.Gateway.MaxBodyBytes < 0 || c.Gateway.MaxBodyBytes > MaxBodyBytesLimit {
+	if gw.MaxBodyBytes < 0 || gw.MaxBodyBytes > MaxBodyBytesLimit {
 		errs = append(errs, fmt.Errorf("gateway.maxBodyBytes must be between 1 and %d", MaxBodyBytesLimit))
 	}
-	for name, h := range c.Gateway.Hooks {
+	for name, h := range gw.Hooks {
 		if !serverNameRE.MatchString(name) {
 			errs = append(errs, fmt.Errorf("gateway.hooks: name %q must be a lowercase DNS label", name))
 		}
@@ -523,8 +578,12 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("gateway.hooks.%s: secretEnv is required (or set insecure: true)", name))
 		}
 	}
-	return errors.Join(errs...)
+	return errs
 }
+
+// ValidLabel reports whether l is a usable Jira label: not empty, no
+// whitespace, e.g. "heraion" ok, "needs triage" not.
+func ValidLabel(l string) bool { return l != "" && !strings.ContainsAny(l, " \t\n") }
 
 // ValidateRepoName accepts "owner/name" and nested groups like "group/sub/name".
 func ValidateRepoName(r string) error {

@@ -43,7 +43,7 @@ func TestDispatchBuildsJobAndDeduplicates(t *testing.T) {
 	for _, e := range ct.Env {
 		env[e.Name] = e.Value
 	}
-	// The stale HERAION_EVENT from the template is dropped; the payload is a file.
+	// The template's stale HERAION_PLAYBOOK is replaced; the payload is a file.
 	if env[EnvEventFile] != EventDir+"/payload" || env[EnvPlaybook] != "alertmanager-triage" || env["KEEP"] != "1" || len(ct.Env) != 3 {
 		t.Errorf("env %v", ct.Env)
 	}

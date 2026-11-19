@@ -44,3 +44,27 @@ tests:
     documentSelector: { path: metadata.name, value: t-heraion-config }
     asserts:
       - notMatchRegex: { path: 'data["config.yaml"]', pattern: "sk-should-not-appear" }
+  - it: mode defaults to full
+    set:
+      playbooks.trivy-remediate.enabled: true
+    documentSelector: { path: metadata.name, value: t-heraion-config }
+    asserts:
+      - matchRegex: { path: 'data["config.yaml"]', pattern: "(?m)^mode: full$" }
+  - it: passes the global mode to the config
+    set:
+      mode: yolo
+      playbooks.trivy-remediate.enabled: true
+    documentSelector: { path: metadata.name, value: t-heraion-config }
+    asserts:
+      - matchRegex: { path: 'data["config.yaml"]', pattern: "(?m)^mode: yolo$" }
+  - it: passes the playbook mode to the playbook
+    set:
+      playbooks.trivy-remediate: { enabled: true, mode: safe }
+    documentSelector: { path: metadata.name, value: t-heraion-playbooks }
+    asserts:
+      - matchRegex: { path: 'data["trivy-remediate.yaml"]', pattern: "(?m)^mode: safe$" }
+  - it: rejects an unknown mode
+    set:
+      playbooks.trivy-remediate: { enabled: true, mode: reckless }
+    asserts:
+      - failedTemplate: {}

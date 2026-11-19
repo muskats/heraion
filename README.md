@@ -1,8 +1,8 @@
 # HeraIon
 
 HeraIon looks into problems in a Kubernetes cluster with an LLM and proposes fixes as pull
-requests. When a problem needs a person instead, it can open a Jira issue. It never merges,
-and it cannot change the cluster.
+requests, or, in [yolo mode](#modes), pushes them to the default branch. When a problem needs
+a person instead, it can open a Jira issue. It never merges, and it cannot change the cluster.
 
 Example: Trivy Operator reports a fixable CVE in `alpine:3.18`. The `trivy-remediate`
 playbook reads the report, finds the Dockerfile in `acme/web`, and opens a PR on the branch
@@ -107,6 +107,7 @@ prompt: |
   List VulnerabilityReports with fixable HIGH or CRITICAL CVEs and open one PR per repo
   with the minimal version bump.
 output: pr                             # "report" removes open_pr
+mode: safe                             # optional: safe, full or yolo, see Modes
 guardrails:
   maxPRs: 3                            # default 1; 0 removes open_pr
   writePaths: [Dockerfile, "deploy/**"]  # optional; CI files are always refused
@@ -118,7 +119,7 @@ Built-in tools:
 | Tool | Does |
 |---|---|
 | `repo_list`, `repo_read_file`, `repo_write_file` | Read and edit a clone of an allowed repo |
-| `open_pr` | Commit the edits and open a pull request |
+| `open_pr` | Commit the edits and open a pull request (in yolo mode: push them) |
 | `create_issue` | Create a Jira issue, see [Jira issues](#jira-issues) |
 | `jira_search`, `jira_get_issue` | Read recent issues in chosen Jira spaces, see [Reading Jira and Confluence](#reading-jira-and-confluence) |
 | `confluence_search`, `confluence_get_page` | Read recent pages in chosen Confluence spaces |
@@ -127,6 +128,47 @@ MCP tools are named `<server>.<tool>`, so `k8s.*` matches every tool of the `k8s
 
 More examples: [trivy-remediate.yaml](examples/playbooks/trivy-remediate.yaml),
 [alertmanager-triage.yaml](examples/playbooks/alertmanager-triage.yaml).
+
+## Modes
+
+The mode says how `open_pr` delivers a fix:
+
+| Mode | Does | Example |
+|---|---|---|
+| `safe` | PR on `heraion/<playbook>/<key>`, only for non-breaking changes | `alpine:3.18` -> `3.20` opens a PR; `node:20` -> `22` is refused |
+| `full` (default) | PR on `heraion/<playbook>/<key>`, for any change | A memory limit raised from `512Mi` to `1Gi` |
+| `yolo` | Commit pushed to the default branch, without review | `alpine:3.18` -> `3.20` lands on `main` |
+
+```yaml
+# config.yaml (chart value: mode)
+mode: full    # the default, and the riskiest mode a playbook may use
+
+# playbook
+mode: safe    # optional; empty means the global mode
+```
+
+A playbook can only pick an equal or safer mode: with global `full`, a playbook with
+`mode: yolo` runs as `full` and the run logs a warning. Yolo needs `mode: yolo` in the global
+config too.
+
+Safe mode checks the diff, not only the prompt. `open_pr` refuses the change unless each
+changed file is one of:
+
+| File | Allowed change |
+|---|---|
+| Lockfile (`go.sum`, `package-lock.json`, `yarn.lock`, `poetry.lock`, ...) | Any |
+| Ignore file (`.trivyignore`, `.grype.yaml`, `.snyk`, `*.vex.json`, ...) | Added lines only, e.g. `CVE-2024-1234 # not reachable` |
+| Any other file | Only versions change, each an upgrade within the same major version: `v1.4.2` -> `v1.5.0`, `3.1.4-r5` -> `3.1.4-r6`. A major bump, a downgrade, a new variant (`-alpine` -> `-bookworm`) or a quantity (`1.5Gi`) is refused. For `0.x` the minor version counts as major |
+
+New, deleted and renamed files are refused, except new ignore files and lockfiles. Without
+`writePaths`, safe mode writes only dependency manifests, image references, lockfiles and
+ignore files (`Dockerfile`, `go.mod`, `package.json`, `values*.yaml`, ...). With `writePaths`,
+those paths apply instead, and the diff check still runs.
+
+Yolo mode pushes without force, so the push only works as a fast-forward. If it is rejected,
+for example by branch protection or because the branch moved since the clone, the same commit
+goes to `heraion/<playbook>/<key>` as a PR, with the usual duplicate and closed-PR checks. With
+`--dry-run`, yolo logs the commit and its diff instead of pushing.
 
 ## Jira issues
 
@@ -271,7 +313,6 @@ come from env vars. A secret in the file is rejected.
 | `HERAION_LLM_BASE_URL`, `HERAION_LLM_MODEL` | Override the file, e.g. `http://vllm:8000/v1` |
 | `HERAION_DRY_RUN` | `true` |
 | `HERAION_CONFIG`, `HERAION_PLAYBOOK`, `HERAION_EVENT_FILE` | Defaults for `heraion run` flags; gateway Jobs set `HERAION_EVENT_FILE` to the mounted payload |
-| `HERAION_EVENT` | The trigger payload inline; read when `--event` and `HERAION_EVENT_FILE` are not set |
 | `HERAION_MCP_<SERVER>_<HEADER>`, `HERAION_HOOK_<NAME>_SECRET` | e.g. `HERAION_MCP_DATADOG_DD_API_KEY` |
 
 Git server:
@@ -300,12 +341,13 @@ for each repo's clone URL. The token needs to read the repos, push branches and 
 | Jira projects | With `jira.projects: [OPS]`, an issue for `SEC` is refused |
 | Read spaces | With `jira.readSpaces: [CHG]` and `confluence.spaces: [RUNBOOKS]`, reading `HR-1` or a page in `HR` is refused |
 | Issue budget | With `maxIssues: 1`, a second new issue is refused. `maxIssues: 0` removes `create_issue` |
-| Branches | Only `heraion/<playbook>/...` branches are pushed |
+| Branches | Only `heraion/<playbook>/...` branches are pushed, and in yolo mode the default branch, fast-forward only |
+| Mode | A playbook's `mode` can only be equal to or safer than the global one; in `safe` mode `open_pr` refuses changes that are not version upgrades within the same major version, lockfile updates or new ignore-file entries |
 | Duplicates | An open PR on the same branch of the same repo (a fork's branch does not count), or an open issue with the same fingerprint label, is reused |
 | Masking | `ghp_...`, `glpat-...`, `sk-...`, `ATATT3...`, JWTs, `Bearer ...`, `user:password@` in URLs, PEM keys and configured secrets become `[REDACTED]` in prompts, PRs, issues and logs. `open_pr` refuses a change that adds such a value to a file |
 | Run size | `llm.maxSteps`, `llm.maxTokens` (checked before each round of tool calls), `llm.timeout` |
 | Webhook body | `gateway.maxBodyBytes`, default 256 KiB, at most 1032192 (it is stored in a Secret) |
-| No merge | The code has no merge call |
+| No merge | The code has no merge call; yolo mode pushes a commit instead |
 
 ## Development
 

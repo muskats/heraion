@@ -162,6 +162,9 @@ func (a *Agent) Run(ctx context.Context, system, user string) (*Result, error) {
 		if err != nil {
 			return res, fmt.Errorf("step %d: %w", res.Steps, err)
 		}
+		if len(resp.Choices) == 0 {
+			return res, fmt.Errorf("step %d: llm response has no choices", res.Steps)
+		}
 		res.Usage.PromptTokens += resp.Usage.PromptTokens
 		res.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		res.Usage.TotalTokens += resp.Usage.TotalTokens

@@ -30,15 +30,19 @@ type Workspaces struct {
 	git  config.Git
 	root string
 	// resolve, if set, returns a repo's clone URL instead of CloneURL.
-	resolve func(ctx context.Context, repo string) (string, error)
+	resolve CloneURLFunc
 
 	mu    sync.Mutex
 	repos map[string]*Repo
 }
 
-// NewWorkspaces creates a workspace manager rooted at dir.
-func NewWorkspaces(g config.Git, dir string) *Workspaces {
-	return &Workspaces{git: g, root: dir, repos: map[string]*Repo{}}
+// CloneURLFunc returns a repo's clone URL, e.g. NewCloneURLResolver.
+type CloneURLFunc func(ctx context.Context, repo string) (string, error)
+
+// NewWorkspaces creates a workspace manager rooted at dir. resolve, if not
+// nil, provides clone URLs; otherwise they are <cloneBaseURL>/<repo>.git.
+func NewWorkspaces(g config.Git, dir string, resolve CloneURLFunc) *Workspaces {
+	return &Workspaces{git: g, root: dir, resolve: resolve, repos: map[string]*Repo{}}
 }
 
 // auth reads the token on every call, so a push long after the clone still
@@ -49,12 +53,6 @@ func (w *Workspaces) auth() *githttp.BasicAuth {
 		return nil
 	}
 	return &githttp.BasicAuth{Username: w.git.Username, Password: tok}
-}
-
-// WithResolver makes Get ask f for clone URLs, e.g. NewCloneURLResolver.
-func (w *Workspaces) WithResolver(f func(ctx context.Context, repo string) (string, error)) *Workspaces {
-	w.resolve = f
-	return w
 }
 
 // CloneURL returns the clone URL for owner/name.
@@ -131,7 +129,8 @@ type Repo struct {
 	author   config.Git
 }
 
-// cleanPath validates a repo-relative path supplied by the model.
+// cleanPath validates a repo-relative path from the model, e.g.
+// "./deploy//values.yaml" -> "deploy/values.yaml".
 func cleanPath(p string) (string, error) {
 	p = strings.TrimPrefix(path.Clean("/"+strings.TrimSpace(p)), "/")
 	if p == "" {
@@ -147,10 +146,6 @@ func cleanPath(p string) (string, error) {
 	}
 	return p, nil
 }
-
-// CleanPath validates a repo-relative path from the model, e.g.
-// "./deploy//values.yaml" -> "deploy/values.yaml".
-func CleanPath(p string) (string, error) { return cleanPath(p) }
 
 // Changed lists the paths that differ from the base commit, including
 // deletions and files that arrived through a symlink.
@@ -316,11 +311,25 @@ func (r *Repo) Push(ctx context.Context, branch string) error {
 		return fmt.Errorf("refusing to push branch %q outside %s", branch, BranchPrefix)
 	}
 	ref := plumbing.NewBranchReferenceName(branch)
-	err := r.g.PushContext(ctx, &git.PushOptions{
-		RemoteName: "origin",
-		RefSpecs:   []gitcfg.RefSpec{gitcfg.RefSpec("+" + ref + ":" + ref)},
-		Auth:       r.auth(),
-	})
+	return r.push(ctx, gitcfg.RefSpec("+"+ref+":"+ref))
+}
+
+// PushToBase pushes the commit on the local branch to the base branch,
+// e.g. heraion/x/bump -> main. There is no force: the push fails unless it
+// is a fast-forward, so a branch that moved since the clone is never
+// overwritten. Branch protection rejects it the same way.
+func (r *Repo) PushToBase(ctx context.Context, branch string) error {
+	if !strings.HasPrefix(branch, BranchPrefix) {
+		return fmt.Errorf("refusing to push branch %q outside %s", branch, BranchPrefix)
+	}
+	src := plumbing.NewBranchReferenceName(branch)
+	dst := plumbing.NewBranchReferenceName(r.BaseBranch)
+	return r.push(ctx, gitcfg.RefSpec(src+":"+dst))
+}
+
+// push pushes one refspec to origin, e.g. "+refs/heads/a:refs/heads/a".
+func (r *Repo) push(ctx context.Context, spec gitcfg.RefSpec) error {
+	err := r.g.PushContext(ctx, &git.PushOptions{RemoteName: "origin", RefSpecs: []gitcfg.RefSpec{spec}, Auth: r.auth()})
 	if errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return nil
 	}

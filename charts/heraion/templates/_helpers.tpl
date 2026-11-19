@@ -268,7 +268,7 @@ dict "root" $ "role" "worker"|"gateway"
 {{- $_ := set $hooks $n $e -}}
 {{- end -}}
 {{- $cfg := dict "llm" $llm "git" $git "repos" ($v.repos | default list) "dryRun" $v.dryRun
-      "playbooksDir" "/etc/heraion/playbooks" "workDir" "/workspace" -}}
+      "mode" ($v.mode | default "full") "playbooksDir" "/etc/heraion/playbooks" "workDir" "/workspace" -}}
 {{- if $mcp }}{{ $_ := set $cfg "mcpServers" $mcp }}{{ end -}}
 {{- with $v.jira }}{{ if .enabled -}}
 {{- if not (or .projects .readSpaces) }}{{ fail "jira: set projects (create issues) and/or readSpaces (read issues)" }}{{ end -}}

@@ -30,7 +30,6 @@ const (
 	LabelHook      = "heraion.io/hook"
 	LabelTrigger   = "heraion.io/trigger"
 	ContainerName  = "worker"
-	EnvEvent       = "HERAION_EVENT" // read by `heraion run`; no longer set by the gateway
 	EnvEventFile   = "HERAION_EVENT_FILE"
 	EnvPlaybook    = "HERAION_PLAYBOOK"
 	maxJobNameBase = 52 // + "-" + 10 hash chars = 63
@@ -104,8 +103,8 @@ func JobName(playbook, hook string, event []byte) string {
 	return base + "-" + hex.EncodeToString(h.Sum(nil))[:10]
 }
 
-// Build returns the Job for one investigation without creating it.
-func (d *Dispatcher) Build(playbook, hook string, event []byte) *batchv1.Job {
+// build returns the Job for one investigation without creating it.
+func (d *Dispatcher) build(playbook, hook string, event []byte) *batchv1.Job {
 	job := d.Template.DeepCopy()
 	job.Name = JobName(playbook, hook, event)
 	job.GenerateName = ""
@@ -139,7 +138,7 @@ func (d *Dispatcher) Build(playbook, hook string, event []byte) *batchv1.Job {
 		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: eventVolume, MountPath: EventDir, ReadOnly: true})
 	}
 	for _, e := range c.Env {
-		if e.Name != EnvPlaybook && e.Name != EnvEvent && e.Name != EnvEventFile {
+		if e.Name != EnvPlaybook && e.Name != EnvEventFile {
 			env = append(env, e)
 		}
 	}
@@ -150,7 +149,7 @@ func (d *Dispatcher) Build(playbook, hook string, event []byte) *batchv1.Job {
 // Dispatch creates the Job and, for a non-empty event, the Secret holding
 // it. created is false if this event was already dispatched.
 func (d *Dispatcher) Dispatch(ctx context.Context, playbook, hook string, event []byte) (name string, created bool, err error) {
-	job := d.Build(playbook, hook, event)
+	job := d.build(playbook, hook, event)
 	jobs := d.Client.BatchV1().Jobs(d.Namespace)
 	// A redelivery is a duplicate even when at capacity, so check first.
 	if _, err := jobs.Get(ctx, job.Name, metav1.GetOptions{}); err == nil {

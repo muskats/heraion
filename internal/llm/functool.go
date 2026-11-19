@@ -3,7 +3,19 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
+
+// DecodeArgs unmarshals a tool's JSON arguments into v, e.g.
+//
+//	var a struct{ Repo, Path string }
+//	if err := llm.DecodeArgs(raw, &a); err != nil { ... }
+func DecodeArgs(raw json.RawMessage, v any) error {
+	if err := json.Unmarshal(raw, v); err != nil {
+		return fmt.Errorf("invalid arguments: %w", err)
+	}
+	return nil
+}
 
 // FuncTool is a Tool backed by a function, used by the built-in tools, e.g.
 //

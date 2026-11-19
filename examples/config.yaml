@@ -25,6 +25,7 @@ repos:
 
 playbooksDir: ./examples/playbooks
 dryRun: true   # log PRs instead of pushing; same as --dry-run or HERAION_DRY_RUN=true
+mode: full     # safe, full or yolo; playbooks may only pick this or a safer mode
 
 # Jira: projects for create_issue, readSpaces for jira_search / jira_get_issue.
 # Token: HERAION_JIRA_TOKEN.

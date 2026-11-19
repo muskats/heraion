@@ -3,6 +3,7 @@ package guardrails
 import (
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -19,32 +20,27 @@ var DefaultDenyPaths = []string{
 	"bitbucket-pipelines.yml", ".gitmodules",
 }
 
-// WithPaths limits writes: allow (empty: everything) minus DefaultDenyPaths
-// and deny. Patterns are slash-separated globs where "**" matches any number
-// of directories, e.g. "deploy/**" or "**/values.yaml".
-func (g *Guard) WithPaths(allow, deny []string) *Guard {
-	g.allowPaths, g.denyPaths = allow, deny
-	return g
-}
-
-// CheckWritePath fails unless the repo-relative path p may be written.
+// CheckWritePath fails unless the repo-relative path p may be written:
+// Options.AllowPaths (empty: everything) minus DefaultDenyPaths and
+// Options.DenyPaths. Patterns are slash-separated globs where "**" matches
+// any number of directories, e.g. "deploy/**" or "**/values.yaml".
 // Matching ignores case, since some checkouts are on case-insensitive disks
 // and some servers (e.g. GitHub's CODEOWNERS lookup) are lenient.
 func (g *Guard) CheckWritePath(p string) error {
-	for _, pat := range append(DefaultDenyPaths[:len(DefaultDenyPaths):len(DefaultDenyPaths)], g.denyPaths...) {
+	for _, pat := range append(slices.Clone(DefaultDenyPaths), g.o.DenyPaths...) {
 		if MatchPath(pat, p) {
 			return fmt.Errorf("writing %s is not allowed (matches %q): CI and ownership files are never changed", p, pat)
 		}
 	}
-	if len(g.allowPaths) == 0 {
+	if len(g.o.AllowPaths) == 0 {
 		return nil
 	}
-	for _, pat := range g.allowPaths {
+	for _, pat := range g.o.AllowPaths {
 		if MatchPath(pat, p) {
 			return nil
 		}
 	}
-	return fmt.Errorf("writing %s is not allowed; this playbook may only write %v", p, g.allowPaths)
+	return fmt.Errorf("writing %s is not allowed; this playbook may only write %v", p, g.o.AllowPaths)
 }
 
 // ValidatePathPattern reports a malformed pattern, e.g. "deploy/[".

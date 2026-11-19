@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -49,9 +50,10 @@ func NeededBy(patterns []string, server string) bool {
 	return false
 }
 
-// Connect opens a session to each server needed returns true for. A server
-// that fails is skipped with a warning, unless it is Required.
-func Connect(ctx context.Context, servers map[string]*config.MCPServer, needed func(string) bool, version string, log *slog.Logger) (*Manager, []llm.Tool, error) {
+// Connect opens a session to each server the tool patterns can use, e.g.
+// [k8s.*] connects only "k8s" (see NeededBy). A server that fails is skipped
+// with a warning, unless it is Required.
+func Connect(ctx context.Context, servers map[string]*config.MCPServer, patterns []string, version string, log *slog.Logger) (*Manager, []llm.Tool, error) {
 	m := &Manager{sessions: map[string]*sdk.ClientSession{}}
 	names := make([]string, 0, len(servers))
 	for n := range servers {
@@ -62,10 +64,10 @@ func Connect(ctx context.Context, servers map[string]*config.MCPServer, needed f
 	var tools []llm.Tool
 	for _, name := range names {
 		srv := servers[name]
-		if needed != nil && !needed(name) {
+		if !NeededBy(patterns, name) {
 			continue
 		}
-		ts, err := m.connect(ctx, name, srv, version)
+		sess, ts, err := dial(ctx, name, srv, version)
 		if err != nil {
 			if srv.Required {
 				m.Close()
@@ -75,15 +77,26 @@ func Connect(ctx context.Context, servers map[string]*config.MCPServer, needed f
 			continue
 		}
 		log.Info("mcp server connected", "server", name, "tools", len(ts))
+		m.sessions[name] = sess
 		tools = append(tools, ts...)
 	}
 	return m, tools, nil
 }
 
-func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServer, version string) ([]llm.Tool, error) {
+// Dial connects to one server and returns its allowed tools, e.g. for
+// `heraion check`. Close the returned session when done.
+func Dial(ctx context.Context, name string, srv *config.MCPServer, version string) (io.Closer, []llm.Tool, error) {
+	sess, tools, err := dial(ctx, name, srv, version)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sess, tools, nil
+}
+
+func dial(ctx context.Context, name string, srv *config.MCPServer, version string) (*sdk.ClientSession, []llm.Tool, error) {
 	for h, src := range srv.SecretHeaders {
 		if _, err := src.Value(); err != nil {
-			return nil, fmt.Errorf("header %s: %w", h, err)
+			return nil, nil, fmt.Errorf("header %s: %w", h, err)
 		}
 	}
 	// Time out in the transport, not with a context: SSE ties its stream to
@@ -92,7 +105,7 @@ func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServe
 	base.ResponseHeaderTimeout = 30 * time.Second
 	u, err := url.Parse(srv.URL)
 	if err != nil {
-		return nil, fmt.Errorf("url: %w", err)
+		return nil, nil, fmt.Errorf("url: %w", err)
 	}
 	hc := &http.Client{
 		Transport: &headerTransport{
@@ -122,7 +135,7 @@ func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServe
 
 	sess, err := client.Connect(ctx, t, nil)
 	if err != nil {
-		return nil, fmt.Errorf("connect %s: %w", srv.URL, err)
+		return nil, nil, fmt.Errorf("connect %s: %w", srv.URL, err)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -130,7 +143,7 @@ func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServe
 	for tl, err := range sess.Tools(cctx, nil) {
 		if err != nil {
 			_ = sess.Close()
-			return nil, fmt.Errorf("list tools: %w", err)
+			return nil, nil, fmt.Errorf("list tools: %w", err)
 		}
 		if !filter(tl.Name, srv.AllowTools, srv.DenyTools) {
 			continue
@@ -148,8 +161,7 @@ func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServe
 			schema: schema, sess: sess, timeout: srv.Timeout.Duration,
 		})
 	}
-	m.sessions[name] = sess
-	return out, nil
+	return sess, out, nil
 }
 
 func filter(name string, allow, deny []string) bool {

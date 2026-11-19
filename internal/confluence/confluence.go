@@ -86,7 +86,7 @@ func (c *Client) Search(ctx context.Context, cql string, limit int) ([]Hit, erro
 		}
 		for _, r := range out.Results {
 			hits = append(hits, Hit{ID: r.Content.ID, Title: r.Content.Title, Space: r.Content.Space.Key,
-				Modified: short(r.LastModified), Excerpt: clean(r.Excerpt)})
+				Modified: atlassian.ShortTime(r.LastModified), Excerpt: clean(r.Excerpt)})
 		}
 		return hits, nil
 	}
@@ -103,7 +103,7 @@ func (c *Client) Search(ctx context.Context, cql string, limit int) ([]Hit, erro
 		return nil, err
 	}
 	for _, r := range out.Results {
-		hits = append(hits, Hit{ID: r.ID, Title: r.Title, Space: r.Space.Key, Modified: short(r.Version.When)})
+		hits = append(hits, Hit{ID: r.ID, Title: r.Title, Space: r.Space.Key, Modified: atlassian.ShortTime(r.Version.When)})
 	}
 	return hits, nil
 }
@@ -131,7 +131,7 @@ func (c *Client) GetPage(ctx context.Context, id string) (*Page, error) {
 			return nil, err
 		}
 		return &Page{ID: out.ID, Title: out.Title, Space: key, Version: out.Version.Number,
-			Modified: short(out.Version.CreatedAt), Text: StorageToText(out.Body.Storage.Value)}, nil
+			Modified: atlassian.ShortTime(out.Version.CreatedAt), Text: StorageToText(out.Body.Storage.Value)}, nil
 	}
 	var out struct {
 		ID      string               `json:"id"`
@@ -150,7 +150,7 @@ func (c *Client) GetPage(ctx context.Context, id string) (*Page, error) {
 		return nil, err
 	}
 	return &Page{ID: out.ID, Title: out.Title, Space: out.Space.Key, Version: out.Version.Number,
-		Modified: short(out.Version.When), Text: StorageToText(out.Body.Storage.Value)}, nil
+		Modified: atlassian.ShortTime(out.Version.When), Text: StorageToText(out.Body.Storage.Value)}, nil
 }
 
 // spaceKey maps a Cloud space id to its key, e.g. "98306" -> "OPS".
@@ -184,13 +184,6 @@ func (c *Client) Myself(ctx context.Context) error {
 	return c.get(ctx, "/rest/api/user/current", nil, nil)
 }
 
-func short(t string) string {
-	if len(t) >= 16 {
-		return t[:16]
-	}
-	return t
-}
-
 // clean removes search highlight markers and tags from an excerpt.
 func clean(s string) string {
 	s = strings.NewReplacer("@@@hl@@@", "", "@@@endhl@@@", "").Replace(s)
@@ -212,7 +205,7 @@ func StorageToText(s string) string {
 	for {
 		switch z.Next() {
 		case html.ErrorToken:
-			return strings.TrimSpace(collapse(b.String()))
+			return strings.TrimSpace(atlassian.CollapseBlank(b.String()))
 		case html.TextToken:
 			b.Write(z.Text())
 		case html.CommentToken:
@@ -243,25 +236,6 @@ func StorageToText(s string) string {
 			}
 		}
 	}
-}
-
-func collapse(s string) string {
-	lines := strings.Split(s, "\n")
-	out := lines[:0]
-	blank := 0
-	for _, l := range lines {
-		l = strings.TrimRight(l, " \t")
-		if strings.TrimSpace(l) == "" {
-			blank++
-			if blank > 1 {
-				continue
-			}
-		} else {
-			blank = 0
-		}
-		out = append(out, l)
-	}
-	return strings.Join(out, "\n")
 }
 
 // Reader is what the tools need. *Client implements it.
@@ -316,15 +290,12 @@ func (t *tools) search(ctx context.Context, raw json.RawMessage) (string, error)
 		Space, Text string
 		Days, Limit int
 	}
-	if err := json.Unmarshal(raw, &a); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := llm.DecodeArgs(raw, &a); err != nil {
+		return "", err
 	}
-	spaces := t.spaces
-	if a.Space != "" {
-		if !slices.Contains(t.spaces, a.Space) {
-			return "", fmt.Errorf("space %q is not allowed; allowed: %v", a.Space, t.spaces)
-		}
-		spaces = []string{a.Space}
+	spaces, err := atlassian.PickSpaces(t.spaces, a.Space)
+	if err != nil {
+		return "", err
 	}
 	days := atlassian.Clamp(a.Days, 30, 1, 365)
 	limit := atlassian.Clamp(a.Limit, 20, 1, 50)
@@ -355,8 +326,8 @@ func (t *tools) search(ctx context.Context, raw json.RawMessage) (string, error)
 
 func (t *tools) get(ctx context.Context, raw json.RawMessage) (string, error) {
 	var a struct{ ID string }
-	if err := json.Unmarshal(raw, &a); err != nil {
-		return "", fmt.Errorf("invalid arguments: %w", err)
+	if err := llm.DecodeArgs(raw, &a); err != nil {
+		return "", err
 	}
 	if _, err := strconv.ParseUint(strings.TrimSpace(a.ID), 10, 64); err != nil {
 		return "", fmt.Errorf("page id %q must be a number", a.ID)

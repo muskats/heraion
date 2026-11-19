@@ -125,11 +125,11 @@ func TestJiraDefaultsAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Jira.Deployment != JiraCloud || c.Jira.IssueType != "Task" || c.Jira.URL != "https://acme.atlassian.net" || c.Jira.Token.String() != "tok" {
+	if c.Jira.Deployment != DeploymentCloud || c.Jira.IssueType != "Task" || c.Jira.URL != "https://acme.atlassian.net" || c.Jira.Token.String() != "tok" {
 		t.Errorf("%+v", c.Jira)
 	}
 	c, err = Load(write(t, "llm: {baseURL: http://x, model: m}\njira: {url: https://jira.example.internal, projects: [OPS]}\n"))
-	if err != nil || c.Jira.Deployment != JiraDataCenter {
+	if err != nil || c.Jira.Deployment != DeploymentDataCenter {
 		t.Errorf("self-hosted must default to datacenter: %v %v", err, c.Jira)
 	}
 	_, err = Load(write(t, "llm: {baseURL: http://x, model: m}\njira: {url: ftp://x, deployment: server, projects: [ops], labels: [a b]}\n"))
@@ -202,5 +202,23 @@ func TestFileURLOnlyForCloneBase(t *testing.T) {
 	}
 	if _, err := Load(write(t, "llm: {baseURL: http://x, model: m}\ngit: {provider: gitea, cloneBaseURL: file:///repos}\n")); err != nil {
 		t.Errorf("file:// cloneBaseURL: %v", err)
+	}
+}
+
+func TestMode(t *testing.T) {
+	c, err := Load(write(t, "llm: {baseURL: https://api.openai.com/v1, model: m}\n"))
+	if err != nil || c.Mode != ModeFull {
+		t.Fatalf("default mode: %q %v", c.Mode, err)
+	}
+	if _, err := Load(write(t, "llm: {baseURL: https://api.openai.com/v1, model: m}\nmode: reckless\n")); err == nil ||
+		!strings.Contains(err.Error(), "mode") {
+		t.Errorf("invalid mode: %v", err)
+	}
+	for _, c := range []struct{ a, b, want Mode }{
+		{ModeYolo, ModeFull, ModeFull}, {ModeSafe, ModeYolo, ModeSafe}, {ModeFull, ModeSafe, ModeSafe}, {ModeYolo, ModeYolo, ModeYolo},
+	} {
+		if got := Safer(c.a, c.b); got != c.want {
+			t.Errorf("Safer(%q, %q) = %q, want %q", c.a, c.b, got, c.want)
+		}
 	}
 }

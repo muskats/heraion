@@ -164,7 +164,8 @@ func TestErrorMessages(t *testing.T) {
 }
 
 func newTool(t *testing.T, api API, dryRun bool, max int) *Tool {
-	g := guardrails.New(nil, 0, dryRun, 0, guardrails.NewRedactor("hunter2-secret")).WithIssues([]string{"OPS"}, max)
+	g := guardrails.New(guardrails.Options{DryRun: dryRun, Redactor: guardrails.NewRedactor("hunter2-secret"),
+		JiraProjects: []string{"OPS"}, MaxIssues: max})
 	return &Tool{API: api, Playbook: "triage", IssueType: "Task", Labels: []string{"heraion"}, Guard: g,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
@@ -197,7 +198,7 @@ func TestToolDeduplicatesAndBudgets(t *testing.T) {
 	if err != nil || !strings.Contains(out, "already exists: OPS-1") {
 		t.Fatalf("%q %v", out, err)
 	}
-	if !tl.Created[1].Duplicate {
+	if tl.Created[1].Outcome != OutcomeDuplicate {
 		t.Error("duplicate not recorded")
 	}
 	// Budget is 2: one more works, then refused.
@@ -229,7 +230,7 @@ func TestToolGuards(t *testing.T) {
 func TestToolDryRun(t *testing.T) {
 	tl := newTool(t, nil, true, 1)
 	out, err := call(t, tl, map[string]any{"project": "OPS", "summary": "s", "description": "d"})
-	if err != nil || !strings.Contains(out, "dry-run") || !tl.Created[0].DryRun {
+	if err != nil || !strings.Contains(out, "dry-run") || tl.Created[0].Outcome != OutcomeDryRun {
 		t.Fatalf("%q %v", out, err)
 	}
 }

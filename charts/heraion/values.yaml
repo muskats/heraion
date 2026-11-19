@@ -142,9 +142,16 @@ repos: []
 # true: log each PR with its diff instead of pushing it.
 dryRun: false
 
+# How open_pr delivers a fix, and the riskiest mode a playbook may pick:
+#   safe  PR, only for non-breaking changes (same-major version bumps, lockfiles, .trivyignore entries)
+#   full  PR for any change
+#   yolo  push to the default branch without review; a PR if the push is rejected
+mode: full
+
 # Playbooks by name.
 #   trigger: { schedule: "0 */6 * * *" }   renders a CronJob
 #   trigger: { webhook: alertmanager }     runs on POST /hooks/alertmanager
+#   mode: safe                             optional; never riskier than the global mode
 playbooks:
   trivy-remediate:
     enabled: false   # needs mcpServers.k8s and Trivy Operator

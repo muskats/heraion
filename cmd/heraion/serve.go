@@ -14,27 +14,22 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/dispatch"
-	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/hooks"
 	"github.com/muskats/heraion/internal/playbook"
 )
 
 func cmdServe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	cfgPath := fs.String("config", envOr("HERAION_CONFIG", "/etc/heraion/config.yaml"), "config file (env HERAION_CONFIG)")
-	level := fs.String("log-level", envOr("HERAION_LOG_LEVEL", "info"), "debug, info, warn or error")
+	cfgPath := configFlag(fs)
+	level := logLevelFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := config.Load(*cfgPath)
+	cfg, _, log, err := load(*cfgPath, *level)
 	if err != nil {
 		return err
 	}
-	red := guardrails.NewRedactor()
-	red.AddSources(cfg.Secrets()...)
-	log := newLogger(*level, red)
 
 	pbs, err := playbook.LoadDir(cfg.PlaybooksDir)
 	if err != nil {

@@ -30,7 +30,7 @@ func TestRedact(t *testing.T) {
 }
 
 func TestGuard(t *testing.T) {
-	g := New([]string{"a/b"}, 1, false, 10, nil)
+	g := New(Options{Repos: []string{"a/b"}, MaxPRs: 1, MaxFileBytes: 10})
 	if g.CheckRepo("a/b") != nil || g.CheckRepo("a/c") == nil {
 		t.Error("repo allowlist")
 	}
@@ -59,7 +59,7 @@ func TestRotatedSecretStaysMasked(t *testing.T) {
 }
 
 func TestCheckWritePath(t *testing.T) {
-	g := New(nil, 1, false, 0, nil)
+	g := New(Options{MaxPRs: 1})
 	for _, p := range []string{
 		".github/workflows/ci.yml", ".GITHUB/Workflows/ci.yml", ".github/workflows",
 		"CODEOWNERS", "docs/CODEOWNERS", ".gitlab-ci.yml", "build/Jenkinsfile", ".gitmodules",
@@ -73,7 +73,7 @@ func TestCheckWritePath(t *testing.T) {
 			t.Errorf("%s: %v", p, err)
 		}
 	}
-	g.WithPaths([]string{"Dockerfile", "deploy/**"}, []string{"deploy/secrets/**"})
+	g = New(Options{AllowPaths: []string{"Dockerfile", "deploy/**"}, DenyPaths: []string{"deploy/secrets/**"}})
 	if g.CheckWritePath("deploy/a/values.yaml") != nil || g.CheckWritePath("Dockerfile") != nil {
 		t.Error("allowed paths refused")
 	}
@@ -128,7 +128,7 @@ func TestFindSecretLines(t *testing.T) {
 }
 
 func TestIssueBudgetAndProjects(t *testing.T) {
-	g := New(nil, 0, true, 0, nil).WithIssues([]string{"OPS"}, 1)
+	g := New(Options{DryRun: true, JiraProjects: []string{"OPS"}, MaxIssues: 1})
 	if g.CheckProject("OPS") != nil || g.CheckProject("SEC") == nil {
 		t.Error("project allowlist")
 	}
