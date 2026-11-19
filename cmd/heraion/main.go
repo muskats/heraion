@@ -27,6 +27,12 @@ import (
 // Set with -ldflags "-X main.version=...".
 var version = "dev"
 
+// Output streams, replaced in tests.
+var (
+	stdout io.Writer = os.Stdout
+	stderr io.Writer = os.Stderr
+)
+
 const usage = `HeraIon investigates problems with an LLM and proposes fixes as pull requests.
 
 Usage:
@@ -146,7 +152,7 @@ func newLogger(level string, red *guardrails.Redactor) *slog.Logger {
 	if err := lv.UnmarshalText([]byte(level)); err != nil {
 		lv = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+	return slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{
 		Level: lv,
 		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 			switch a.Value.Kind() {

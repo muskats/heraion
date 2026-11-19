@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Shared helpers for the scripts in this directory. Source it, do not run it.
+#
+# Tools are pinned here and built with `go install` into $TOOLS_DIR (default
+# .tools/), one directory per version, so a CI cache of .tools/ stays valid
+# until a version changes. Override a tool with its env var, e.g.
+# HELM_UNITTEST=/usr/local/bin/helm-unittest.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TOOLS_DIR="${TOOLS_DIR:-$ROOT/.tools}"
+BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
+CHART_DIR="$ROOT/charts/heraion"
+# CI=true (set by GitHub Actions, GitLab CI and most others) makes optional
+# tools such as shellcheck required.
+CI="${CI:-false}"
+
+GOLANGCI_LINT_VERSION=v2.15.0
+GOVULNCHECK_VERSION=v1.9.0
+KUBECONFORM_VERSION=v0.8.0
+HELM_UNITTEST_VERSION=v1.2.1
+ACTIONLINT_VERSION=v1.7.12
+# Kubernetes versions kubeconform checks the rendered chart against: the
+# oldest supported (Chart.yaml kubeVersion) and a current one.
+KUBE_VERSIONS="${KUBE_VERSIONS:-1.27.0 1.33.0}"
+
+if [[ -t 1 ]]; then
+	_bold=$'\e[1m' _red=$'\e[31m' _green=$'\e[32m' _yellow=$'\e[33m' _reset=$'\e[0m'
+else
+	_bold='' _red='' _green='' _yellow='' _reset=''
+fi
+
+log() { printf '%s==> %s%s\n' "$_bold" "$*" "$_reset"; }
+ok() { printf '%sok%s   %s\n' "$_green" "$_reset" "$*"; }
+warn() { printf '%swarn%s %s\n' "$_yellow" "$_reset" "$*" >&2; }
+die() {
+	printf '%sFAIL%s %s\n' "$_red" "$_reset" "$*" >&2
+	exit 1
+}
+
+need() {
+	command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed"
+}
+
+# go_tool NAME MODULE/PATH VERSION prints the path of the tool, building it
+# first if needed. $<NAME in upper case, '-' as '_'> overrides it.
+go_tool() {
+	local name=$1 pkg=$2 version=$3
+	local override_var
+	override_var=$(tr 'a-z-' 'A-Z_' <<<"$name")
+	if [[ -n "${!override_var:-}" ]]; then
+		printf '%s\n' "${!override_var}"
+		return
+	fi
+	local dir="$TOOLS_DIR/$name@$version"
+	if [[ ! -x "$dir/$name" ]]; then
+		need go
+		printf 'installing %s %s\n' "$name" "$version" >&2
+		GOBIN="$dir" GOFLAGS=-mod=mod go install "$pkg@$version" >&2
+	fi
+	printf '%s\n' "$dir/$name"
+}
+
+golangci_lint() { go_tool golangci-lint github.com/golangci/golangci-lint/v2/cmd/golangci-lint "$GOLANGCI_LINT_VERSION"; }
+govulncheck() { go_tool govulncheck golang.org/x/vuln/cmd/govulncheck "$GOVULNCHECK_VERSION"; }
+kubeconform() { go_tool kubeconform github.com/yannh/kubeconform/cmd/kubeconform "$KUBECONFORM_VERSION"; }
+helm_unittest() { go_tool helm-unittest github.com/helm-unittest/helm-unittest/cmd/helm-unittest "$HELM_UNITTEST_VERSION"; }
+actionlint() { go_tool actionlint github.com/rhysd/actionlint/cmd/actionlint "$ACTIONLINT_VERSION"; }
+
+# optional NAME: true if the tool exists. Missing tools fail in CI and are
+# skipped with a warning elsewhere.
+optional() {
+	if command -v "$1" >/dev/null 2>&1; then
+		return 0
+	fi
+	[[ "$CI" == true ]] && die "$1 is required in CI"
+	warn "$1 not installed, skipping its checks"
+	return 1
+}
+
+# Go packages with tests, without the chart cross-check (test-chart.sh runs it).
+go_packages() { go list ./... | awk '!/\/charts\//'; }

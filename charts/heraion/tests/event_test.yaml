@@ -1,0 +1,43 @@
+suite: webhook events and gateway limits
+release:
+  name: t
+templates:
+  - gateway.yaml
+set:
+  llm: { baseURL: https://api.openai.com/v1, model: m }
+  playbooks.alertmanager-triage.enabled: true
+  gateway.hooks.alertmanager: { auth: token, secret: { existingSecret: am, key: secret } }
+tests:
+  - it: the job template carries no event; the gateway mounts it from a Secret per Job
+    documentSelector: { path: metadata.name, value: t-heraion-job-template }
+    asserts:
+      - notMatchRegex: { path: 'data["job-template.yaml"]', pattern: "HERAION_EVENT" }
+      - matchRegex: { path: 'data["job-template.yaml"]', pattern: "args:\\s*\\[\"run\"\\]" }
+  - it: the gateway Role allows exactly what the dispatcher uses
+    documentSelector: { path: kind, value: Role }
+    asserts:
+      - contains:
+          path: rules
+          content: { apiGroups: [""], resources: [secrets], verbs: [create, patch, delete] }
+      - notContains:
+          path: rules
+          content: { apiGroups: [""], resources: [secrets], verbs: [get, list, watch, create, patch, delete] }
+  - it: without maxConcurrentJobs the gateway cannot list Jobs
+    set:
+      gateway.maxConcurrentJobs: 0
+    documentSelector: { path: kind, value: Role }
+    asserts:
+      - contains:
+          path: rules
+          content: { apiGroups: [batch], resources: [jobs], verbs: [get, create] }
+  - it: rejects a maxBodyBytes a Secret cannot hold
+    set:
+      gateway.maxBodyBytes: 2000000
+    asserts:
+      - failedTemplate: { errorPattern: "maxBodyBytes" }
+  - it: accepts the largest maxBodyBytes
+    set:
+      gateway.maxBodyBytes: 1032192
+    documentSelector: { path: kind, value: Deployment }
+    asserts:
+      - isKind: { of: Deployment }

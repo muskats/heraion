@@ -42,7 +42,10 @@ in a playbook, that playbook gets only `k8s.pods_log`.
 
 [kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server) with
 `read_only = true`. It can read workloads, pod logs, events and Trivy reports
-(`aquasecurity.github.io`). It cannot read Secrets, ConfigMaps or `exposedsecretreports`.
+(`aquasecurity.github.io`). It cannot read Secrets, ConfigMaps or `exposedsecretreports`: its
+RBAC does not grant them, and its `denied_resources` config refuses Secrets and ConfigMaps
+even if you widen the RBAC. Literal `env` values in pod specs are readable; HeraIon masks known
+credentials and token shapes in them before the model sees them.
 
 ```yaml
 mcpServers:
@@ -96,7 +99,6 @@ There are two separate parts:
 | Read recent Confluence pages in chosen spaces | The built-in `confluence_search` and `confluence_get_page` tools (`confluence.*`) |
 | Anything else, e.g. boards, sprints, JQL across all spaces | A Jira MCP server, as below. Keep it read-only |
 
-
 Server or Data Center: run [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) with a
 personal access token and `READ_ONLY_MODE=true`, as in
 [values-integrations.yaml](../examples/helm/values-integrations.yaml).
@@ -131,7 +133,8 @@ playbooks:
 | Jira | `hmac-sha256` | `X-Hub-Signature` | |
 | Grafana alerting | `token` | `Authorization` | Contact point with an authorization header |
 
-A retried delivery has the same payload, so it gets the same Job name and starts nothing new.
+A retried delivery has the same payload, so it gets the same Job name and starts nothing new
+while that Job exists.
 
 ## Your own connector
 

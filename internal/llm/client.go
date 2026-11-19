@@ -169,7 +169,7 @@ func (c *Client) backoff(attempt int, err error) time.Duration {
 		return ra.after
 	}
 	base := time.Duration(1<<(attempt-1)) * c.RetryBase
-	return base + rand.N(base/2+1)
+	return base + rand.N(base/2+1) //nolint:gosec // G404: jitter, not security
 }
 
 // retryAfter parses Retry-After as seconds ("30") or an HTTP date

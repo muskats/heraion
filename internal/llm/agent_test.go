@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -111,7 +112,7 @@ func TestRetryOn429ButNot400(t *testing.T) {
 	srv = llmtest.New(t, llmtest.Turn{Status: 400}, llmtest.Turn{Final: "never"})
 	_, err = newAgent(t, srv).Run(context.Background(), "s", "u")
 	var apiErr *llm.APIError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 || len(srv.Requests) != 1 {
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest || len(srv.Requests) != 1 {
 		t.Fatalf("400 must not be retried: %v (%d requests)", err, len(srv.Requests))
 	}
 }

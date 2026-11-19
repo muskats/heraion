@@ -23,6 +23,8 @@ import (
 )
 
 // Environment variables read by Load.
+//
+//nolint:gosec // G101: env var names, not credentials
 const (
 	EnvLLMAPIKey  = "HERAION_LLM_API_KEY"
 	EnvLLMBaseURL = "HERAION_LLM_BASE_URL"

@@ -1,5 +1,23 @@
+# Build output
 /bin/
 /dist/
+/build/
+# `go build` / `go build ./cmd/...` in the repo root writes the binary here
+/heraion
+/heraion.exe
 *.test
 *.out
+coverage.html
+
+# Pinned tools built by scripts/lib.sh
+/.tools/
+
+# Helm subcharts fetched by `helm dependency build`, and `helm package` output
 charts/*/charts/
+*.tgz
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

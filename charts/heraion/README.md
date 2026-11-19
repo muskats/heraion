@@ -325,9 +325,13 @@ Header settings for other senders (GitLab, Gitea, Jira, Grafana) are in
 Load control:
 
 - `gateway.maxConcurrentJobs` (default 5): above it the gateway answers 429 and the sender
-  retries.
+  retries. A redelivery of a payload whose Job exists is answered as a duplicate, even then.
 - `resourceQuota.enabled` caps Jobs in the namespace (`count/jobs.batch`) as a hard limit.
-- The same payload delivered twice gets the same Job name, so it runs only once.
+- The same payload delivered twice gets the same Job name, so it runs only once while that
+  Job exists (`worker.ttlSecondsAfterFinished`, default one day).
+- `gateway.maxBodyBytes` (default 256 KiB) caps the body. Each body is stored in a Secret
+  `heraion-<playbook>-<hash>-event`, owned by its Job, and mounted into the worker at
+  `/var/run/heraion/event/payload`.
 
 ## Jira issues
 
@@ -380,7 +384,7 @@ Notes:
 
 - The account needs permission to browse and create issues in each project.
 - `create_issue` is offered only when `jira.enabled` is true, the playbook's `tools` matches
-  it, and at least one project is left after `jiraProjects`.
+  it, at least one project is left after `jiraProjects`, and `guardrails.maxIssues` is not 0.
 - If `networkPolicy.workerEgress` is set, allow egress to the Jira host.
 - `helm test` checks the token with `GET /rest/api/{2|3}/myself`.
 
@@ -594,13 +598,19 @@ rejected by [values.schema.json](values.schema.json).
 | `llm.temperature` | unset | Sent only when set |
 | `git.provider` | `github` | `github`, `gitlab`, `gitea`, `bitbucket`, `stash`, `gogs`, `azure` |
 | `git.endpoint` | `""` | API URL of a self-hosted server |
-| `git.cloneBaseURL` | endpoint, or `https://github.com` | Clone URLs are `<base>/<owner>/<repo>.git` |
+| `git.cloneBaseURL` | endpoint, or `https://github.com` / `https://gitlab.com` | Clone URLs are `<base>/<owner>/<repo>.git`. For `stash` and `azure`, leave empty to look each repo's clone URL up through the API |
 | `git.username` | `x-access-token` | Basic-auth user for clone and push |
 | `git.authorName`, `git.authorEmail` | `HeraIon`, `heraion@users.noreply.local` | Commit author |
 | `git.token` | `{}` | Credential |
 | `repos` | `[]` | Repos HeraIon may change; empty means none |
 | `dryRun` | `false` | Log PRs instead of pushing them |
 | `playbooks.<name>` | two disabled examples | See [Playbooks](#playbooks) |
+| `playbooks.<name>.guardrails.maxPRs` | `1` | PRs per run; `0` removes `open_pr` |
+| `playbooks.<name>.guardrails.maxFileBytes` | `1048576` | Largest file `repo_write_file` may write |
+| `playbooks.<name>.guardrails.writePaths` | `[]` | Globs `repo_write_file` may write, e.g. `[Dockerfile, "deploy/**"]`; empty: all but denied |
+| `playbooks.<name>.guardrails.denyPaths` | `[]` | Added to the built-in denylist of CI and CODEOWNERS files |
+| `playbooks.<name>.guardrails.reopenAfter` | `168h` | A PR closed without merging blocks the same branch this long; `0s`: forever |
+| `playbooks.<name>.guardrails.dryRun` | `false` | Dry-run for this playbook only |
 
 ### Jira
 
@@ -618,9 +628,6 @@ rejected by [values.schema.json](values.schema.json).
 | `playbooks.<name>.jiraProjects` | `[]` | Narrows `jira.projects` for one playbook |
 | `playbooks.<name>.jiraReadSpaces` | `[]` | Narrows `jira.readSpaces` for one playbook |
 | `playbooks.<name>.guardrails.maxIssues` | `1` | New issues per run; `0` removes `create_issue` |
-| `playbooks.<name>.guardrails.writePaths` | `[]` | Globs `repo_write_file` may write, e.g. `[Dockerfile, "deploy/**"]`; empty: all but denied |
-| `playbooks.<name>.guardrails.denyPaths` | `[]` | Added to the built-in denylist of CI and CODEOWNERS files |
-| `playbooks.<name>.guardrails.reopenAfter` | `168h` | A PR closed without merging blocks the same branch this long; `0s`: forever |
 
 ### Confluence
 
@@ -663,7 +670,7 @@ rejected by [values.schema.json](values.schema.json).
 | `gateway.hooks.<name>.secret` | `{}` | Credential |
 | `gateway.replicas` | `1` | Ignored with autoscaling |
 | `gateway.maxConcurrentJobs` | `5` | 0 = no limit |
-| `gateway.maxBodyBytes` | `262144` | Larger bodies get 413. Max 1032192: the body is stored in a Secret |
+| `gateway.maxBodyBytes` | `262144` | Larger bodies get 413; at most 1032192, since the body is stored in a Secret |
 | `gateway.strategy` | RollingUpdate, `maxUnavailable: 0` | |
 | `gateway.revisionHistoryLimit` | `5` | |
 | `gateway.terminationGracePeriodSeconds` | `30` | |
@@ -728,38 +735,37 @@ ok    confluence https://acme.atlassian.net/wiki (cloud), spaces [RUNBOOKS]
 ```
 
 The check fails on a missing or unreadable required secret, a required MCP server that is
-down, a 401 or 403 from the LLM endpoint, or a Jira or Confluence token that is rejected. Secret values are never printed, only their
-source: `file`, `env` or `fallback`.
+down, a 401 or 403 from the LLM endpoint, or a Jira or Confluence token that is rejected.
+Secret values are never printed, only their source: `file`, `env` or `fallback`.
 
 Chart development:
 
 ```sh
-make chart-test   # helm lint, rendered output loaded by the binary, helm-unittest
+scripts/test-chart.sh   # or: make chart-test
 ```
 
-The tests live in [tests/](tests/) (helm-unittest) and [chart_test.go](chart_test.go). The
-Go test renders the chart and loads the result with the binary's own config, playbook and
-Job-template loaders.
+| Check | What it covers |
+|---|---|
+| `helm lint --strict` | Defaults and every [ci/](ci/) values file |
+| helm-unittest | The suites in [tests/](tests/) |
+| [chart_test.go](chart_test.go) | Renders the chart and loads the result with the binary's own config, playbook and Job-template loaders, so a key the binary does not know fails |
+| kubeconform | Rendered output of the defaults, [ci/](ci/) and [examples/helm](../../examples/helm) against Kubernetes 1.27 and 1.33 |
+| Rejected values | Values the schema or templates must refuse, e.g. an unknown guardrail key |
 
 ## Upgrading
 
-### To the release with event Secrets
+```sh
+helm upgrade heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f my-values.yaml
+```
 
-| Change | Action |
-|---|---|
-| The gateway passes a webhook body as a Secret mounted at `/var/run/heraion/event/payload` (`HERAION_EVENT_FILE`), not in `HERAION_EVENT`. Bodies over 128 KiB used to fail with "argument list too long" | Nothing with `rbac.create: true`. With your own RBAC, give the gateway `get` on Jobs and `create`, `patch`, `delete` on Secrets |
-| `gateway.maxBodyBytes` is capped at 1032192 | Lower larger values |
-
-### To the release with the secret hierarchy
-
-| Change | Action |
-|---|---|
-| `image.repository` no longer contains the registry | If you set `image.repository: ghcr.io/x/heraion`, change it to `registry: ghcr.io` and `repository: x/heraion`, or set `registry: ""` |
-| Default `key` of `llm.apiKey` is now `llm-api-key` (was `api-key`) | Set `key: api-key` to keep the old name |
-| Default `key` of `git.token` is now `git-token` (was `token`) | Set `key: token` to keep the old name |
-| Chart Secret keys for MCP headers are now `mcp-<name>-<header>` (was `mcp-<name>-h-<header>`) | Nothing to do for inline values; the chart rewrites its Secret |
-| Literal values arrive as `<ENV>_FALLBACK` | Only relevant if you read these env vars yourself |
-| `existingSecret` refs are now `optional: true` | A missing key no longer blocks pod start; `helm test` reports it |
+- A change to the config, the playbooks or a chart-managed `value` changes the checksum
+  annotations, so the gateway rolls and the next worker Jobs use the new settings. Running Jobs
+  finish with the settings they started with.
+- A changed existing Secret is not seen by the gateway until `kubectl rollout restart`; see
+  [Rotation and restarts](#rotation-and-restarts).
+- With `rbac.create: false`, keep your RBAC in line with the chart's: see
+  [Security defaults](#security-defaults).
+- Breaking changes are listed in the release notes of each chart version.
 
 ## Uninstall
 

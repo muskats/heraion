@@ -1,0 +1,46 @@
+suite: playbook guardrails
+release:
+  name: t
+templates:
+  - configmap.yaml
+set:
+  llm: { baseURL: https://api.openai.com/v1, model: m }
+tests:
+  - it: passes write paths, deny paths and reopenAfter to the playbook
+    set:
+      playbooks.trivy-remediate:
+        enabled: true
+        guardrails:
+          maxPRs: 2
+          writePaths: [Dockerfile, "deploy/**"]
+          denyPaths: ["deploy/secrets/**"]
+          reopenAfter: 72h
+    documentSelector: { path: metadata.name, value: t-heraion-playbooks }
+    asserts:
+      - matchRegex: { path: 'data["trivy-remediate.yaml"]', pattern: "writePaths:\\n\\s+- Dockerfile\\n\\s+- deploy/\\*\\*" }
+      - matchRegex: { path: 'data["trivy-remediate.yaml"]', pattern: "denyPaths:\\n\\s+- deploy/secrets/\\*\\*" }
+      - matchRegex: { path: 'data["trivy-remediate.yaml"]', pattern: "reopenAfter: 72h" }
+  - it: keeps an explicit zero budget
+    set:
+      playbooks.trivy-remediate: { enabled: true, guardrails: { maxPRs: 0, maxIssues: 0 } }
+    documentSelector: { path: metadata.name, value: t-heraion-playbooks }
+    asserts:
+      - matchRegex: { path: 'data["trivy-remediate.yaml"]', pattern: "maxPRs: 0" }
+      - matchRegex: { path: 'data["trivy-remediate.yaml"]', pattern: "maxIssues: 0" }
+  - it: rejects a reopenAfter that is not a duration
+    set:
+      playbooks.trivy-remediate: { enabled: true, guardrails: { reopenAfter: a-week } }
+    asserts:
+      - failedTemplate: { errorPattern: "reopenAfter" }
+  - it: rejects unknown guardrail keys
+    set:
+      playbooks.trivy-remediate: { enabled: true, guardrails: { maxPR: 1 } }
+    asserts:
+      - failedTemplate: {}
+  - it: never writes credentials into the runtime config
+    set:
+      llm.apiKey.value: sk-should-not-appear-123456
+      playbooks.trivy-remediate.enabled: true
+    documentSelector: { path: metadata.name, value: t-heraion-config }
+    asserts:
+      - notMatchRegex: { path: 'data["config.yaml"]', pattern: "sk-should-not-appear" }

@@ -89,7 +89,8 @@ git:
   # github, gitlab, gitea, bitbucket, stash, gogs or azure
   provider: github
   endpoint: ""        # self-hosted only, e.g. https://git.example.com
-  cloneBaseURL: ""    # default: endpoint, or https://github.com
+  cloneBaseURL: ""    # default: endpoint, https://github.com or https://gitlab.com;
+                      # stash and azure: empty = look clone URLs up through the API
   username: ""        # clone/push user, default x-access-token
   authorName: HeraIon
   authorEmail: heraion@users.noreply.local
@@ -224,7 +225,7 @@ gateway:
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   terminationGracePeriodSeconds: 30
   maxConcurrentJobs: 5     # over this the gateway returns 429; resourceQuota is the hard cap
-  maxBodyBytes: 262144
+  maxBodyBytes: 262144     # larger bodies get 413; at most 1032192 (stored in a Secret)
   # Webhooks by name, served at POST /hooks/<name>:
   #
   #   hooks:

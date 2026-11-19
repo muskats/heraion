@@ -1,19 +1,23 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 IMAGE   ?= ghcr.io/muskats/heraion
-UNITTEST ?= helm unittest
-PKGS     = $(shell go list ./... | grep -v /charts/)
 
-.PHONY: build test lint image chart-deps chart-test
+.PHONY: build test lint unit chart-test e2e ci image chart-deps clean
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o bin/heraion ./cmd/heraion
 
-test:
-	go test -race $(PKGS)
-
+# The same entry points CI uses; see scripts/ci.sh.
+test: unit
+unit:
+	scripts/test-unit.sh
 lint:
-	go vet ./...
-	golangci-lint run
+	scripts/lint.sh
+chart-test:
+	scripts/test-chart.sh
+e2e:
+	scripts/test-e2e.sh
+ci:
+	scripts/ci.sh
 
 image:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) .
@@ -21,9 +25,5 @@ image:
 chart-deps:
 	helm dependency build charts/heraion
 
-# -count=1: the Go test cache does not notice chart file changes.
-# Without the helm plugin: make chart-test UNITTEST=/path/to/untt
-chart-test: chart-deps
-	helm lint charts/heraion -f charts/heraion/ci/full-values.yaml
-	go test -count=1 ./charts/heraion/
-	$(UNITTEST) charts/heraion
+clean:
+	rm -rf bin build .tools

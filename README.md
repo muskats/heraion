@@ -11,7 +11,8 @@ second PR is opened. If an alert has no config fix, `alertmanager-triage` opens 
 issue with the evidence, and reruns find that issue instead of creating another.
 
 It works with any OpenAI-compatible endpoint (OpenAI, vLLM, Ollama, KubeAI, LiteLLM) and any
-Git server go-scm supports (GitHub, GitLab, Gitea, Bitbucket, including self-hosted).
+Git server go-scm supports: GitHub, GitLab, Gitea, Bitbucket Cloud and Server, Azure
+DevOps and Gogs, SaaS or self-hosted.
 Integrations such as Kubernetes, Grafana, Datadog and Jira are MCP servers you turn on one by
 one.
 
@@ -170,8 +171,8 @@ How an issue is created:
    finds an issue, it is returned and nothing new is created. Once the issue is done, the next
    occurrence opens a new one.
 
-In dry-run the issue is only logged. Reading Jira, e.g. searching for related tickets, works
-through a Jira MCP server; see [docs/integrations.md](docs/integrations.md#jira).
+In dry-run the issue is only logged. To search for related tickets, use the read tools in
+[Reading Jira and Confluence](#reading-jira-and-confluence).
 
 ## Reading Jira and Confluence
 
@@ -245,9 +246,16 @@ receivers:
 | Response | Meaning |
 |---|---|
 | `202` | Jobs created, e.g. `{"jobs":[{"playbook":"alertmanager-triage","job":"heraion-alertmanager-triage-3f9a1c2b7d"}]}` |
-| `202` with `"duplicate": true` | The same payload was already received; no new Job |
+| `202` with `"duplicate": true` | The same payload was already received and its Job still exists; no new Job |
 | `401` | Wrong or missing secret |
+| `413` | Body larger than `gateway.maxBodyBytes` (default 256 KiB) |
 | `429` | `maxConcurrentJobs` reached; the sender retries |
+| `500` | The Job could not be created, e.g. a ResourceQuota is full; the sender retries |
+
+The Job name is a hash of the hook, the playbook and the payload, so a retried delivery maps
+to the same Job. The payload is stored in a Secret owned by the Job (deleted with it) and
+mounted into the worker, which reads it from `HERAION_EVENT_FILE`. The model sees the first
+64 KiB, marked as untrusted.
 
 ## Configuration
 
@@ -262,9 +270,23 @@ come from env vars. A secret in the file is rejected.
 | `HERAION_CONFLUENCE_TOKEN` | Confluence Cloud API token or Data Center PAT; also `_FILE` and `_FALLBACK` |
 | `HERAION_LLM_BASE_URL`, `HERAION_LLM_MODEL` | Override the file, e.g. `http://vllm:8000/v1` |
 | `HERAION_DRY_RUN` | `true` |
-| `HERAION_CONFIG`, `HERAION_PLAYBOOK`, `HERAION_EVENT_FILE` | Defaults for `heraion run` flags |
-| `HERAION_EVENT` | Webhook payload inline (older gateways). The gateway now mounts it from a Secret owned by the Job and sets `HERAION_EVENT_FILE` |
+| `HERAION_CONFIG`, `HERAION_PLAYBOOK`, `HERAION_EVENT_FILE` | Defaults for `heraion run` flags; gateway Jobs set `HERAION_EVENT_FILE` to the mounted payload |
+| `HERAION_EVENT` | The trigger payload inline; read when `--event` and `HERAION_EVENT_FILE` are not set |
 | `HERAION_MCP_<SERVER>_<HEADER>`, `HERAION_HOOK_<NAME>_SECRET` | e.g. `HERAION_MCP_DATADOG_DD_API_KEY` |
+
+Git server:
+
+```yaml
+git:
+  provider: gitea                        # github (default), gitlab, gitea, bitbucket, stash, gogs, azure
+  endpoint: https://git.example.com      # API URL; empty for github.com and gitlab.com
+  cloneBaseURL: https://git.example.com  # default: endpoint, github.com or gitlab.com
+  username: x-access-token               # clone and push user; the token is the password
+```
+
+Clone URLs are `<cloneBaseURL>/<owner>/<repo>.git`. For `stash` (Bitbucket Server) and
+`azure`, whose clone URLs have another shape, leave `cloneBaseURL` empty: HeraIon asks the API
+for each repo's clone URL. The token needs to read the repos, push branches and open PRs.
 
 ## Limits on what a run can do
 
@@ -279,26 +301,45 @@ come from env vars. A secret in the file is rejected.
 | Read spaces | With `jira.readSpaces: [CHG]` and `confluence.spaces: [RUNBOOKS]`, reading `HR-1` or a page in `HR` is refused |
 | Issue budget | With `maxIssues: 1`, a second new issue is refused. `maxIssues: 0` removes `create_issue` |
 | Branches | Only `heraion/<playbook>/...` branches are pushed |
-| Duplicates | An open PR on the same branch of the same repo (not a fork), or an open issue with the same fingerprint label, is reused |
+| Duplicates | An open PR on the same branch of the same repo (a fork's branch does not count), or an open issue with the same fingerprint label, is reused |
 | Masking | `ghp_...`, `glpat-...`, `sk-...`, `ATATT3...`, JWTs, `Bearer ...`, `user:password@` in URLs, PEM keys and configured secrets become `[REDACTED]` in prompts, PRs, issues and logs. `open_pr` refuses a change that adds such a value to a file |
-| Run size | `llm.maxSteps`, `llm.maxTokens`, `llm.timeout` |
+| Run size | `llm.maxSteps`, `llm.maxTokens` (checked before each round of tool calls), `llm.timeout` |
+| Webhook body | `gateway.maxBodyBytes`, default 256 KiB, at most 1032192 (it is stored in a Secret) |
 | No merge | The code has no merge call |
 
 ## Development
 
+Every check is a script in [scripts/](scripts/). CI runs the same scripts, and so can you:
+
 ```sh
-./bin/heraion check --config examples/config.yaml
-make test         # Go tests with the race detector
-make chart-test   # helm lint, chart cross-check, helm-unittest
-make lint
-make image
+scripts/ci.sh                 # lint, unit, chart, e2e, then a summary
+scripts/ci.sh unit chart      # some stages
+make build                    # bin/heraion
 ```
 
-`charts/heraion/chart_test.go` renders the chart and loads the output with the binary's own
-loaders, so a key the binary does not know makes the test fail.
+| Stage | Script | Checks |
+|---|---|---|
+| `lint` | `scripts/lint.sh` | gofmt, go vet, `go mod tidy` drift, golangci-lint ([.golangci.yml](.golangci.yml)), govulncheck, actionlint, shellcheck |
+| `unit` | `scripts/test-unit.sh` | `go test -race`, coverage floor `COVERAGE_MIN` (default 80%), `build/coverage.html` |
+| `chart` | `scripts/test-chart.sh` | helm lint, helm-unittest ([charts/heraion/tests](charts/heraion/tests)), chart/binary cross-check, kubeconform for Kubernetes 1.27 and 1.33, values that must be rejected |
+| `e2e` | `scripts/test-e2e.sh` | [test/e2e](test/e2e): the binary on the rendered chart config, against a mock kube-apiserver, LLM and Gitea API and a real Git remote: webhook to Job and event Secret, worker run to pushed branch and PR, dedup, closed-PR cooldown, write-path and secret refusals |
 
-Still to do: the end-to-end tests on a `kind` cluster, and against real GitHub and Gitea
-servers.
+You need Go, helm and git. The scripts build the other tools (golangci-lint, govulncheck,
+kubeconform, helm-unittest, actionlint) at pinned versions into `.tools/`; the versions are in
+[scripts/lib.sh](scripts/lib.sh). With `CI=true` (set by most CI systems), optional tools such
+as shellcheck become required.
+
+| Env | Effect |
+|---|---|
+| `JUNIT=1` | Also write JUnit XML to `build/` (unit and e2e need `gotestsum`) |
+| `COVERAGE_MIN=85` | Raise the coverage floor; `0` turns it off |
+| `GO_TEST_FLAGS="-run TestOpenPR"` | Extra `go test` flags for `unit` and `e2e` |
+| `HERAION_BIN=dist/heraion` | Run the e2e suite against a given binary, e.g. a release build |
+| `SKIP_VULN=1`, `SKIP_DEPS=1` | Skip govulncheck or `helm dependency build`, e.g. offline |
+| `SKIP_UNITTEST=1` | Skip helm-unittest locally (refused when `CI=true`) |
+| `KEEP_GOING=1` | `ci.sh` runs every stage even after a failure |
+
+Still to do: end-to-end tests on a `kind` cluster, and against real GitHub and Gitea servers.
 
 ## License
 

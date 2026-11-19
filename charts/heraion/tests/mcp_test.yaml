@@ -22,3 +22,18 @@ tests:
     asserts:
       - notContains: { path: "rules[0].verbs", content: create }
       - notContains: { path: "rules[0].verbs", content: delete }
+  - it: k8s connector also refuses Secrets and ConfigMaps in its own config
+    set:
+      mcpServers.k8s.enabled: true
+    documentSelector: { path: kind, value: ConfigMap }
+    asserts:
+      - matchRegex: { path: 'data["config.toml"]', pattern: 'kind = "Secret"' }
+      - matchRegex: { path: 'data["config.toml"]', pattern: 'kind = "ConfigMap"' }
+      - matchRegex: { path: 'data["config.toml"]', pattern: "read_only = true" }
+  - it: k8s connector ClusterRole cannot read Secrets
+    set:
+      mcpServers.k8s.enabled: true
+    documentSelector: { path: kind, value: ClusterRole }
+    asserts:
+      - notContains: { path: "rules[0].resources", content: secrets }
+      - notContains: { path: "rules[0].resources", content: configmaps }

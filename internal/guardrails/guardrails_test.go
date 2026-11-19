@@ -126,3 +126,24 @@ func TestFindSecretLines(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestIssueBudgetAndProjects(t *testing.T) {
+	g := New(nil, 0, true, 0, nil).WithIssues([]string{"OPS"}, 1)
+	if g.CheckProject("OPS") != nil || g.CheckProject("SEC") == nil {
+		t.Error("project allowlist")
+	}
+	if g.ReserveIssue() != nil || g.ReserveIssue() == nil {
+		t.Error("issue budget")
+	}
+	g.ReleaseIssue()
+	g.ReleaseIssue() // never below zero
+	if g.ReserveIssue() != nil || g.ReserveIssue() == nil {
+		t.Error("release must free exactly one slot")
+	}
+	if !g.DryRun() || g.Redactor() == nil || len(g.Projects()) != 1 {
+		t.Error("accessors")
+	}
+	if g.ReservePR() == nil {
+		t.Error("maxPRs 0 allows no PR")
+	}
+}

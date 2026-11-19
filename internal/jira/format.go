@@ -1,6 +1,7 @@
 package jira
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -107,7 +108,7 @@ func ToWiki(md string) string {
 	for _, b := range parse(md) {
 		switch b.kind {
 		case "heading":
-			parts = append(parts, "h"+string(rune('0'+b.level))+". "+b.lines[0])
+			parts = append(parts, "h"+strconv.Itoa(b.level)+". "+b.lines[0])
 		case "code":
 			parts = append(parts, "{code}\n"+strings.Join(b.lines, "\n")+"\n{code}")
 		case "bullets":

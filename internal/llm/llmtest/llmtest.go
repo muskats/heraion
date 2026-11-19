@@ -45,7 +45,7 @@ func New(t testing.TB, turns ...Turn) *Server {
 }
 
 // BaseURL is the value for llm.baseURL, e.g. http://127.0.0.1:41234/v1.
-func (s *Server) BaseURL() string { return s.Server.URL + "/v1" }
+func (s *Server) BaseURL() string { return s.URL + "/v1" }
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/v1/chat/completions" || r.Method != http.MethodPost {

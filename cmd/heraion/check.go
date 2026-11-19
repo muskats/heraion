@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -40,7 +39,7 @@ func cmdCheck(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	c := &checker{out: os.Stdout}
+	c := &checker{out: stdout}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		c.fail("config", err.Error())
