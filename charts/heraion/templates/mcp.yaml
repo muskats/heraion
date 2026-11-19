@@ -1,0 +1,186 @@
+{{- range $n, $s := .Values.mcpServers }}
+{{- if and $s.enabled (eq $s.mode "deploy") }}
+{{- $d := $s.deploy }}
+{{- $name := include "heraion.mcpName" (dict "root" $ "name" $n) }}
+{{- $component := printf "mcp-%s" $n }}
+{{- $rbac := $d.rbac | default dict }}
+{{- $needsToken := false }}
+{{- if and $.Values.rbac.create (or $rbac.clusterRules $rbac.rules) }}{{ $needsToken = true }}{{ end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" $name) | nindent 2 }}
+  {{- with ($d.serviceAccount | default dict).annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: {{ $needsToken }}
+{{- if and $.Values.rbac.create $rbac.clusterRules }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" (printf "%s-%s" $.Release.Namespace $name)) | nindent 2 }}
+rules:
+  {{- toYaml $rbac.clusterRules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" (printf "%s-%s" $.Release.Namespace $name)) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ printf "%s-%s" $.Release.Namespace $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- if and $.Values.rbac.create $rbac.rules }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" $name) | nindent 2 }}
+rules:
+  {{- toYaml $rbac.rules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" $name) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- if $d.files }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" $name) | nindent 2 }}
+data:
+  {{- range $f, $c := $d.files }}
+  {{ $f }}: |
+    {{- tpl $c $ | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" $name) | nindent 2 }}
+spec:
+  replicas: {{ $d.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "heraion.componentSelector" (dict "root" $ "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "heraion.componentSelector" (dict "root" $ "component" $component) | nindent 8 }}
+        {{- with $d.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/files: {{ toYaml ($d.files | default dict) | sha256sum }}
+        {{- with $d.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: {{ $needsToken }}
+      {{- include "heraion.podScheduling" (dict "root" $ "role" $d) | nindent 6 }}
+      containers:
+        - name: mcp
+          image: {{ include "heraion.image" (dict "image" $d.image "root" $) }}
+          imagePullPolicy: {{ $d.image.pullPolicy | default "IfNotPresent" }}
+          {{- with $d.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $d.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - { name: http, containerPort: {{ $d.port }}, protocol: TCP }
+          {{- if or $d.env $d.secretEnv }}
+          env:
+            {{- with $d.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- range $e, $ref := ($d.secretEnv | default dict) }}
+            {{- include "heraion.secretEnv" (dict "root" $ "env" $e "ref" $ref "key" (printf "mcp-%s-env-%s" $n (include "heraion.secretKeySuffix" $e))) | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- with $d.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          readinessProbe:
+            {{- toYaml ($d.readinessProbe | default (dict "tcpSocket" (dict "port" "http") "periodSeconds" 10)) | nindent 12 }}
+          livenessProbe:
+            {{- toYaml ($d.livenessProbe | default (dict "tcpSocket" (dict "port" "http") "periodSeconds" 20)) | nindent 12 }}
+          resources:
+            {{- toYaml ($d.resources | default (dict "requests" (dict "cpu" "50m" "memory" "64Mi") "limits" (dict "memory" "256Mi"))) | nindent 12 }}
+          securityContext:
+            {{- include "heraion.containerSecurityContext" (dict "root" $ "role" $d) | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            {{- if $d.files }}
+            - { name: files, mountPath: {{ $d.filesMountPath | default "/etc/mcp" }}, readOnly: true }
+            {{- end }}
+            {{- with $d.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }
+        {{- if $d.files }}
+        - name: files
+          configMap: { name: {{ $name }} }
+        {{- end }}
+        {{- with $d.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" $name) | nindent 2 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "heraion.componentSelector" (dict "root" $ "component" $component) | nindent 4 }}
+  ports:
+    - { name: http, port: {{ $d.port }}, targetPort: http, protocol: TCP }
+{{- if $.Values.networkPolicy.enabled }}
+---
+# Only worker pods may reach this connector.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" $name) | nindent 2 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "heraion.componentSelector" (dict "root" $ "component" $component) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "heraion.componentSelector" (dict "root" $ "component" "worker") | nindent 14 }}
+      ports:
+        - { port: http, protocol: TCP }
+{{- end }}
+{{- end }}
+{{- end }}

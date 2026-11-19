@@ -1,0 +1,39 @@
+{{- if .Values.worker.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "worker" "name" (include "heraion.workerSA" .)) | nindent 2 }}
+  {{- with .Values.worker.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: {{ .Values.worker.automountServiceAccountToken }}
+{{- end }}
+{{- $w := .Values.worker.cronJob }}
+{{- range $n, $p := (include "heraion.playbooks" . | fromYaml) }}
+{{- with ($p.trigger | default dict).schedule }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "worker" "name" (printf "%s-%s" (include "heraion.fullname" $) $n | trunc 52 | trimSuffix "-")) | nindent 2 }}
+spec:
+  schedule: {{ . | quote }}
+  {{- with $w.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  concurrencyPolicy: {{ $w.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ $w.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $w.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ $w.startingDeadlineSeconds }}
+  suspend: {{ or $w.suspend (index $.Values.playbooks $n).suspend | default false }}
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "heraion.componentSelector" (dict "root" $ "component" "worker") | nindent 8 }}
+        heraion.io/playbook: {{ $n }}
+        heraion.io/trigger: schedule
+    spec:
+      {{- include "heraion.workerJobSpec" (dict "root" $ "playbook" $n) | nindent 6 }}
+{{- end }}
+{{- end }}

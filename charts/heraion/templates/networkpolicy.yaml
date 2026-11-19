@@ -1,0 +1,36 @@
+{{- if .Values.networkPolicy.enabled }}
+# Workers accept no connections. Egress is open unless networkPolicy.workerEgress is set.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "worker" "name" (printf "%s-worker" (include "heraion.fullname" .))) | nindent 2 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "heraion.componentSelector" (dict "root" $ "component" "worker") | nindent 6 }}
+  policyTypes: [Ingress{{ if .Values.networkPolicy.workerEgress }}, Egress{{ end }}]
+  ingress: []
+  {{- with .Values.networkPolicy.workerEgress }}
+  egress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- if include "heraion.gatewayEnabled" . }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "gateway" "name" (printf "%s-gateway" (include "heraion.fullname" .))) | nindent 2 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "heraion.componentSelector" (dict "root" $ "component" "gateway") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { port: http, protocol: TCP }
+      {{- with .Values.networkPolicy.gatewayIngressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

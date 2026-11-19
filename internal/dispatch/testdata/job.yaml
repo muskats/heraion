@@ -1,0 +1,21 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    app.kubernetes.io/name: heraion
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/component: worker
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: worker
+          image: heraion:test
+          env:
+            - name: HERAION_EVENT
+              value: stale
+            - name: KEEP
+              value: "1"

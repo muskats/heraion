@@ -1,0 +1,9 @@
+dependencies:
+- name: litellm
+  repository: oci://ghcr.io/berriai/litellm/chart
+  version: 1.108.0
+- name: grafana-mcp
+  repository: https://grafana-community.github.io/helm-charts
+  version: 0.34.0
+digest: sha256:a18c30c50d120cc7e378696b53667900ef75e60ea576d749bad052bf3757691d
+generated: "2026-11-19T10:38:35.637038755+01:00"

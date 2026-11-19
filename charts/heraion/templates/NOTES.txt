@@ -1,0 +1,26 @@
+HeraIon {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+{{- $pbs := include "heraion.playbooks" . | fromYaml }}
+{{- if not $pbs }}
+
+WARNING: no playbook is enabled, so nothing will run. Enable one, e.g.
+  --set playbooks.trivy-remediate.enabled=true --set mcpServers.k8s.enabled=true
+{{- end }}
+
+Playbooks:
+{{- range $n, $p := $pbs }}
+  - {{ $n }}: {{ with $p.trigger.schedule }}CronJob "{{ . }}"{{ end }}{{ with $p.trigger.webhook }}webhook POST /hooks/{{ . }}{{ end }}{{ if $p.trigger.manual }}manual{{ end }}
+{{- end }}
+{{- if .Values.dryRun }}
+
+DRY-RUN is on: proposed PRs are logged with their diff, nothing is pushed.
+{{- end }}
+
+Run a scheduled playbook now:
+  kubectl -n {{ .Release.Namespace }} create job --from=cronjob/{{ include "heraion.fullname" . }}-<playbook> heraion-manual-$(date +%s)
+{{- if include "heraion.gatewayEnabled" . }}
+
+Webhook gateway: http://{{ include "heraion.fullname" . }}-gateway.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.port }}/hooks/<name>
+{{- end }}
+
+Follow investigations:
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/component=worker,app.kubernetes.io/instance={{ .Release.Name }} -f

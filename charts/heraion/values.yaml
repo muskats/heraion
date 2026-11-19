@@ -1,0 +1,319 @@
+# HeraIon chart values. A minimal install sets llm.*, git.* and enables one
+# playbook:
+#
+#   helm install heraion oci://ghcr.io/muskats/charts/heraion \
+#     --set llm.baseURL=https://api.openai.com/v1 --set llm.model=gpt-4.1 \
+#     --set llm.apiKey.existingSecret=heraion-llm \
+#     --set git.token.existingSecret=heraion-git \
+#     --set playbooks.trivy-remediate.enabled=true --set mcpServers.k8s.enabled=true
+
+nameOverride: ""
+fullnameOverride: ""
+commonLabels: {}
+commonAnnotations: {}
+
+image:
+  repository: ghcr.io/muskats/heraion
+  tag: ""          # default: chart appVersion
+  digest: ""       # e.g. sha256:4f2c...; used instead of tag
+  pullPolicy: IfNotPresent
+
+# Defaults for every pod. gateway, worker and mcpServers.<name>.deploy can
+# override each key.
+global:
+  imagePullSecrets: []
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+
+# Credentials. Every secret is either a reference or an inline value:
+#
+#   apiKey: { existingSecret: heraion-llm, key: api-key }   # preferred
+#   apiKey: { value: sk-... }                               # chart creates a Secret
+
+llm:
+  # Any OpenAI-compatible endpoint, e.g. https://api.openai.com/v1 or
+  # http://vllm:8000/v1. Leave empty with litellm.enabled to use LiteLLM.
+  baseURL: ""
+  model: ""
+  apiKey:
+    existingSecret: ""
+    key: api-key
+    value: ""
+  maxSteps: 30
+  maxTokens: 500000
+  timeout: 20m
+  # temperature: 0.2
+
+git:
+  # github, gitlab, gitea, bitbucket, stash, gogs or azure
+  provider: github
+  endpoint: ""        # self-hosted only, e.g. https://git.example.com
+  cloneBaseURL: ""    # default: endpoint, or https://github.com
+  username: ""        # clone/push user, default x-access-token
+  authorName: HeraIon
+  authorEmail: heraion@users.noreply.local
+  token:
+    existingSecret: ""
+    key: token
+    value: ""
+
+# Repos HeraIon may change, e.g. [acme/web, acme/api]. Playbooks can only narrow this.
+repos: []
+
+# true: log each PR with its diff instead of pushing it.
+dryRun: false
+
+# Playbooks by name.
+#   trigger: { schedule: "0 */6 * * *" }   renders a CronJob
+#   trigger: { webhook: alertmanager }     runs on POST /hooks/alertmanager
+playbooks:
+  trivy-remediate:
+    enabled: false   # needs mcpServers.k8s and Trivy Operator
+    trigger: { schedule: "0 */6 * * *" }
+    tools: [k8s.resources_list, k8s.resources_get, repo_*, open_pr]
+    prompt: |
+      1. Call k8s.resources_list with apiVersion "aquasecurity.github.io/v1alpha1" and
+         kind "VulnerabilityReport" (all namespaces) to find Trivy Operator reports.
+         Keep only HIGH and CRITICAL vulnerabilities that have a fixedVersion.
+      2. Map each affected image to its source repository among the allowed repos
+         (Dockerfiles, Helm values and manifests that reference the image or package).
+      3. For each repository, propose the minimal version bump that fixes the CVEs.
+      4. Open one PR per repository, with a branch key derived from the fix
+         (e.g. "bump-alpine-3.20.3"). List CVEs, severities, workloads, installed
+         and fixed versions in the PR body. If nothing is fixable, open no PR.
+    output: pr
+    guardrails: { maxPRs: 3 }
+  alertmanager-triage:
+    enabled: false   # needs gateway.hooks.alertmanager and mcpServers.k8s
+    trigger: { webhook: alertmanager }
+    tools: [k8s.*, repo_*, open_pr]
+    prompt: |
+      An Alertmanager webhook delivered the alert group below. For each firing alert,
+      identify the workload from its labels, gather evidence with the k8s tools (pod
+      status, restarts, events, logs, resource usage, owning controller) and determine
+      the most likely root cause. Only if the cause is a configuration value in one of
+      the allowed repositories, open one minimal PR (branch key: alertname + workload).
+      Finish with a short report: summary, evidence, root cause, confidence, next steps.
+    output: pr
+    guardrails: { maxPRs: 1 }
+
+# Worker: one Job per run.
+worker:
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}   # e.g. eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/heraion
+  # Workers do not call the Kubernetes API; the k8s MCP server does.
+  automountServiceAccountToken: false
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  workspaceSizeLimit: 2Gi
+  cronJob:
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: 3
+    failedJobsHistoryLimit: 3
+    startingDeadlineSeconds: 600
+    timeZone: ""
+    suspend: false
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 1Gi }
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  securityContext: {}
+  extraEnv: []         # e.g. [{ name: OTEL_EXPORTER_OTLP_ENDPOINT, value: http://otel:4317 }]
+  extraEnvFrom: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  extraContainers: []
+  initContainers: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+
+# Gateway: receives webhooks. Only rendered when a webhook playbook is enabled.
+gateway:
+  replicas: 1
+  maxConcurrentJobs: 5     # over this the gateway returns 429; resourceQuota is the hard cap
+  maxBodyBytes: 262144
+  # Webhooks by name, served at POST /hooks/<name>:
+  #
+  #   hooks:
+  #     alertmanager:                # Authorization: Bearer <secret>
+  #       auth: token
+  #       secret: { existingSecret: heraion-hooks, key: alertmanager }
+  #     github:                      # X-Hub-Signature-256: sha256=<hmac>
+  #       auth: hmac-sha256
+  #       secret: { existingSecret: heraion-hooks, key: github }
+  hooks: {}
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: heraion.example.com
+        paths: [{ path: /hooks, pathType: Prefix }]
+    tls: []
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  livenessProbe:
+    httpGet: { path: /healthz, port: http }
+    periodSeconds: 20
+  readinessProbe:
+    httpGet: { path: /readyz, port: http }
+    periodSeconds: 10
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  securityContext: {}
+  extraEnv: []
+  extraEnvFrom: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  extraContainers: []
+  initContainers: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+
+# MCP servers. Tools of server "k8s" are named "k8s.<tool>", e.g. k8s.pods_log.
+#   mode: deploy      the chart runs it
+#   mode: dependency  a subchart runs it; url points at its Service
+#   mode: external    nothing is deployed; set url
+# Any name works, e.g. mcpServers.pagerduty. See docs/integrations.md.
+mcpServers:
+  k8s:
+    enabled: false
+    mode: deploy
+    path: /mcp
+    transport: streamable
+    allowTools: []          # e.g. [resources_list, pods_*]; empty = all
+    denyTools: []
+    required: false         # true: fail the run if the server is down
+    timeout: 60s
+    deploy:
+      image:
+        repository: quay.io/containers/kubernetes_mcp_server
+        tag: v0.1.2
+        pullPolicy: IfNotPresent
+      args: ["--config", "/etc/mcp/config.toml"]
+      port: 8080
+      files:
+        config.toml: |
+          port = "8080"
+          read_only = true
+          disable_destructive = true
+          stateless = true
+          toolsets = ["core"]
+          cluster_provider_strategy = "in-cluster"
+      # Read-only. Secrets and ConfigMaps are not readable.
+      rbac:
+        clusterRules:
+          - apiGroups: [""]
+            resources: [pods, pods/log, events, services, endpoints, namespaces, nodes, persistentvolumeclaims]
+            verbs: [get, list, watch]
+          - apiGroups: [apps]
+            resources: [deployments, replicasets, statefulsets, daemonsets]
+            verbs: [get, list, watch]
+          - apiGroups: [batch]
+            resources: [jobs, cronjobs]
+            verbs: [get, list, watch]
+          - apiGroups: [events.k8s.io]
+            resources: [events]
+            verbs: [get, list, watch]
+          - apiGroups: [metrics.k8s.io]
+            resources: [pods, nodes]
+            verbs: [get, list]
+          - apiGroups: [aquasecurity.github.io]
+            resources:
+              - vulnerabilityreports
+              - clustervulnerabilityreports
+              - configauditreports
+              - clusterconfigauditreports
+              - sbomreports
+              - clustersbomreports
+            verbs: [get, list, watch]
+        rules: []
+  grafana:
+    enabled: false          # also installs the grafana-mcp subchart
+    mode: dependency
+    url: "http://{{ .Release.Name }}-grafana-mcp:8000/mcp"
+    transport: streamable
+  datadog:
+    enabled: false
+    mode: external
+    # Depends on your Datadog site, see https://docs.datadoghq.com/mcp_server/setup
+    url: ""
+    secretHeaders:
+      DD-API-KEY: { existingSecret: "", key: api-key, value: "" }
+      DD-APPLICATION-KEY: { existingSecret: "", key: app-key, value: "" }
+
+# grafana-mcp subchart (grafana-community/grafana-mcp).
+grafana-mcp:
+  disableWrite: true
+  extraArgs: ["--transport", "streamable-http", "--address", "0.0.0.0:8000"]
+  grafana:
+    url: "http://grafana.monitoring:3000"
+    apiKeySecret: { name: "", key: "" }
+
+# LiteLLM subchart (oci://ghcr.io/berriai/litellm/chart). Needs PostgreSQL in
+# litellm.database.writer. With llm.baseURL empty, workers use
+# http://<release>-litellm-gateway:4000/v1.
+litellm:
+  enabled: false
+
+rbac:
+  create: true
+
+networkPolicy:
+  enabled: true
+  # Who may call the gateway, e.g. [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } } }]. Empty = anyone.
+  gatewayIngressFrom: []
+  # Egress rules for workers. Empty = no egress restriction.
+  workerEgress: []
+
+# Hard cap on Jobs in the namespace (count/jobs.batch).
+resourceQuota:
+  enabled: false
+  jobs: 20
+
+# Extra manifests; templated, e.g. name: "{{ .Release.Name }}-extra".
+extraObjects: []

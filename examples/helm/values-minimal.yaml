@@ -1,0 +1,19 @@
+# One scheduled playbook, OpenAI, GitHub. Renders a CronJob, its config and
+# the k8s MCP server; no gateway.
+#
+#   kubectl -n heraion create secret generic heraion-llm --from-literal=api-key=...
+#   kubectl -n heraion create secret generic heraion-git --from-literal=token=...
+#   helm install heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f values-minimal.yaml
+llm:
+  baseURL: https://api.openai.com/v1
+  model: gpt-4.1
+  apiKey: { existingSecret: heraion-llm, key: api-key }
+git:
+  provider: github
+  token: { existingSecret: heraion-git, key: token }
+repos: [acme/web, acme/payments-api]
+dryRun: true             # PR diffs go to the Job logs; set false to open PRs
+playbooks:
+  trivy-remediate: { enabled: true }
+mcpServers:
+  k8s: { enabled: true }  # reads Trivy Operator reports

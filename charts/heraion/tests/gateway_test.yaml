@@ -1,0 +1,23 @@
+suite: gateway
+templates:
+  - gateway.yaml
+set:
+  llm: { baseURL: https://api.openai.com/v1, model: m }
+tests:
+  - it: is not rendered without webhook playbooks
+    asserts:
+      - hasDocuments: { count: 0 }
+  - it: fails when a webhook playbook has no hook secret
+    set:
+      playbooks.alertmanager-triage.enabled: true
+    asserts:
+      - failedTemplate: {}
+  - it: gets only create/list on jobs
+    set:
+      playbooks.alertmanager-triage.enabled: true
+      gateway.hooks.alertmanager: { auth: token, secret: { existingSecret: am, key: secret } }
+    documentSelector: { path: "kind", value: Role }
+    asserts:
+      - equal:
+          path: rules
+          value: [{ apiGroups: [batch], resources: [jobs], verbs: [create, list] }]

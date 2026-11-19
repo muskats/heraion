@@ -1,0 +1,197 @@
+// Package playbook loads playbooks, e.g.
+//
+//	name: trivy-remediate
+//	trigger: {schedule: "0 */6 * * *"}
+//	tools: [k8s.*, repo_*, open_pr]
+//	prompt: Fix fixable HIGH CVEs.
+package playbook
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+
+	"sigs.k8s.io/yaml"
+
+	"github.com/muskats/heraion/internal/config"
+)
+
+// Output kinds.
+const (
+	OutputPR     = "pr"     // the agent may open pull requests
+	OutputReport = "report" // the agent only reports findings; open_pr is removed
+)
+
+// Playbook is one investigation definition.
+type Playbook struct {
+	Name        string     `json:"name"`
+	Description string     `json:"description,omitempty"`
+	Trigger     Trigger    `json:"trigger"`
+	Tools       []string   `json:"tools"`
+	Repos       []string   `json:"repos,omitempty"`
+	Prompt      string     `json:"prompt"`
+	Output      string     `json:"output,omitempty"`
+	Guardrails  Guardrails `json:"guardrails,omitempty"`
+}
+
+// Trigger says how a playbook is started. Exactly one field must be set.
+type Trigger struct {
+	Schedule string `json:"schedule,omitempty"` // cron expression, rendered as a CronJob by the chart
+	Webhook  string `json:"webhook,omitempty"`  // hook name, served at POST /hooks/{name}
+	Manual   bool   `json:"manual,omitempty"`   // only started by `heraion run`
+}
+
+// Guardrails limit what a single run may do.
+type Guardrails struct {
+	MaxPRs       int   `json:"maxPRs,omitempty"`
+	DryRun       *bool `json:"dryRun,omitempty"`
+	MaxFileBytes int   `json:"maxFileBytes,omitempty"`
+}
+
+var nameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,50}[a-z0-9])?$`)
+
+// Parse decodes and validates a single playbook.
+func Parse(b []byte) (*Playbook, error) {
+	p := &Playbook{}
+	if err := yaml.UnmarshalStrict(b, p); err != nil {
+		return nil, err
+	}
+	if p.Output == "" {
+		p.Output = OutputPR
+	}
+	if p.Guardrails.MaxPRs == 0 {
+		p.Guardrails.MaxPRs = 1
+	}
+	if p.Guardrails.MaxFileBytes == 0 {
+		p.Guardrails.MaxFileBytes = 1 << 20
+	}
+	return p, p.Validate()
+}
+
+// Validate reports every problem in the playbook at once.
+func (p *Playbook) Validate() error {
+	var errs []error
+	if !nameRE.MatchString(p.Name) {
+		errs = append(errs, fmt.Errorf("name %q must be a lowercase DNS label (max 52 chars)", p.Name))
+	}
+	if strings.TrimSpace(p.Prompt) == "" {
+		errs = append(errs, errors.New("prompt is required"))
+	}
+	n := 0
+	if p.Trigger.Schedule != "" {
+		n++
+		if len(strings.Fields(p.Trigger.Schedule)) != 5 && !strings.HasPrefix(p.Trigger.Schedule, "@") {
+			errs = append(errs, fmt.Errorf("trigger.schedule %q must be a 5-field cron expression", p.Trigger.Schedule))
+		}
+	}
+	if p.Trigger.Webhook != "" {
+		n++
+		if !nameRE.MatchString(p.Trigger.Webhook) {
+			errs = append(errs, fmt.Errorf("trigger.webhook %q must be a lowercase DNS label", p.Trigger.Webhook))
+		}
+	}
+	if p.Trigger.Manual {
+		n++
+	}
+	if n != 1 {
+		errs = append(errs, errors.New("trigger must set exactly one of schedule, webhook or manual"))
+	}
+	if p.Output != OutputPR && p.Output != OutputReport {
+		errs = append(errs, fmt.Errorf("output %q must be %q or %q", p.Output, OutputPR, OutputReport))
+	}
+	if len(p.Tools) == 0 {
+		errs = append(errs, errors.New("tools allowlist must not be empty"))
+	}
+	for _, t := range p.Tools {
+		if _, err := path.Match(t, ""); err != nil {
+			errs = append(errs, fmt.Errorf("tools pattern %q: %w", t, err))
+		}
+	}
+	for _, r := range p.Repos {
+		if err := config.ValidateRepoName(r); err != nil {
+			errs = append(errs, fmt.Errorf("repos: %w", err))
+		}
+	}
+	if p.Guardrails.MaxPRs < 0 {
+		errs = append(errs, errors.New("guardrails.maxPRs must be >= 0"))
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("playbook %q: %w", p.Name, err)
+	}
+	return nil
+}
+
+// AllowsTool matches name against the tools list (path.Match syntax), e.g.
+// "k8s.*" allows "k8s.pods_log". With output "report", open_pr is never allowed.
+func (p *Playbook) AllowsTool(name string) bool {
+	if p.Output == OutputReport && name == "open_pr" {
+		return false
+	}
+	for _, pat := range p.Tools {
+		if ok, _ := path.Match(pat, name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectiveRepos intersects the playbook repos with the global list. No
+// playbook repos means all global repos; no global repos means none.
+func (p *Playbook) EffectiveRepos(global []string) []string {
+	if len(p.Repos) == 0 {
+		return slices.Clone(global)
+	}
+	var out []string
+	for _, r := range p.Repos {
+		if slices.Contains(global, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// DryRun is true if the global flag or the playbook asks for it.
+func (p *Playbook) DryRun(global bool) bool {
+	if global {
+		return true
+	}
+	return p.Guardrails.DryRun != nil && *p.Guardrails.DryRun
+}
+
+// LoadDir loads every *.yaml / *.yml file in dir. Names must be unique.
+func LoadDir(dir string) (map[string]*Playbook, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read playbooks dir: %w", err)
+	}
+	out := map[string]*Playbook{}
+	var errs []error
+	for _, e := range entries {
+		ext := filepath.Ext(e.Name())
+		// Skip hidden entries such as the ..data symlink in ConfigMap mounts.
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || (ext != ".yaml" && ext != ".yml") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		p, err := Parse(b)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", e.Name(), err))
+			continue
+		}
+		if _, dup := out[p.Name]; dup {
+			errs = append(errs, fmt.Errorf("%s: duplicate playbook name %q", e.Name(), p.Name))
+			continue
+		}
+		out[p.Name] = p
+	}
+	return out, errors.Join(errs...)
+}

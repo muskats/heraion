@@ -1,0 +1,52 @@
+llm:
+  baseURL: http://litellm.example:4000/v1
+  model: gpt-4.1
+  apiKey: { existingSecret: llm-creds, key: api-key }
+git:
+  provider: gitea
+  endpoint: https://git.example.internal
+  token: { value: gitea-token-value }
+repos: [platform/web, platform/payments-api]
+dryRun: true
+playbooks:
+  trivy-remediate: { enabled: true }
+  alertmanager-triage: { enabled: true }
+  custom-report:
+    trigger: { manual: true }
+    tools: ["grafana.*", "datadog.*"]
+    output: report
+    prompt: Summarize yesterday's error budget burn.
+gateway:
+  hooks:
+    alertmanager:
+      auth: token
+      secret: { value: am-secret-value }
+  ingress:
+    enabled: true
+    className: nginx
+  autoscaling: { enabled: true }
+  podDisruptionBudget: { enabled: true }
+mcpServers:
+  k8s: { enabled: true }
+  grafana: { enabled: true }
+  datadog:
+    enabled: true
+    url: https://mcp.datadoghq.com/api/unstable/mcp-server/mcp
+    secretHeaders:
+      DD-API-KEY: { existingSecret: datadog, key: api-key }
+      DD-APPLICATION-KEY: { value: dd-app-key-value }
+  custom:
+    enabled: true
+    mode: deploy
+    deploy:
+      image: { repository: ghcr.io/example/custom-mcp, tag: "1.0.0" }
+      port: 9000
+      env: [{ name: LOG_LEVEL, value: info }]
+      secretEnv:
+        API_TOKEN: { value: custom-token-value }
+resourceQuota: { enabled: true }
+extraObjects:
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata: { name: "{{ .Release.Name }}-extra" }
+    data: { a: b }

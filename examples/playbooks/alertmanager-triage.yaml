@@ -1,0 +1,19 @@
+name: alertmanager-triage
+description: Triage a firing Alertmanager alert group and, if the root cause is in config we own, propose a fix.
+trigger: { webhook: alertmanager }    # POST /hooks/alertmanager
+# Add e.g. grafana.* or jira.* when those servers are enabled.
+tools: [k8s.*, repo_*, open_pr]
+prompt: |
+  An Alertmanager webhook delivered the alert group below. For each alert with status "firing":
+  1. Identify the affected workload from its labels (namespace, pod, deployment, container...).
+  2. Gather evidence with the k8s tools: pod status and restarts, recent events, container
+     logs (last few hundred lines), resource usage, and the owning Deployment/StatefulSet.
+  3. Decide the most likely root cause, citing the evidence. Distinguish symptoms from causes.
+  4. Only if the cause is a configuration value in one of the allowed repositories (for
+     example a memory limit that is clearly too low, a wrong probe, a bad image tag), open one
+     minimal PR fixing it. Use the alertname and workload as the branch key, e.g.
+     "oomkilled-payments-api-memory". Otherwise open no PR.
+  Finish with a short triage report: summary, evidence, root cause, confidence, next steps.
+  Alerts with status "resolved" need no investigation; just mention them.
+output: pr
+guardrails: { maxPRs: 1 }

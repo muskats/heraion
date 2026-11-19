@@ -1,0 +1,235 @@
+// Package mcp is the MCP client. Each server's tools are exposed as
+// "<server>.<tool>", e.g. "grafana.query_prometheus".
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"path"
+	"sort"
+	"strings"
+	"time"
+
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/muskats/heraion/internal/config"
+	"github.com/muskats/heraion/internal/llm"
+)
+
+// Manager holds open MCP sessions for one run.
+type Manager struct {
+	sessions map[string]*sdk.ClientSession
+}
+
+// Close closes every session.
+func (m *Manager) Close() {
+	for _, s := range m.sessions {
+		_ = s.Close()
+	}
+}
+
+// NeededBy reports whether patterns can match a tool of server, e.g.
+// [k8s.*, repo_*] needs "k8s" but not "grafana".
+func NeededBy(patterns []string, server string) bool {
+	for _, p := range patterns {
+		if prefix, _, dotted := strings.Cut(p, "."); dotted {
+			if ok, _ := path.Match(prefix, server); ok {
+				return true
+			}
+		} else if ok, _ := path.Match(p, server+".x"); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Connect opens a session to each server needed returns true for. A server
+// that fails is skipped with a warning, unless it is Required.
+func Connect(ctx context.Context, servers map[string]*config.MCPServer, needed func(string) bool, version string, log *slog.Logger) (*Manager, []llm.Tool, error) {
+	m := &Manager{sessions: map[string]*sdk.ClientSession{}}
+	names := make([]string, 0, len(servers))
+	for n := range servers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	var tools []llm.Tool
+	for _, name := range names {
+		srv := servers[name]
+		if needed != nil && !needed(name) {
+			continue
+		}
+		ts, err := m.connect(ctx, name, srv, version)
+		if err != nil {
+			if srv.Required {
+				m.Close()
+				return nil, nil, fmt.Errorf("mcp server %s: %w", name, err)
+			}
+			log.Warn("mcp server unavailable, continuing without it", "server", name, "err", err)
+			continue
+		}
+		log.Info("mcp server connected", "server", name, "tools", len(ts))
+		tools = append(tools, ts...)
+	}
+	return m, tools, nil
+}
+
+func (m *Manager) connect(ctx context.Context, name string, srv *config.MCPServer, version string) ([]llm.Tool, error) {
+	for h, v := range srv.SecretHeaders {
+		if v == "" {
+			return nil, fmt.Errorf("header %s: env %s is empty", h, srv.HeadersFromEnv[h])
+		}
+	}
+	// Time out in the transport, not with a context: SSE ties its stream to
+	// the Connect context, so cancelling it would close the session.
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.ResponseHeaderTimeout = 30 * time.Second
+	hc := &http.Client{Transport: &headerTransport{
+		base:    base,
+		headers: merge(srv.Headers, srv.SecretHeaders),
+	}}
+	var t sdk.Transport
+	switch srv.Transport {
+	case "sse":
+		t = &sdk.SSEClientTransport{Endpoint: srv.URL, HTTPClient: hc}
+	default:
+		// Workers only call tools, so no server-to-client stream is needed.
+		t = &sdk.StreamableClientTransport{Endpoint: srv.URL, HTTPClient: hc, DisableStandaloneSSE: true}
+	}
+	client := sdk.NewClient(&sdk.Implementation{Name: "heraion", Version: version}, nil)
+
+	sess, err := client.Connect(ctx, t, nil)
+	if err != nil {
+		return nil, fmt.Errorf("connect %s: %w", srv.URL, err)
+	}
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var out []llm.Tool
+	for tl, err := range sess.Tools(cctx, nil) {
+		if err != nil {
+			_ = sess.Close()
+			return nil, fmt.Errorf("list tools: %w", err)
+		}
+		if !filter(tl.Name, srv.AllowTools, srv.DenyTools) {
+			continue
+		}
+		schema, err := json.Marshal(tl.InputSchema)
+		if err != nil || string(schema) == "null" {
+			schema = []byte(`{"type":"object","properties":{}}`)
+		}
+		desc := tl.Description
+		if desc == "" {
+			desc = tl.Title
+		}
+		out = append(out, &tool{
+			server: name, name: tl.Name, desc: "[" + name + "] " + desc,
+			schema: schema, sess: sess, timeout: srv.Timeout.Duration,
+		})
+	}
+	m.sessions[name] = sess
+	return out, nil
+}
+
+func filter(name string, allow, deny []string) bool {
+	for _, p := range deny {
+		if ok, _ := path.Match(p, name); ok {
+			return false
+		}
+	}
+	if len(allow) == 0 {
+		return true
+	}
+	for _, p := range allow {
+		if ok, _ := path.Match(p, name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func merge(a, b map[string]string) map[string]string {
+	out := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
+}
+
+type headerTransport struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (h *headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if len(h.headers) > 0 {
+		r = r.Clone(r.Context())
+		for k, v := range h.headers {
+			r.Header.Set(k, v)
+		}
+	}
+	return h.base.RoundTrip(r)
+}
+
+type tool struct {
+	server, name, desc string
+	schema             json.RawMessage
+	sess               *sdk.ClientSession
+	timeout            time.Duration
+}
+
+func (t *tool) Name() string            { return t.server + "." + t.name }
+func (t *tool) Description() string     { return t.desc }
+func (t *tool) Schema() json.RawMessage { return t.schema }
+
+func (t *tool) Call(ctx context.Context, args json.RawMessage) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
+	res, err := t.sess.CallTool(ctx, &sdk.CallToolParams{Name: t.name, Arguments: args})
+	if err != nil {
+		return "", err
+	}
+	text := render(res)
+	if res.IsError {
+		if text == "" {
+			text = "tool reported an error"
+		}
+		return "", errors.New(text)
+	}
+	return text, nil
+}
+
+// render flattens a tool result to text for the model.
+func render(res *sdk.CallToolResult) string {
+	var parts []string
+	for _, c := range res.Content {
+		switch c := c.(type) {
+		case *sdk.TextContent:
+			parts = append(parts, c.Text)
+		case *sdk.EmbeddedResource:
+			if c.Resource != nil && c.Resource.Text != "" {
+				parts = append(parts, c.Resource.Text)
+			} else if c.Resource != nil {
+				parts = append(parts, fmt.Sprintf("[binary resource %s omitted]", c.Resource.URI))
+			}
+		case *sdk.ResourceLink:
+			parts = append(parts, "[resource link: "+c.URI+"]")
+		case *sdk.ImageContent:
+			parts = append(parts, "[image omitted]")
+		case *sdk.AudioContent:
+			parts = append(parts, "[audio omitted]")
+		}
+	}
+	if len(parts) == 0 && res.StructuredContent != nil {
+		if b, err := json.Marshal(res.StructuredContent); err == nil {
+			return string(b)
+		}
+	}
+	return strings.Join(parts, "\n")
+}

@@ -1,0 +1,53 @@
+# Runtime config for `heraion run` and `heraion serve`. No secrets here:
+#
+#   export HERAION_LLM_API_KEY=sk-...
+#   export HERAION_GIT_TOKEN=...
+#   heraion run --config examples/config.yaml --playbook trivy-remediate
+llm:
+  baseURL: https://api.openai.com/v1   # or http://litellm:4000/v1, http://vllm:8000/v1, ...
+  model: gpt-4.1
+  maxSteps: 30        # model turns per run
+  maxTokens: 500000   # tokens per run
+  timeout: 20m
+
+git:
+  provider: gitea                          # github, gitlab, gitea, bitbucket, stash, gogs, azure
+  endpoint: https://git.example.internal   # empty for github.com / gitlab.com
+  # cloneBaseURL: https://git.example.internal
+  # username: x-access-token
+  authorName: HeraIon
+  authorEmail: heraion@example.internal
+
+# Repos HeraIon may change. A playbook's repos list can only narrow this.
+repos:
+  - platform/payments-api
+  - platform/web
+
+playbooksDir: ./examples/playbooks
+dryRun: true   # log PRs instead of pushing; same as --dry-run or HERAION_DRY_RUN=true
+
+# MCP servers. In Kubernetes the chart writes this section.
+mcpServers:
+  k8s:
+    url: http://heraion-mcp-k8s:8080/mcp
+    allowTools: [resources_list, resources_get, api_resources_list]
+  # datadog:
+  #   url: https://mcp.datadoghq.com/api/unstable/mcp-server/mcp   # depends on your Datadog site
+  #   headersFromEnv:
+  #     DD-API-KEY: HERAION_MCP_DATADOG_API_KEY
+  #     DD-APPLICATION-KEY: HERAION_MCP_DATADOG_APP_KEY
+
+# Used by `heraion serve`. POST /hooks/alertmanager starts every playbook
+# with trigger: { webhook: alertmanager }.
+gateway:
+  listen: ":8080"
+  jobTemplate: /etc/heraion/job-template.yaml
+  maxConcurrentJobs: 5
+  hooks:
+    alertmanager:
+      auth: token                              # Authorization: Bearer <secret>
+      secretEnv: HERAION_HOOK_ALERTMANAGER_SECRET
+    # gitea:
+    #   auth: hmac-sha256                      # X-Gitea-Signature: <hex hmac>
+    #   header: X-Gitea-Signature
+    #   secretEnv: HERAION_HOOK_GITEA_SECRET

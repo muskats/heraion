@@ -1,0 +1,24 @@
+suite: mcp connectors
+templates:
+  - mcp.yaml
+set:
+  llm: { baseURL: https://api.openai.com/v1, model: m }
+tests:
+  - it: renders nothing when every connector is off
+    asserts:
+      - hasDocuments: { count: 0 }
+  - it: k8s connector is read-only and only reachable from workers
+    set:
+      mcpServers.k8s.enabled: true
+    documentSelector: { path: "kind", value: NetworkPolicy }
+    asserts:
+      - equal:
+          path: spec.ingress[0].from[0].podSelector.matchLabels["app.kubernetes.io/component"]
+          value: worker
+  - it: k8s connector ClusterRole has no write verbs
+    set:
+      mcpServers.k8s.enabled: true
+    documentSelector: { path: "kind", value: ClusterRole }
+    asserts:
+      - notContains: { path: "rules[0].verbs", content: create }
+      - notContains: { path: "rules[0].verbs", content: delete }

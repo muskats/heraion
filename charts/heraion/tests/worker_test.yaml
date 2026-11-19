@@ -1,0 +1,28 @@
+suite: worker
+templates:
+  - worker.yaml
+set:
+  llm: { baseURL: https://api.openai.com/v1, model: m, apiKey: { existingSecret: llm, key: api-key } }
+  playbooks:
+    trivy-remediate: { enabled: true }
+tests:
+  - it: renders one CronJob per scheduled playbook with Forbid
+    documentSelector: { path: "kind", value: CronJob }
+    asserts:
+      - equal: { path: "spec.schedule", value: "0 */6 * * *" }
+      - equal: { path: "spec.concurrencyPolicy", value: Forbid }
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args
+          value: [run, --playbook, trivy-remediate]
+  - it: workers have no API token and a hardened container
+    documentSelector: { path: "kind", value: CronJob }
+    asserts:
+      - equal: { path: "spec.jobTemplate.spec.template.spec.automountServiceAccountToken", value: false }
+      - equal: { path: "spec.jobTemplate.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem", value: true }
+      - equal: { path: "spec.jobTemplate.spec.template.spec.securityContext.runAsNonRoot", value: true }
+      - isNotNull: { path: spec.jobTemplate.spec.ttlSecondsAfterFinished }
+  - it: renders no CronJob when the playbook is disabled
+    set:
+      playbooks.trivy-remediate.enabled: false
+    asserts:
+      - hasDocuments: { count: 1 }   # only the ServiceAccount
