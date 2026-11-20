@@ -234,26 +234,26 @@ func (d *Dispatcher) ownSecret(ctx context.Context, job *batchv1.Job) error {
 	return err
 }
 
-func (d *Dispatcher) active(ctx context.Context) (int, error) {
+// listJobs returns the worker Jobs: those with the template's labels.
+func (d *Dispatcher) listJobs(ctx context.Context) ([]batchv1.Job, error) {
 	sel := labels.Set(d.Template.Labels).AsSelector().String()
 	list, err := d.Client.BatchV1().Jobs(d.Namespace).List(ctx, metav1.ListOptions{LabelSelector: sel})
 	if err != nil {
-		return 0, fmt.Errorf("list jobs: %w", err)
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	return list.Items, nil
+}
+
+func (d *Dispatcher) active(ctx context.Context) (int, error) {
+	jobs, err := d.listJobs(ctx)
+	if err != nil {
+		return 0, err
 	}
 	n := 0
-	for _, j := range list.Items {
-		if !finished(&j) {
+	for i := range jobs {
+		if jobStatus(&jobs[i]) == StatusActive {
 			n++
 		}
 	}
 	return n, nil
-}
-
-func finished(j *batchv1.Job) bool {
-	for _, c := range j.Status.Conditions {
-		if (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-	return false
 }

@@ -233,3 +233,12 @@ func TestNamespaces(t *testing.T) {
 		t.Errorf("invalid namespace: %v", err)
 	}
 }
+
+func TestMetricsListen(t *testing.T) {
+	if _, err := Load(write(t, "llm: {baseURL: http://x, model: m}\ngateway: {listen: ':8080', metricsListen: ':8080'}\n")); err == nil {
+		t.Error("metrics on the webhook port must be refused")
+	}
+	if c, err := Load(write(t, "llm: {baseURL: http://x, model: m}\ngateway: {metricsListen: ':9090'}\n")); err != nil || c.Gateway.MetricsListen != ":9090" {
+		t.Errorf("%v %v", c, err)
+	}
+}

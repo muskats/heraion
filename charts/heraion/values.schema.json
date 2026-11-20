@@ -501,6 +501,23 @@
           "minimum": 1024,
           "maximum": 1032192
         },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535, "not": { "const": 8080 } },
+            "serviceMonitor": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "interval": { "type": "string" },
+                "labels": { "type": "object" }
+              }
+            }
+          }
+        },
         "hooks": {
           "type": "object",
           "propertyNames": {
@@ -1061,6 +1078,9 @@
           "type": "boolean"
         },
         "gatewayIngressFrom": {
+          "type": "array"
+        },
+        "metricsFrom": {
           "type": "array"
         },
         "workerEgress": {

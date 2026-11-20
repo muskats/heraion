@@ -14,6 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/dispatch"
 	"github.com/muskats/heraion/internal/playbook"
@@ -156,5 +159,34 @@ func TestHealth(t *testing.T) {
 		if w.Code != 200 {
 			t.Errorf("%s: %d", p, w.Code)
 		}
+	}
+}
+
+func TestMetrics(t *testing.T) {
+	s, err := New(gateway(), pbs(t, "name: triage\ntrigger: {webhook: alertmanager}\ntools: ['*']\nprompt: p\n"), &fakeDispatch{}, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	post(h, "/hooks/alertmanager", "{}", map[string]string{"Authorization": "am-secret"})
+	post(h, "/hooks/alertmanager", "{}", map[string]string{"Authorization": "wrong"})
+	post(h, "/hooks/random-path-1", "{}", nil)
+	post(h, "/hooks/random-path-2", "{}", nil)
+
+	for _, c := range []struct {
+		got  prometheus.Collector
+		want float64
+	}{
+		{s.requests.WithLabelValues("alertmanager", "202"), 1},
+		{s.requests.WithLabelValues("alertmanager", "401"), 1},
+		{s.requests.WithLabelValues("unknown", "404"), 2}, // random paths share one label value
+		{s.dispatches.WithLabelValues("alertmanager", "triage", "created"), 1},
+	} {
+		if got := testutil.ToFloat64(c.got); got != c.want {
+			t.Errorf("%v = %v, want %v", c.got, got, c.want)
+		}
+	}
+	if n := testutil.CollectAndCount(s.requests); n != 3 {
+		t.Errorf("want 3 request series, got %d", n)
 	}
 }

@@ -61,6 +61,7 @@ mcpServers:
 # with trigger: { webhook: alertmanager }.
 gateway:
   listen: ":8080"
+  metricsListen: ":9090"   # Prometheus /metrics; empty: off
   jobTemplate: /etc/heraion/job-template.yaml
   maxConcurrentJobs: 5
   hooks:

@@ -139,6 +139,9 @@ type Jira struct {
 // Gateway configures `heraion serve`.
 type Gateway struct {
 	Listen string `json:"listen,omitempty"` // default :8080
+	// MetricsListen serves Prometheus metrics at /metrics, e.g. ":9090".
+	// Empty: no metrics. A separate port keeps metrics off the webhook port.
+	MetricsListen string `json:"metricsListen,omitempty"`
 	// Namespace for worker Jobs. Default: $POD_NAMESPACE, then the service
 	// account's namespace.
 	Namespace string `json:"namespace,omitempty"`
@@ -570,6 +573,9 @@ func validateMCP(servers map[string]*MCPServer) []error {
 // gateway starts: workers have no hook secrets.
 func (gw *Gateway) validate() []error {
 	var errs []error
+	if gw.MetricsListen != "" && gw.MetricsListen == gw.Listen {
+		errs = append(errs, fmt.Errorf("gateway.metricsListen %q must differ from gateway.listen", gw.MetricsListen))
+	}
 	// The body is stored in a Secret, whose data is capped at 1 MiB.
 	if gw.MaxBodyBytes < 0 || gw.MaxBodyBytes > MaxBodyBytesLimit {
 		errs = append(errs, fmt.Errorf("gateway.maxBodyBytes must be between 1 and %d", MaxBodyBytesLimit))

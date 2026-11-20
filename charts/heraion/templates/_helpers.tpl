@@ -40,12 +40,15 @@ app.kubernetes.io/part-of: heraion
 {{- end }}
 {{- end }}
 
-{{/* dict "root" $ "component" "gateway" "name" "x-heraion-gateway" ["namespace" "shop"] */}}
+{{/* dict "root" $ "component" "gateway" "name" "x-heraion-gateway" ["namespace" "shop"] ["labels" (dict "a" "b")] */}}
 {{- define "heraion.metadata" -}}
 name: {{ .name }}
 namespace: {{ .namespace | default (include "heraion.namespace" .root) }}
 labels:
   {{- include "heraion.labels" . | nindent 2 }}
+  {{- with .labels }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
 {{- with .root.Values.commonAnnotations }}
 annotations:
   {{- toYaml . | nindent 2 }}
@@ -308,8 +311,10 @@ dict "root" $ "role" "worker"|"gateway"
 {{- if not (include "heraion.credConfigured" (dict "root" $ "ref" .token)) }}{{ fail "confluence.token: set serviceAccountToken, csiKey, existingSecret or value (or secrets.existingSecret)" }}{{ end -}}
 {{- $_ := set $cfg "confluence" $c -}}
 {{- end }}{{ end -}}
-{{- $_ := set $cfg "gateway" (dict "listen" ":8080" "jobTemplate" "/etc/heraion/job/job-template.yaml"
-      "maxConcurrentJobs" $v.gateway.maxConcurrentJobs "maxBodyBytes" $v.gateway.maxBodyBytes "hooks" $hooks) -}}
+{{- $gw := dict "listen" ":8080" "jobTemplate" "/etc/heraion/job/job-template.yaml"
+      "maxConcurrentJobs" $v.gateway.maxConcurrentJobs "maxBodyBytes" $v.gateway.maxBodyBytes "hooks" $hooks -}}
+{{- if $v.gateway.metrics.enabled }}{{ $_ := set $gw "metricsListen" (printf ":%v" $v.gateway.metrics.port) }}{{ end -}}
+{{- $_ := set $cfg "gateway" $gw -}}
 {{- toYaml $cfg }}
 {{- end }}
 

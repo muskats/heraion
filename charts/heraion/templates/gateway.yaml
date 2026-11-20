@@ -29,8 +29,8 @@ metadata:
 {{- end }}
 {{- if .Values.rbac.create }}
 ---
-# Create Jobs (get: duplicate deliveries; list: maxConcurrentJobs), and the
-# Secret with each webhook payload, owned by its Job.
+# Create Jobs (get: duplicate deliveries; list: maxConcurrentJobs and the
+# job metrics), and the Secret with each webhook payload, owned by its Job.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -38,7 +38,7 @@ metadata:
 rules:
   - apiGroups: [batch]
     resources: [jobs]
-    verbs: [get, create{{ if $g.maxConcurrentJobs }}, list{{ end }}]
+    verbs: [get, create{{ if or $g.maxConcurrentJobs $g.metrics.enabled }}, list{{ end }}]
   - apiGroups: [""]
     resources: [secrets]
     verbs: [create, patch, delete]
@@ -99,6 +99,9 @@ spec:
           args: ["serve"]
           ports:
             - { name: http, containerPort: 8080, protocol: TCP }
+            {{- if $g.metrics.enabled }}
+            - { name: metrics, containerPort: {{ $g.metrics.port }}, protocol: TCP }
+            {{- end }}
           env:
             - name: HERAION_CONFIG
               value: /etc/heraion/conf/config.yaml
@@ -161,6 +164,24 @@ spec:
     {{- include "heraion.componentSelector" (dict "root" $ "component" "gateway") | nindent 4 }}
   ports:
     - { name: http, port: {{ $g.service.port }}, targetPort: http, protocol: TCP }
+    {{- if $g.metrics.enabled }}
+    - { name: metrics, port: {{ $g.metrics.port }}, targetPort: metrics, protocol: TCP }
+    {{- end }}
+{{- if and $g.metrics.enabled $g.metrics.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "gateway" "name" $name "labels" $g.metrics.serviceMonitor.labels) | nindent 2 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "heraion.componentSelector" (dict "root" $ "component" "gateway") | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ $g.metrics.serviceMonitor.interval }}
+{{- end }}
 {{- if $g.ingress.enabled }}
 ---
 apiVersion: networking.k8s.io/v1

@@ -168,8 +168,10 @@ func TestRunDryRunWithEventFile(t *testing.T) {
 	if !strings.Contains(user, "OOMKilled") || strings.Contains(user, "ghp_") {
 		t.Errorf("event not passed or not masked: %s", user)
 	}
-	if !strings.Contains(errOut.String(), `"msg":"run finished"`) || !strings.Contains(errOut.String(), `"dryRun":true`) {
-		t.Errorf("log:\n%s", errOut)
+	for _, want := range []string{`"msg":"run finished"`, `"playbook":"triage"`, `"status":"ok"`, `"durationSeconds":`, `"dryRun":true`} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("run finished line lacks %s:\n%s", want, errOut)
+		}
 	}
 }
 

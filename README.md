@@ -22,6 +22,7 @@ one.
 |---|---|
 | This README | What HeraIon does, playbooks, webhooks, configuration, limits |
 | [charts/heraion/README.md](charts/heraion/README.md) | Helm install, secrets, every chart value, testing, upgrading |
+| [Monitoring](#monitoring) | Prometheus metrics of the gateway, Loki queries for worker runs |
 | [docs/integrations.md](docs/integrations.md) | Kubernetes, Grafana, Datadog, Jira, Confluence and custom MCP servers; webhook senders; LLM providers |
 | [examples/](examples/) | Runtime config, playbooks, Helm values |
 
@@ -298,6 +299,42 @@ The Job name is a hash of the hook, the playbook and the payload, so a retried d
 to the same Job. The payload is stored in a Secret owned by the Job (deleted with it) and
 mounted into the worker, which reads it from `HERAION_EVENT_FILE`. The model sees the first
 64 KiB, marked as untrusted.
+
+## Monitoring
+
+The gateway serves Prometheus metrics at `:9090/metrics` (`gateway.metricsListen`), a separate
+port from the webhooks. With the chart, set `gateway.metrics.serviceMonitor.enabled=true` for
+the prometheus-operator.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `heraion_webhook_requests_total` | `hook`, `code` | Webhook requests by HTTP status; unknown hook names count as `hook="unknown"` |
+| `heraion_dispatches_total` | `hook`, `playbook`, `result` | `created`, `duplicate`, `at_capacity` (429) or `error` |
+| `heraion_jobs` | `playbook`, `status` | Worker Jobs that are `active`, `succeeded` or `failed`, webhook and CronJob runs alike, until `ttlSecondsAfterFinished` removes them |
+| `heraion_job_last_success_timestamp_seconds` | `playbook` | When the playbook last succeeded |
+| `go_*`, `process_*` | | Go runtime and process |
+
+Example alert: no successful `trivy-remediate` run for 13 hours.
+
+```promql
+time() - heraion_job_last_success_timestamp_seconds{playbook="trivy-remediate"} > 13 * 3600
+```
+
+The job metrics come from the gateway, which is only deployed with a webhook playbook. Without
+one, use kube-state-metrics (`kube_job_status_failed{job_name=~".*heraion.*"}`) or the logs.
+
+Workers are short-lived Jobs, so per-run details are in their JSON logs, one `run finished`
+line per run, e.g. for Loki:
+
+```logql
+# failed runs per playbook
+sum by (playbook) (count_over_time({app_kubernetes_io_component="worker"} | json | msg="run finished" | status="failed" [1h]))
+# tokens used per playbook
+sum by (playbook) (sum_over_time({app_kubernetes_io_component="worker"} | json | msg="run finished" | unwrap tokens [1d]))
+```
+
+`run finished` carries `status` (`ok` or `failed`), `error`, `durationSeconds`, `steps`,
+`tokens`, `mode`, `dryRun`, `prs` and `issues`.
 
 ## Configuration
 

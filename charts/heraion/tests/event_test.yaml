@@ -22,9 +22,10 @@ tests:
       - notContains:
           path: rules
           content: { apiGroups: [""], resources: [secrets], verbs: [get, list, watch, create, patch, delete] }
-  - it: without maxConcurrentJobs the gateway cannot list Jobs
+  - it: without maxConcurrentJobs and metrics the gateway cannot list Jobs
     set:
       gateway.maxConcurrentJobs: 0
+      gateway.metrics.enabled: false
     documentSelector: { path: kind, value: Role }
     asserts:
       - contains:

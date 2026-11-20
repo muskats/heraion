@@ -240,6 +240,16 @@ gateway:
   terminationGracePeriodSeconds: 30
   maxConcurrentJobs: 5     # over this the gateway returns 429; resourceQuota is the hard cap
   maxBodyBytes: 262144     # larger bodies get 413; at most 1032192 (stored in a Secret)
+  # Prometheus metrics at :<port>/metrics on the gateway Service, a separate port
+  # from the webhooks. See README "Monitoring" for the metrics.
+  metrics:
+    enabled: true
+    port: 9090
+    # prometheus-operator ServiceMonitor; needs the monitoring.coreos.com CRDs.
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      labels: {}          # e.g. { release: kube-prometheus-stack } to match the Prometheus selector
   # Webhooks by name, served at POST /hooks/<name>:
   #
   #   hooks:
@@ -405,6 +415,8 @@ networkPolicy:
   enabled: true
   # Who may call the gateway, e.g. [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } } }]. Empty = anyone.
   gatewayIngressFrom: []
+  # Who may scrape gateway.metrics.port, same format. Empty = anyone.
+  metricsFrom: []
   # Egress rules for workers. Empty = no egress restriction.
   workerEgress: []
 

@@ -675,6 +675,11 @@ rejected by [values.schema.json](values.schema.json).
 | `gateway.replicas` | `1` | Ignored with autoscaling |
 | `gateway.maxConcurrentJobs` | `5` | 0 = no limit |
 | `gateway.maxBodyBytes` | `262144` | Larger bodies get 413; at most 1032192, since the body is stored in a Secret |
+| `gateway.metrics.enabled` | `true` | Prometheus metrics on the gateway Service, see [Monitoring](../../README.md#monitoring) |
+| `gateway.metrics.port` | `9090` | Metrics port, separate from the webhook port |
+| `gateway.metrics.serviceMonitor.enabled` | `false` | Render a prometheus-operator ServiceMonitor (needs its CRDs) |
+| `gateway.metrics.serviceMonitor.interval` | `30s` | Scrape interval |
+| `gateway.metrics.serviceMonitor.labels` | `{}` | Extra labels, e.g. `{release: kube-prometheus-stack}` to match the Prometheus selector |
 | `gateway.strategy` | RollingUpdate, `maxUnavailable: 0` | |
 | `gateway.revisionHistoryLimit` | `5` | |
 | `gateway.terminationGracePeriodSeconds` | `30` | |
@@ -716,6 +721,7 @@ rejected by [values.schema.json](values.schema.json).
 |---|---|---|
 | `networkPolicy.enabled` | `true` | Worker ingress denied; MCP servers only reachable from workers |
 | `networkPolicy.gatewayIngressFrom` | `[]` | Who may call the gateway; empty = anyone |
+| `networkPolicy.metricsFrom` | `[]` | Who may scrape `gateway.metrics.port`; empty = anyone |
 | `networkPolicy.workerEgress` | `[]` | Egress rules for workers; empty = unrestricted |
 | `resourceQuota.enabled`, `.jobs` | `false`, `20` | Hard cap on Jobs |
 | `tests.enabled` | `true` | Render the `helm test` pod |

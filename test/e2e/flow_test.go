@@ -45,13 +45,14 @@ func TestWebhookToPullRequest(t *testing.T) {
 		writeFile(t, filepath.Join(dir, "playbooks", name), pb)
 	}
 	remotes := seedRemote(t)
-	addr := freeAddr(t)
+	addr, metricsAddr := freeAddr(t), freeAddr(t)
 	cfg := writeFile(t, filepath.Join(dir, "config.yaml"), localConfig(t, c.Config, map[string]string{
-		`listen: :8080`:    "listen: " + addr + "\n  namespace: heraion",
-		`jobTemplate: .*`:  "jobTemplate: " + writeFile(t, filepath.Join(dir, "job-template.yaml"), c.JobTemplate),
-		`playbooksDir: .*`: "playbooksDir: " + filepath.Join(dir, "playbooks"),
-		`workDir: .*`:      "workDir: " + dir,
-		`endpoint: (.*)`:   "endpoint: $1\n  cloneBaseURL: file://" + remotes,
+		`listen: :8080`:     "listen: " + addr + "\n  namespace: heraion",
+		`metricsListen: .*`: "metricsListen: " + metricsAddr,
+		`jobTemplate: .*`:   "jobTemplate: " + writeFile(t, filepath.Join(dir, "job-template.yaml"), c.JobTemplate),
+		`playbooksDir: .*`:  "playbooksDir: " + filepath.Join(dir, "playbooks"),
+		`workDir: .*`:       "workDir: " + dir,
+		`endpoint: (.*)`:    "endpoint: $1\n  cloneBaseURL: file://" + remotes,
 	}))
 
 	gw := start(t, []string{"KUBECONFIG=" + kube.kubeconfig(t), "HERAION_HOOK_ALERTMANAGER_SECRET=" + hookSecret},
@@ -107,6 +108,34 @@ func TestWebhookToPullRequest(t *testing.T) {
 		}
 		if code, _ := post(t, hook, hookSecret, bytes.Repeat([]byte("x"), 300<<10)); code != http.StatusRequestEntityTooLarge {
 			t.Errorf("body over maxBodyBytes: %d", code)
+		}
+
+		// Metrics are on their own port.
+		resp, err := http.Get("http://" + metricsAddr + "/metrics")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		for _, want := range []string{
+			`heraion_webhook_requests_total{code="202",hook="alertmanager"} 2`,
+			`heraion_webhook_requests_total{code="401",hook="alertmanager"} 2`,
+			`heraion_dispatches_total{hook="alertmanager",playbook="` + playbook + `",result="at_capacity"} 1`,
+			`heraion_jobs{playbook="` + playbook + `",status="active"} 1`,
+			"go_goroutines",
+		} {
+			if !strings.Contains(string(body), want) {
+				t.Errorf("metrics lack %s:\n%s", want, body)
+			}
+		}
+		// The webhook port does not serve metrics.
+		r, err := http.Get("http://" + addr + "/metrics")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		if r.StatusCode == http.StatusOK {
+			t.Error("/metrics must not be served on the webhook port")
 		}
 
 		// A failed Job create leaves no Secret behind.

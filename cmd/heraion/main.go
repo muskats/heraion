@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/guardrails"
@@ -154,11 +155,20 @@ func cmdRun(ctx context.Context, args []string) error {
 		return fmt.Errorf("read event: %w", err)
 	}
 
+	start := time.Now()
 	rep, err := worker.Run(ctx, worker.Options{Config: cfg, Playbook: pb, Event: event, Redactor: red, Log: log, Version: version})
+	// One line per run for log-based monitoring, e.g. in Loki:
+	//   {app_kubernetes_io_component="worker"} | json | msg="run finished" | status="failed"
+	status, errText := "ok", ""
+	if err != nil {
+		status, errText = "failed", err.Error()
+	}
+	attrs := []any{"playbook", pb.Name, "status", status, "error", errText, "durationSeconds", int(time.Since(start).Seconds())}
 	if rep != nil {
-		log.Info("run finished", "dryRun", rep.DryRun, "mode", rep.Mode, "steps", rep.Steps, "tokens", rep.Tokens,
+		attrs = append(attrs, "dryRun", rep.DryRun, "mode", rep.Mode, "steps", rep.Steps, "tokens", rep.Tokens,
 			"prs", rep.PRs, "issues", rep.Issues, "summary", rep.Final)
 	}
+	log.Info("run finished", attrs...)
 	return err
 }
 

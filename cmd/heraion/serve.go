@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -56,17 +59,20 @@ func cmdServe(ctx context.Context, args []string) error {
 		return err
 	}
 
-	hs := &http.Server{
-		Addr:              cfg.Gateway.Listen,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+	servers := []*http.Server{newHTTPServer(cfg.Gateway.Listen, srv.Handler())}
+	if addr := cfg.Gateway.MetricsListen; addr != "" {
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}), d.Metrics())
+		reg.MustRegister(srv.Collectors()...)
+		mux := http.NewServeMux()
+		mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+		servers = append(servers, newHTTPServer(addr, mux))
 	}
-	errc := make(chan error, 1)
-	go func() { errc <- hs.ListenAndServe() }()
-	log.Info("gateway listening", "addr", cfg.Gateway.Listen, "namespace", ns, "version", version)
+	errc := make(chan error, len(servers))
+	for _, hs := range servers {
+		go func() { errc <- hs.ListenAndServe() }()
+	}
+	log.Info("gateway listening", "addr", cfg.Gateway.Listen, "metrics", cfg.Gateway.MetricsListen, "namespace", ns, "version", version)
 
 	select {
 	case err := <-errc:
@@ -76,7 +82,22 @@ func cmdServe(ctx context.Context, args []string) error {
 	log.Info("shutting down")
 	sctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	return hs.Shutdown(sctx)
+	var errs []error
+	for _, hs := range servers {
+		errs = append(errs, hs.Shutdown(sctx))
+	}
+	return errors.Join(errs...)
+}
+
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 }
 
 // kubeClient uses the pod's service account, or KUBECONFIG when run locally.

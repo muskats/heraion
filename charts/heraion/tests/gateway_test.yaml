@@ -23,3 +23,21 @@ tests:
           value:
             - { apiGroups: [batch], resources: [jobs], verbs: [get, create, list] }
             - { apiGroups: [""], resources: [secrets], verbs: [create, patch, delete] }
+  - it: serves metrics on their own port of the Service
+    set:
+      playbooks.alertmanager-triage.enabled: true
+      gateway.hooks.alertmanager: { auth: token, secret: { existingSecret: am, key: secret } }
+    documentSelector: { path: kind, value: Service }
+    asserts:
+      - contains:
+          path: spec.ports
+          content: { name: metrics, port: 9090, targetPort: metrics, protocol: TCP }
+  - it: renders a ServiceMonitor with extra labels only when enabled
+    set:
+      playbooks.alertmanager-triage.enabled: true
+      gateway.hooks.alertmanager: { auth: token, secret: { existingSecret: am, key: secret } }
+      gateway.metrics.serviceMonitor: { enabled: true, labels: { release: kps } }
+    documentSelector: { path: kind, value: ServiceMonitor }
+    asserts:
+      - equal: { path: metadata.labels.release, value: kps }
+      - equal: { path: "spec.endpoints[0].port", value: metrics }
