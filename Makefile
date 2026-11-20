@@ -1,5 +1,5 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-IMAGE   ?= ghcr.io/muskats/heraion
+IMAGE   ?= docker.io/muskats/heraion
 
 .PHONY: build test lint unit chart-test e2e ci image chart-deps clean
 

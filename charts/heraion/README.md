@@ -526,7 +526,7 @@ RBAC), `networkPolicy.enabled: false`, or role-level `podSecurityContext` and
 
 ```yaml
 image:
-  registry: ghcr.io
+  registry: docker.io
   repository: muskats/heraion
   tag: ""            # default: appVersion
   digest: ""         # sha256:...; wins over tag
@@ -535,7 +535,7 @@ global:
   imagePullSecrets: [{ name: regcred }]
 ```
 
-`global.imageRegistry` turns `ghcr.io/muskats/heraion` into
+`global.imageRegistry` turns `docker.io/muskats/heraion` into
 `registry.example.com/muskats/heraion`, and `quay.io/containers/kubernetes_mcp_server` into
 `registry.example.com/containers/kubernetes_mcp_server`. Images given as one full
 `repository` with no `registry` field are left as they are.
@@ -566,7 +566,7 @@ rejected by [values.schema.json](values.schema.json).
 | `nameOverride`, `fullnameOverride` | `""` | Change the `heraion` / `<release>-heraion` names |
 | `namespaceOverride` | `""` | Namespace for all objects instead of the release namespace |
 | `commonLabels`, `commonAnnotations` | `{}` | Added to every object |
-| `image.registry` / `.repository` / `.tag` / `.digest` | `ghcr.io` / `muskats/heraion` / appVersion / `""` | HeraIon image |
+| `image.registry` / `.repository` / `.tag` / `.digest` | `docker.io` / `muskats/heraion` / appVersion / `""` | HeraIon image |
 | `global.imageRegistry` | `""` | Registry mirror, see above |
 | `global.imagePullSecrets` | `[]` | Pull secrets for every pod |
 | `global.podSecurityContext`, `global.securityContext` | hardened, see above | Defaults for every pod and container |

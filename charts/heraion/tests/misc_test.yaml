@@ -22,7 +22,7 @@ tests:
     asserts:
       - matchRegex:
           path: spec.jobTemplate.spec.template.spec.containers[0].image
-          pattern: "^ghcr.io/muskats/heraion@sha256:0+$"
+          pattern: "^docker.io/muskats/heraion@sha256:0+$"
   - it: namespaceOverride is used for every object
     template: worker.yaml
     set:

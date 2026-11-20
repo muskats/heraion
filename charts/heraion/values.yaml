@@ -15,7 +15,7 @@ commonLabels: {}
 commonAnnotations: {}
 
 image:
-  registry: ghcr.io
+  registry: docker.io
   repository: muskats/heraion
   tag: ""          # default: chart appVersion
   digest: ""       # e.g. sha256:4f2c...; used instead of tag

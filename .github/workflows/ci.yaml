@@ -1,8 +1,10 @@
 name: ci
+# Only the default branch: pushes to it and pull requests into it.
 on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
