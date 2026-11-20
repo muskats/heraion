@@ -334,6 +334,7 @@ for each repo's clone URL. The token needs to read the repos, push branches and 
 | Limit | Example |
 |---|---|
 | Repo allowlist | With `repos: [acme/web]`, a tool call for `acme/billing` fails |
+| Namespaces | With `namespaces: [shop]`, `k8s.resources_list` in `kube-system`, without a namespace or with `all_namespaces` fails; the chart binds the k8s server's RBAC to `shop` only. Empty: all namespaces |
 | File access | `../../etc/passwd`, `.git/config` and symlinks out of the clone are refused |
 | PR budget | With `maxPRs: 1`, a second `open_pr` call fails. `maxPRs: 0` removes `open_pr` |
 | Write paths | CI and ownership files (`.github/workflows/**`, `.gitlab-ci.yml`, `Jenkinsfile`, `CODEOWNERS`, ...) are never written, also not through a symlink. `writePaths: [Dockerfile, "deploy/**"]` narrows further, `denyPaths` adds patterns |

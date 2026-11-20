@@ -4,7 +4,8 @@
 # Tools are pinned here and built with `go install` into $TOOLS_DIR (default
 # .tools/), one directory per version, so a CI cache of .tools/ stays valid
 # until a version changes. Override a tool with its env var, e.g.
-# HELM_UNITTEST=/usr/local/bin/helm-unittest.
+# KUBECONFORM=/usr/local/bin/kubeconform. helm-unittest is a Helm plugin, see
+# helm_unittest.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -64,7 +65,24 @@ go_tool() {
 golangci_lint() { go_tool golangci-lint github.com/golangci/golangci-lint/v2/cmd/golangci-lint "$GOLANGCI_LINT_VERSION"; }
 govulncheck() { go_tool govulncheck golang.org/x/vuln/cmd/govulncheck "$GOVULNCHECK_VERSION"; }
 kubeconform() { go_tool kubeconform github.com/yannh/kubeconform/cmd/kubeconform "$KUBECONFORM_VERSION"; }
-helm_unittest() { go_tool helm-unittest github.com/helm-unittest/helm-unittest/cmd/helm-unittest "$HELM_UNITTEST_VERSION"; }
+# helm_unittest ARGS... runs `helm unittest`. The plugin is installed into
+# $TOOLS_DIR, not ~/.local (its go.mod has replace directives, so `go install`
+# cannot build it). $HELM_UNITTEST=/path/to/helm-unittest overrides it.
+helm_unittest() {
+	if [[ -n "${HELM_UNITTEST:-}" ]]; then
+		"$HELM_UNITTEST" "$@"
+		return
+	fi
+	local dir="$TOOLS_DIR/helm-plugins@$HELM_UNITTEST_VERSION"
+	if ! HELM_PLUGINS="$dir" helm plugin list | grep -q '^unittest'; then
+		printf 'installing helm-unittest %s\n' "$HELM_UNITTEST_VERSION" >&2
+		mkdir -p "$dir"
+		# --verify=false: the plugin publishes no provenance files.
+		HELM_PLUGINS="$dir" helm plugin install https://github.com/helm-unittest/helm-unittest \
+			--version "$HELM_UNITTEST_VERSION" --verify=false >&2
+	fi
+	HELM_PLUGINS="$dir" helm unittest "$@"
+}
 actionlint() { go_tool actionlint github.com/rhysd/actionlint/cmd/actionlint "$ACTIONLINT_VERSION"; }
 
 # optional NAME: true if the tool exists. Missing tools fail in CI and are

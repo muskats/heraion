@@ -68,7 +68,10 @@ func New(gw config.Gateway, pbs map[string]*playbook.Playbook, d Dispatcher, log
 	if len(s.playbooks) == 0 && len(errs) == 0 {
 		errs = append(errs, errors.New("no webhook playbooks: the gateway has nothing to serve"))
 	}
-	return s, errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // Handler returns the HTTP handler.

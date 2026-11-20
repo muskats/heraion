@@ -37,9 +37,12 @@ const (
 
 // Config is the top-level runtime configuration.
 type Config struct {
-	LLM          LLM      `json:"llm"`
-	Git          Git      `json:"git"`
-	Repos        []string `json:"repos,omitempty"`
+	LLM   LLM      `json:"llm"`
+	Git   Git      `json:"git"`
+	Repos []string `json:"repos,omitempty"`
+	// Namespaces limits the Kubernetes tools to these namespaces, e.g.
+	// [shop, payments]. Empty: all namespaces. See mcp.LimitNamespaces.
+	Namespaces   []string `json:"namespaces,omitempty"`
 	PlaybooksDir string   `json:"playbooksDir,omitempty"`
 	WorkDir      string   `json:"workDir,omitempty"`
 	DryRun       bool     `json:"dryRun,omitempty"`
@@ -407,6 +410,9 @@ func deploymentFor(raw string) string {
 	return DeploymentDataCenter
 }
 
+// Kubernetes namespace names (RFC 1123 labels), e.g. shop, kube-system.
+var namespaceRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
 var serverNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 
 var knownProviders = map[string]bool{
@@ -423,6 +429,11 @@ func (c *Config) Validate() error {
 	for _, r := range c.Repos {
 		if err := ValidateRepoName(r); err != nil {
 			errs = append(errs, fmt.Errorf("repos: %w", err))
+		}
+	}
+	for _, ns := range c.Namespaces {
+		if !namespaceRE.MatchString(ns) {
+			errs = append(errs, fmt.Errorf("namespaces: %q is not a Kubernetes namespace name", ns))
 		}
 	}
 	if err := ValidateMode("mode", c.Mode); err != nil {

@@ -24,6 +24,22 @@ metadata:
   {{- include "heraion.metadata" (dict "root" $ "component" $component "name" (printf "%s-%s" (include "heraion.namespace" $) $name)) | nindent 2 }}
 rules:
   {{- toYaml $rbac.clusterRules | nindent 2 }}
+{{- /* namespaces set: the ClusterRole applies only in those namespaces. */}}
+{{- range $ns := $.Values.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" $component "name" (printf "%s-%s" (include "heraion.namespace" $) $name) "namespace" $ns) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ printf "%s-%s" (include "heraion.namespace" $) $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ include "heraion.namespace" $ }}
+{{- else }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -37,6 +53,7 @@ subjects:
   - kind: ServiceAccount
     name: {{ $name }}
     namespace: {{ include "heraion.namespace" $ }}
+{{- end }}
 {{- end }}
 {{- if and $.Values.rbac.create $rbac.rules }}
 ---

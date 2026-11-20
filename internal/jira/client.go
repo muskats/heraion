@@ -1,11 +1,13 @@
-// Package jira creates Jira issues through the REST API, for Jira Cloud and
-// Data Center:
+// Package jira creates and reads Jira issues through the REST API, for Jira
+// Cloud and Data Center:
 //
 //	Cloud        POST /rest/api/3/issue        description in ADF
 //	             POST /rest/api/3/search/jql   (the old /search returns 410)
+//	             GET  /rest/api/3/issue/{key}
 //	             auth: Basic base64(email:api-token)
 //	Data Center  POST /rest/api/2/issue        description in wiki markup
 //	             POST /rest/api/2/search
+//	             GET  /rest/api/2/issue/{key}
 //	             auth: Bearer <personal access token>
 package jira
 

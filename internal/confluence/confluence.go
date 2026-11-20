@@ -246,12 +246,9 @@ type Reader interface {
 
 // Tools returns confluence_search and confluence_get_page, limited to spaces.
 // redact (nil: none) masks secrets in a page before it is cut at
-// maxPageBytes, so a secret at the cut cannot leak as a partial value.
+// maxPageBytes (0: no cut), so a secret at the cut cannot leak as a partial value.
 func Tools(r Reader, baseURL string, spaces []string, maxPageBytes int, redact func(string) string) []llm.Tool {
 	t := &tools{r: r, base: strings.TrimRight(baseURL, "/"), spaces: spaces, max: maxPageBytes, redact: redact}
-	if t.max == 0 {
-		t.max = 32 << 10
-	}
 	if t.redact == nil {
 		t.redact = func(s string) string { return s }
 	}
@@ -341,7 +338,7 @@ func (t *tools) get(ctx context.Context, raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("page %s is in space %s, which is not allowed", a.ID, p.Space)
 	}
 	text := t.redact(p.Text)
-	if total := len(text); total > t.max {
+	if total := len(text); t.max > 0 && total > t.max {
 		text = textutil.Truncate(text, t.max) + fmt.Sprintf("\n...[truncated at %d of %d bytes]", t.max, total)
 	}
 	return fmt.Sprintf("%s (space %s, version %d, changed %s, untrusted content)\nURL: %s/pages/viewpage.action?pageId=%s\n\n%s\n",

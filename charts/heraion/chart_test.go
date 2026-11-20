@@ -307,3 +307,37 @@ func TestCSIRequiresProviderClass(t *testing.T) {
 		t.Fatalf("csiKey without secrets.csi must fail, got %v\n%s", err, out)
 	}
 }
+
+func TestNamespacesBindRBACPerNamespace(t *testing.T) {
+	base := []string{"--set", "llm.baseURL=https://api.openai.com/v1", "--set", "llm.model=m", "--set", "mcpServers.k8s.enabled=true"}
+	count := func(objs []object, kind string) int {
+		n := 0
+		for _, o := range objs {
+			if o.Kind == kind {
+				n++
+			}
+		}
+		return n
+	}
+	objs := render(t, base...)
+	if count(objs, "ClusterRoleBinding") != 1 || count(objs, "RoleBinding") != 0 {
+		t.Errorf("no namespaces: want one ClusterRoleBinding")
+	}
+	objs = render(t, append(base, "--set", "namespaces={shop,payments}")...)
+	if count(objs, "ClusterRoleBinding") != 0 || count(objs, "RoleBinding") != 2 {
+		t.Errorf("namespaces set: want a RoleBinding per namespace, no ClusterRoleBinding")
+	}
+	for _, o := range objs {
+		if o.Kind == "RoleBinding" && !strings.Contains(string(o.Raw), "kind: ClusterRole\n") {
+			t.Errorf("RoleBinding must reference the ClusterRole:\n%s", o.Raw)
+		}
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(find(objs, "ConfigMap", "t-heraion-config").Data["config.yaml"]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil || strings.Join(cfg.Namespaces, ",") != "shop,payments" {
+		t.Errorf("config namespaces: %v %v", cfg, err)
+	}
+}

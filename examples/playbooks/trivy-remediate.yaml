@@ -5,7 +5,8 @@ trigger: { schedule: "0 */6 * * *" }   # the Helm chart renders a CronJob
 tools: [k8s.resources_list, k8s.resources_get, repo_*, open_pr]
 prompt: |
   1. Call k8s.resources_list with apiVersion "aquasecurity.github.io/v1alpha1" and
-     kind "VulnerabilityReport" (all namespaces) to find Trivy Operator reports.
+     kind "VulnerabilityReport" to find Trivy Operator reports, in each allowed
+     namespace (all namespaces if none are listed).
      Use k8s.resources_get for details. Keep only HIGH and CRITICAL vulnerabilities
      that have a fixedVersion.
   2. Map each affected image (report.artifact.repository / tag) to its source repository

@@ -412,3 +412,25 @@ func TestYoloRunPushesToBase(t *testing.T) {
 		t.Error("system prompt must describe yolo mode")
 	}
 }
+
+func TestNamespacesPrompt(t *testing.T) {
+	srv := llmtest.New(t, llmtest.Turn{Final: "done"}, llmtest.Turn{Final: "done"})
+	c := cfg(t, srv.BaseURL(), "file:///nonexistent")
+	run := func() string {
+		_, err := worker.Run(context.Background(), worker.Options{
+			Config: c, Playbook: pb(t, "name: x\ntrigger: {manual: true}\ntools: [k8s.*]\noutput: report\nprompt: p\n"),
+			LLM: fastClient(srv.BaseURL()), Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return srv.Requests[len(srv.Requests)-1].Messages[0].Text()
+	}
+	if strings.Contains(run(), "namespaces you may read") {
+		t.Error("no namespaces configured: no namespace line")
+	}
+	c.Namespaces = []string{"shop", "payments"}
+	if !strings.Contains(run(), "Kubernetes namespaces you may read: shop, payments.") {
+		t.Error("system prompt must name the namespaces")
+	}
+}

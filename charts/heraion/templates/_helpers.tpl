@@ -40,10 +40,10 @@ app.kubernetes.io/part-of: heraion
 {{- end }}
 {{- end }}
 
-{{/* dict "root" $ "component" "gateway" "name" "x-heraion-gateway" */}}
+{{/* dict "root" $ "component" "gateway" "name" "x-heraion-gateway" ["namespace" "shop"] */}}
 {{- define "heraion.metadata" -}}
 name: {{ .name }}
-namespace: {{ include "heraion.namespace" .root }}
+namespace: {{ .namespace | default (include "heraion.namespace" .root) }}
 labels:
   {{- include "heraion.labels" . | nindent 2 }}
 {{- with .root.Values.commonAnnotations }}
@@ -158,6 +158,16 @@ dict "root" $ "role" "worker"|"gateway"
 {{- end }}
 {{- end }}
 
+{{/* Which file sources a credential list uses, e.g. {sa: true, csi: false}. dict "root" $ "items" list */}}
+{{- define "heraion.credSources" -}}
+{{- $sa := false -}}{{- $csi := false -}}
+{{- range .items }}{{ $r := .ref | default dict -}}
+{{- if ($r.serviceAccountToken | default dict).audience }}{{ $sa = true }}{{ end -}}
+{{- if $r.csiKey }}{{ $csi = true }}{{ end -}}
+{{- end -}}
+{{- toYaml (dict "sa" $sa "csi" (and $csi .root.Values.secrets.csi.enabled)) }}
+{{- end }}
+
 {{/* Volumes for a credential list: projected SA tokens and the CSI mount. */}}
 {{- define "heraion.credVolumes" -}}
 {{- $sources := list -}}
@@ -170,9 +180,8 @@ dict "root" $ "role" "worker"|"gateway"
     sources:
       {{- toYaml $sources | nindent 6 }}
 {{- end }}
-{{- $csi := false -}}
-{{- range .items }}{{ if (.ref | default dict).csiKey }}{{ $csi = true }}{{ end }}{{ end -}}
-{{- with .root.Values.secrets.csi }}{{ if and .enabled $csi }}
+{{- $use := include "heraion.credSources" . | fromYaml -}}
+{{- with .root.Values.secrets.csi }}{{ if $use.csi }}
 - name: csi-secrets
   csi:
     driver: secrets-store.csi.k8s.io
@@ -182,13 +191,13 @@ dict "root" $ "role" "worker"|"gateway"
 {{- end }}{{ end }}
 {{- end }}
 
+{{/* Mounts for the volumes of heraion.credVolumes. */}}
 {{- define "heraion.credMounts" -}}
-{{- $sa := false -}}{{- $csi := false -}}
-{{- range .items }}{{ if ((.ref | default dict).serviceAccountToken | default dict).audience }}{{ $sa = true }}{{ end }}{{ if (.ref | default dict).csiKey }}{{ $csi = true }}{{ end }}{{ end -}}
-{{- if $sa }}
+{{- $use := include "heraion.credSources" . | fromYaml -}}
+{{- if $use.sa }}
 - { name: sa-tokens, mountPath: /var/run/secrets/heraion/sa, readOnly: true }
 {{- end }}
-{{- if and .root.Values.secrets.csi.enabled $csi }}
+{{- if $use.csi }}
 - { name: csi-secrets, mountPath: {{ .root.Values.secrets.csi.mountPath }}, readOnly: true }
 {{- end }}
 {{- end }}
@@ -218,6 +227,21 @@ dict "root" $ "role" "worker"|"gateway"
 {{- end }}
 {{- end }}
 {{- toYaml $out }}
+{{- end }}
+
+{{/* Fails unless each webhook playbook has a gateway.hooks entry with a secret. */}}
+{{- define "heraion.checkHooks" -}}
+{{- range $n, $p := (include "heraion.playbooks" . | fromYaml) }}
+{{- with ($p.trigger | default dict).webhook }}
+{{- $h := index $.Values.gateway.hooks . }}
+{{- if not $h }}
+{{- fail (printf "playbook %s uses webhook %q: add gateway.hooks.%s" $n . .) }}
+{{- end }}
+{{- if not (include "heraion.credConfigured" (dict "root" $ "ref" $h.secret)) }}
+{{- fail (printf "gateway.hooks.%s.secret: set serviceAccountToken, csiKey, existingSecret or value (or secrets.existingSecret)" .) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{- define "heraion.gatewayEnabled" -}}
@@ -269,6 +293,7 @@ dict "root" $ "role" "worker"|"gateway"
 {{- end -}}
 {{- $cfg := dict "llm" $llm "git" $git "repos" ($v.repos | default list) "dryRun" $v.dryRun
       "mode" ($v.mode | default "full") "playbooksDir" "/etc/heraion/playbooks" "workDir" "/workspace" -}}
+{{- with $v.namespaces }}{{ $_ := set $cfg "namespaces" . }}{{ end -}}
 {{- if $mcp }}{{ $_ := set $cfg "mcpServers" $mcp }}{{ end -}}
 {{- with $v.jira }}{{ if .enabled -}}
 {{- if not (or .projects .readSpaces) }}{{ fail "jira: set projects (create issues) and/or readSpaces (read issues)" }}{{ end -}}

@@ -1,5 +1,5 @@
-// Package guardrails limits what a run can do: allowed repos, PR budget,
-// dry-run and secret masking. There is no code path that merges.
+// Package guardrails limits what a run can do: allowed repos and write
+// paths, PR and issue budgets, mode, dry-run and secret masking. There is no code path that merges.
 package guardrails
 
 import (

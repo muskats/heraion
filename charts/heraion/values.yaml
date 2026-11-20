@@ -57,8 +57,9 @@ global:
 #                                                   the key in the table below
 #   3. value: sk-...                                the chart puts it in its own Secret
 #
-# Default keys: llm-api-key, git-token, hook-<name>, mcp-<server>-<header>,
-# e.g. mcp-datadog-dd-api-key.
+# Default keys: llm-api-key, git-token, jira-token, confluence-token,
+# hook-<name>, mcp-<server>-<header> (e.g. mcp-datadog-dd-api-key) and
+# mcp-<server>-env-<name> for mcpServers.<name>.deploy.secretEnv.
 secrets:
   existingSecret: ""   # one Secret for every credential, e.g. "heraion"
   csi:
@@ -139,6 +140,11 @@ confluence:
 # Repos HeraIon may change, e.g. [acme/web, acme/api]. Playbooks can only narrow this.
 repos: []
 
+# Kubernetes namespaces the k8s tools may read, e.g. [shop, payments]. Empty = all.
+# When set, each deployed MCP server's clusterRules are bound with a RoleBinding
+# per namespace instead of cluster-wide. The namespaces must exist.
+namespaces: []
+
 # true: log each PR with its diff instead of pushing it.
 dryRun: false
 
@@ -148,7 +154,7 @@ dryRun: false
 #   yolo  push to the default branch without review; a PR if the push is rejected
 mode: full
 
-# Playbooks by name.
+# Playbooks by name. enabled: false turns one off; a playbook without the key is on.
 #   trigger: { schedule: "0 */6 * * *" }   renders a CronJob
 #   trigger: { webhook: alertmanager }     runs on POST /hooks/alertmanager
 #   mode: safe                             optional; never riskier than the global mode
@@ -159,7 +165,8 @@ playbooks:
     tools: [k8s.resources_list, k8s.resources_get, repo_*, open_pr]
     prompt: |
       1. Call k8s.resources_list with apiVersion "aquasecurity.github.io/v1alpha1" and
-         kind "VulnerabilityReport" (all namespaces) to find Trivy Operator reports.
+         kind "VulnerabilityReport" to find Trivy Operator reports, in each allowed
+         namespace (all namespaces if none are listed).
          Keep only HIGH and CRITICAL vulnerabilities that have a fixedVersion.
       2. Map each affected image to its source repository among the allowed repos
          (Dockerfiles, Helm values and manifests that reference the image or package).

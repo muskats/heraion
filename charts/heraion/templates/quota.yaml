@@ -1,0 +1,9 @@
+{{- if .Values.resourceQuota.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "worker" "name" (include "heraion.fullname" .)) | nindent 2 }}
+spec:
+  hard:
+    count/jobs.batch: {{ .Values.resourceQuota.jobs | quote }}
+{{- end }}

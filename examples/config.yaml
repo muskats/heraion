@@ -23,6 +23,9 @@ repos:
   - platform/payments-api
   - platform/web
 
+# Kubernetes namespaces the k8s tools may read. Empty or unset: all.
+# namespaces: [shop, payments]
+
 playbooksDir: ./examples/playbooks
 dryRun: true   # log PRs instead of pushing; same as --dry-run or HERAION_DRY_RUN=true
 mode: full     # safe, full or yolo; playbooks may only pick this or a safer mode

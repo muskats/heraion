@@ -59,6 +59,7 @@ type scope struct {
 	mode       config.Mode
 	dryRun     bool
 	repos      []string
+	namespaces []string // Kubernetes namespaces; empty: all
 	projects   []string // Jira projects for create_issue
 	readSpaces []string // Jira spaces for jira_search and jira_get_issue
 	confSpaces []string // Confluence spaces
@@ -136,7 +137,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 			return nil, err
 		}
 		defer mgr.Close()
-		all = append(all, mcpTools...)
+		all = append(all, mcp.LimitNamespaces(mcpTools, cfg.Namespaces)...)
 	}
 	tools, err := allowedTools(pb, s.repos, all)
 	if err != nil {
@@ -169,9 +170,10 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 // entries that were dropped.
 func resolveScope(cfg *config.Config, pb *playbook.Playbook, log *slog.Logger) scope {
 	s := scope{
-		mode:   pb.EffectiveMode(cfg.Mode),
-		dryRun: pb.DryRun(cfg.DryRun),
-		repos:  pb.EffectiveRepos(cfg.Repos),
+		mode:       pb.EffectiveMode(cfg.Mode),
+		dryRun:     pb.DryRun(cfg.DryRun),
+		repos:      pb.EffectiveRepos(cfg.Repos),
+		namespaces: cfg.Namespaces,
 	}
 	if pb.Mode != "" && pb.Mode != s.mode {
 		log.Warn("playbook mode is riskier than the global mode and is narrowed", "asked", pb.Mode, "mode", s.mode)
@@ -246,6 +248,10 @@ Rules:
 		fmt.Fprintf(&b, "\nRepositories you may read and change: %s\n", strings.Join(s.repos, ", "))
 	} else {
 		b.WriteString("\nNo repositories are configured for this playbook.\n")
+	}
+	if len(s.namespaces) > 0 {
+		fmt.Fprintf(&b, "Kubernetes namespaces you may read: %s. Pass one as 'namespace' in each Kubernetes tool call; "+
+			"other namespaces and cluster-wide queries are refused.\n", strings.Join(s.namespaces, ", "))
 	}
 	if pb.Output == playbook.OutputReport || pb.Guardrails.MaxPRs == 0 {
 		b.WriteString("This playbook produces a report only: do not attempt to open pull requests.\n")

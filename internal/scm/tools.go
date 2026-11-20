@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,7 +49,11 @@ const (
 	OutcomeFellBack  Outcome = "fell-back" // yolo: the push was refused, a PR was opened instead
 )
 
-const readLimit = 256 << 10
+// Limits of repo_read_file (bytes) and repo_list (entries).
+const (
+	readLimit      = 256 << 10
+	maxListEntries = 2000
+)
 
 // Tools returns the built-in tools.
 func (tb *Toolbox) Tools() []llm.Tool {
@@ -64,7 +69,7 @@ func (tb *Toolbox) Tools() []llm.Tool {
 			Desc:     "List files and directories in a repository. Directories end in '/'.",
 			Params: `{"type":"object","properties":{` + repoProp + `,
 				"path":{"type":"string","description":"Directory relative to the repo root; default '.'"},
-				"recursive":{"type":"boolean","description":"Walk subdirectories (capped at 2000 entries)"}},
+				"recursive":{"type":"boolean","description":"Walk subdirectories (capped at ` + strconv.Itoa(maxListEntries) + ` entries)"}},
 				"required":["repo"]}`,
 			Fn: tb.list,
 		},
@@ -129,13 +134,13 @@ func (tb *Toolbox) list(ctx context.Context, raw json.RawMessage) (string, error
 	if err != nil {
 		return "", err
 	}
-	entries, truncated, err := r.List(a.Path, a.Recursive, 2000)
+	entries, truncated, err := r.List(a.Path, a.Recursive, maxListEntries)
 	if err != nil {
 		return "", err
 	}
 	out := strings.Join(entries, "\n")
 	if truncated {
-		out += "\n...[truncated at 2000 entries; list a subdirectory]"
+		out += fmt.Sprintf("\n...[truncated at %d entries; list a subdirectory]", maxListEntries)
 	}
 	if out == "" {
 		out = "(empty)"

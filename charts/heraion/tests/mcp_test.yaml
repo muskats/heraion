@@ -37,3 +37,18 @@ tests:
     asserts:
       - notContains: { path: "rules[0].resources", content: secrets }
       - notContains: { path: "rules[0].resources", content: configmaps }
+  - it: namespaces bind the k8s ClusterRole in each namespace only
+    set:
+      mcpServers.k8s.enabled: true
+      namespaces: [shop, payments]
+    documentSelector: { path: kind, value: RoleBinding, matchMany: true }
+    asserts:
+      - equal: { path: roleRef.kind, value: ClusterRole }
+      - matchRegex: { path: metadata.namespace, pattern: "^(shop|payments)$" }
+  - it: namespaces leave no cluster-wide binding
+    set:
+      mcpServers.k8s.enabled: true
+      namespaces: [shop]
+    documentSelector: { path: kind, value: ClusterRoleBinding, skipEmptyTemplates: true }
+    asserts:
+      - hasDocuments: { count: 0 }

@@ -604,6 +604,7 @@ rejected by [values.schema.json](values.schema.json).
 | `git.authorName`, `git.authorEmail` | `HeraIon`, `heraion@users.noreply.local` | Commit author |
 | `git.token` | `{}` | Credential |
 | `repos` | `[]` | Repos HeraIon may change; empty means none |
+| `namespaces` | `[]` | Kubernetes namespaces the k8s tools may read, e.g. `[shop]`; empty means all. Deployed MCP servers then get a RoleBinding per namespace instead of a ClusterRoleBinding |
 | `dryRun` | `false` | Log PRs instead of pushing them |
 | `mode` | `full` | `safe`, `full` or `yolo`: how `open_pr` delivers a fix, and the riskiest mode a playbook may use, see [Modes](../../README.md#modes) |
 | `playbooks.<name>.mode` | `""` | Mode for this playbook; empty: `mode`. A riskier mode is narrowed to `mode` |

@@ -222,3 +222,14 @@ func TestMode(t *testing.T) {
 		}
 	}
 }
+
+func TestNamespaces(t *testing.T) {
+	c, err := Load(write(t, "llm: {baseURL: http://x, model: m}\nnamespaces: [shop, kube-system]\n"))
+	if err != nil || len(c.Namespaces) != 2 {
+		t.Fatalf("%v %v", c, err)
+	}
+	if _, err := Load(write(t, "llm: {baseURL: http://x, model: m}\nnamespaces: [Shop_1]\n")); err == nil ||
+		!strings.Contains(err.Error(), "namespaces") {
+		t.Errorf("invalid namespace: %v", err)
+	}
+}

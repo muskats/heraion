@@ -1,17 +1,7 @@
 {{- if include "heraion.gatewayEnabled" . }}
 {{- $g := .Values.gateway }}
 {{- $name := printf "%s-gateway" (include "heraion.fullname" .) }}
-{{- range $n, $p := (include "heraion.playbooks" . | fromYaml) }}
-{{- with ($p.trigger | default dict).webhook }}
-{{- $h := index $g.hooks . }}
-{{- if not $h }}
-{{- fail (printf "playbook %s uses webhook %q: add gateway.hooks.%s" $n . .) }}
-{{- end }}
-{{- if not (include "heraion.credConfigured" (dict "root" $ "ref" $h.secret)) }}
-{{- fail (printf "gateway.hooks.%s.secret: set serviceAccountToken, csiKey, existingSecret or value (or secrets.existingSecret)" .) }}
-{{- end }}
-{{- end }}
-{{- end }}
+{{- include "heraion.checkHooks" . }}
 {{- $creds := include "heraion.credentials" (dict "root" $ "role" "gateway") | fromYaml }}
 apiVersion: v1
 kind: ConfigMap

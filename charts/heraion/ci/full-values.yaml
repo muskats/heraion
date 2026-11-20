@@ -11,6 +11,7 @@ git:
   endpoint: https://git.example.internal
   token: { value: gitea-token-value }
 repos: [platform/web, platform/payments-api]
+namespaces: [shop, payments]
 jira:
   enabled: true
   url: https://acme.atlassian.net
