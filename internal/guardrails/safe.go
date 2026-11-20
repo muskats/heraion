@@ -3,6 +3,7 @@ package guardrails
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing/format/diff"
@@ -221,6 +222,9 @@ func checkLine(old, new string) error {
 // refuses major bumps, downgrades and a different suffix ("-alpine" ->
 // "-debian"). For 0.x the minor version counts as major, as in semver.
 func checkUpgrade(old, new string) error {
+	if looksLikeIPv4(old) || looksLikeIPv4(new) {
+		return fmt.Errorf("%s -> %s looks like an IP address, not a version", old, new)
+	}
 	oc, osuf := splitVersion(old)
 	nc, nsuf := splitVersion(new)
 	if digitsRE.ReplaceAllString(osuf, "#") != digitsRE.ReplaceAllString(nsuf, "#") {
@@ -247,6 +251,21 @@ func checkUpgrade(old, new string) error {
 		}
 	}
 	return nil
+}
+
+// looksLikeIPv4 reports four numbers of at most 255 and nothing else, e.g.
+// "10.0.0.1". Safe mode refuses those rather than treat them as versions.
+func looksLikeIPv4(v string) bool {
+	parts := strings.Split(v, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts {
+		if n, err := strconv.Atoi(p); err != nil || n > 255 {
+			return false
+		}
+	}
+	return true
 }
 
 // splitVersion splits "v3.1.4-r5" into ["3" "1" "4"] and "-r5".

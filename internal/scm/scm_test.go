@@ -201,9 +201,9 @@ func TestCIFilesAreNeverWritten(t *testing.T) {
 	}
 }
 
-func TestSymlinkIntoWorkflowsIsCaughtAtOpenPR(t *testing.T) {
-	tb, tools, prs, _ := setup(t, false, 1)
-	// Clone, then plant a symlink as if the repo contained one.
+func TestWritesThroughSymlinksAreRefused(t *testing.T) {
+	tb, tools, _, _ := setup(t, false, 1)
+	// Clone, then plant symlinks as if the repo contained them.
 	if _, err := call(t, tools["repo_list"], map[string]any{"repo": repo}); err != nil {
 		t.Fatal(err)
 	}
@@ -211,18 +211,19 @@ func TestSymlinkIntoWorkflowsIsCaughtAtOpenPR(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(r.Dir, ".github", "workflows"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(".github/workflows", filepath.Join(r.Dir, "link")); err != nil {
-		t.Fatal(err)
+	for link, target := range map[string]string{"link": ".github/workflows", "notes.txt": ".git/config"} {
+		if err := os.Symlink(target, filepath.Join(r.Dir, link)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "link/evil.yml", "content": "on: pull_request"}); err != nil {
-		t.Fatal(err) // allowed by name; the file lands in .github/workflows
+	for _, p := range []string{"link/evil.yml", "notes.txt"} {
+		_, err := call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": p, "content": "x"})
+		if err == nil || !strings.Contains(err.Error(), "is a symlink") {
+			t.Errorf("write to %s: want a symlink refusal, got %v", p, err)
+		}
 	}
-	_, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b"})
-	if err == nil || !strings.Contains(err.Error(), ".github/workflows/evil.yml") {
-		t.Fatalf("open_pr must refuse the workflow change, got %v", err)
-	}
-	if len(prs.Created) != 0 {
-		t.Fatal("no PR may be created")
+	if cfg, _ := os.ReadFile(filepath.Join(r.Dir, ".git", "config")); string(cfg) == "x" {
+		t.Fatal(".git/config was overwritten")
 	}
 }
 
@@ -265,6 +266,9 @@ func TestOpenPRRefusesSecretInChange(t *testing.T) {
 	_, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b"})
 	if err == nil || strings.Contains(err.Error(), "supersecret-token") {
 		t.Fatalf("want a refusal that does not echo the secret, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "discarded") {
+		t.Errorf("the refusal must say the edits were discarded: %v", err)
 	}
 	if len(prs.Created) != 0 {
 		t.Fatal("no PR may be created")
@@ -319,6 +323,25 @@ func TestYoloPushesToBase(t *testing.T) {
 		t.Error("yolo must not push a feature branch")
 	}
 	if len(prs.Created) != 0 || tb.Opened[0].Outcome != scm.OutcomePushed || tb.Opened[0].Branch != "main" {
+		t.Fatalf("created=%d opened=%+v", len(prs.Created), tb.Opened)
+	}
+}
+
+func TestYoloPushesTwiceInOneRun(t *testing.T) {
+	tb, tools, prs, base := setupMode(t, false, 2, config.ModeYolo)
+	for i, f := range []string{"Dockerfile", "deploy/values.yaml"} {
+		_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": f, "content": "changed\n"})
+		out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": f, "body": "b", "branch": f})
+		if err != nil || !strings.Contains(out, "pushed commit") {
+			t.Fatalf("change %d: %q %v", i, out, err)
+		}
+	}
+	for _, f := range []string{"Dockerfile", "deploy/values.yaml"} {
+		if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", f); got != "changed\n" {
+			t.Errorf("main %s: %q", f, got)
+		}
+	}
+	if len(prs.Created) != 0 || len(tb.Opened) != 2 {
 		t.Fatalf("created=%d opened=%+v", len(prs.Created), tb.Opened)
 	}
 }

@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   # Publish only tags on the default branch, e.g. not a v1.2.3 tag on a
-  # feature branch.
+  # feature branch, and only when Chart.yaml has the tag's version.
   on-default-branch:
     runs-on: ubuntu-latest
     permissions:
@@ -26,6 +26,8 @@ jobs:
             echo "::error::$GITHUB_REF_NAME is not on $BRANCH"
             exit 1
           fi
+      - name: tag matches Chart.yaml
+        run: scripts/check-version.sh "$GITHUB_REF_NAME"
 
   image:
     runs-on: ubuntu-latest
@@ -66,12 +68,13 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: v4.3.0
+      # Chart.yaml's version and appVersion equal the tag (checked above).
       - name: package and push OCI chart
         env:
           TAG: ${{ github.ref_name }}
         run: |
           v="${TAG#v}"
           helm dependency build charts/heraion
-          helm package charts/heraion --version "$v" --app-version "$v"
+          helm package charts/heraion
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           helm push "heraion-$v.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"

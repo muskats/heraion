@@ -680,9 +680,9 @@ helm upgrade heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f my-value
   [Security defaults](#security-defaults).
 - Breaking changes are listed in the release notes of each chart version.
 
-Breaking changes since 0.1.0:
+Breaking changes in 2.0.0:
 
-| Before | Now |
+| 1.0.0 | 2.0.0 |
 |---|---|
 | `jira.url`, `email`, `deployment`, `token` | `mcpServers.atlassian.deploy.env` (`JIRA_URL`, `JIRA_USERNAME`) and `secretEnv` (`JIRA_API_TOKEN` or `JIRA_PERSONAL_TOKEN`) |
 | `jira.readSpaces`, `confluence.spaces` | `JIRA_PROJECTS_FILTER`, `CONFLUENCE_SPACES_FILTER` on the server |

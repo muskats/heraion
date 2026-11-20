@@ -62,6 +62,28 @@ func TestGitHubDefaults(t *testing.T) {
 	}
 }
 
+func TestBitbucketCloudDefaults(t *testing.T) {
+	c, err := Load(write(t, "llm: {baseURL: https://api.openai.com/v1, model: m}\ngit: {provider: bitbucket}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Git.CloneBaseURL != "https://bitbucket.org" {
+		t.Errorf("got %s", c.Git.CloneBaseURL)
+	}
+}
+
+func TestNegativeLimitsRejected(t *testing.T) {
+	_, err := Load(write(t, `
+llm: {baseURL: https://api.openai.com/v1, model: m, maxTokens: -1, timeout: -1m}
+gateway: {maxConcurrentJobs: -1}
+`))
+	for _, want := range []string{"llm.maxTokens", "llm.timeout", "gateway.maxConcurrentJobs"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error %v does not mention %s", err, want)
+		}
+	}
+}
+
 func TestValidationErrors(t *testing.T) {
 	_, err := Load(write(t, `
 llm: {baseURL: "ftp://x", model: ""}

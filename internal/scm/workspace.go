@@ -68,7 +68,8 @@ func (w *Workspaces) Get(ctx context.Context, repo string) (*Repo, error) {
 	if r, ok := w.repos[repo]; ok {
 		return r, nil
 	}
-	dir := filepath.Join(w.root, strings.ReplaceAll(repo, "/", "__"))
+	// The index keeps names unique: "a/b__c" and "a__b/c" would collide.
+	dir := filepath.Join(w.root, fmt.Sprintf("%d-%s", len(w.repos), strings.ReplaceAll(repo, "/", "__")))
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, err
 	}
@@ -210,6 +211,9 @@ func (r *Repo) WriteFile(p string, data []byte) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.noSymlink(p); err != nil {
+		return err
+	}
 	native := filepath.FromSlash(p)
 	if dir := filepath.Dir(native); dir != "." {
 		if err := r.root.MkdirAll(dir, 0o755); err != nil {
@@ -217,6 +221,27 @@ func (r *Repo) WriteFile(p string, data []byte) error {
 		}
 	}
 	return r.root.WriteFile(native, data, 0o644)
+}
+
+// noSymlink fails if p or one of its parent directories is a symlink. The
+// clone confines symlinks to itself, but .git is inside it too: a committed
+// link "notes.txt -> .git/config" would let a write change the push URL.
+func (r *Repo) noSymlink(p string) error {
+	cur := ""
+	for _, seg := range strings.Split(p, "/") {
+		cur = path.Join(cur, seg)
+		st, err := r.root.Lstat(filepath.FromSlash(cur))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // the rest is created by the write
+		}
+		if err != nil {
+			return err
+		}
+		if st.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("writing %s is not allowed: %s is a symlink", p, cur)
+		}
+	}
+	return nil
 }
 
 // List returns entries under p, e.g. ["Dockerfile", "deploy/"]. With
@@ -320,7 +345,22 @@ func (r *Repo) PushToBase(ctx context.Context, branch string) error {
 	}
 	src := plumbing.NewBranchReferenceName(branch)
 	dst := plumbing.NewBranchReferenceName(r.BaseBranch)
-	return r.push(ctx, gitcfg.RefSpec(src+":"+dst))
+	if err := r.push(ctx, gitcfg.RefSpec(src+":"+dst)); err != nil {
+		return err
+	}
+	// The local base follows the pushed commit, so the next change in this
+	// run builds on it and its push is a fast-forward.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pushed, err := r.g.Reference(src, true)
+	if err != nil {
+		return err
+	}
+	if err := r.g.Storer.SetReference(plumbing.NewHashReference(dst, pushed.Hash())); err != nil {
+		return err
+	}
+	r.baseHash = pushed.Hash()
+	return nil
 }
 
 // push pushes one refspec to origin, e.g. "+refs/heads/a:refs/heads/a".

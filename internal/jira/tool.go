@@ -37,6 +37,7 @@ type Tool struct {
 // Created is the outcome of one create_issue call.
 type Created struct {
 	Project, Key, URL, Summary string
+	Fingerprint                string // e.g. heraion-1b2c3d4e5f60
 	Outcome                    Outcome
 }
 
@@ -119,9 +120,16 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 	}
 	log := t.Log.With("project", a.Project, "fingerprint", fp)
 
+	// Jira's search index lags, so an issue created earlier in this run may
+	// not be found by the search below yet.
+	for _, c := range t.Created {
+		if c.Fingerprint == fp {
+			return fmt.Sprintf("this finding was already handled in this run (%s %s); not created again", c.Outcome, c.Key), nil
+		}
+	}
 	if t.Guard.DryRun() {
 		log.Info("dry-run: would create issue", "summary", in.Summary, "type", in.Type, "labels", in.Labels, "description", in.Description)
-		t.Created = append(t.Created, Created{Project: a.Project, Summary: in.Summary, Outcome: OutcomeDryRun})
+		t.Created = append(t.Created, Created{Project: a.Project, Summary: in.Summary, Fingerprint: fp, Outcome: OutcomeDryRun})
 		return fmt.Sprintf("dry-run: issue %q in %s was logged, not created", in.Summary, a.Project), nil
 	}
 	if t.API == nil {
@@ -135,7 +143,7 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 	}
 	if existing != nil {
 		log.Info("issue already open, skipping", "key", existing.Key)
-		t.Created = append(t.Created, Created{Project: a.Project, Key: existing.Key, URL: existing.URL, Summary: in.Summary, Outcome: OutcomeDuplicate})
+		t.Created = append(t.Created, Created{Project: a.Project, Key: existing.Key, URL: existing.URL, Summary: in.Summary, Fingerprint: fp, Outcome: OutcomeDuplicate})
 		return fmt.Sprintf("an open issue for this finding already exists: %s %s (not created again)", existing.Key, existing.URL), nil
 	}
 	if err := t.Guard.ReserveIssue(); err != nil {
@@ -147,7 +155,7 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	log.Info("created issue", "key", issue.Key, "url", issue.URL)
-	t.Created = append(t.Created, Created{Project: a.Project, Key: issue.Key, URL: issue.URL, Summary: in.Summary, Outcome: OutcomeCreated})
+	t.Created = append(t.Created, Created{Project: a.Project, Key: issue.Key, URL: issue.URL, Summary: in.Summary, Fingerprint: fp, Outcome: OutcomeCreated})
 	return fmt.Sprintf("created %s: %s", issue.Key, issue.URL), nil
 }
 

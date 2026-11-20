@@ -284,6 +284,8 @@ func userPrompt(pb *playbook.Playbook, event string) string {
 	if len(event) == 0 {
 		return p
 	}
+	// A payload must not end the tag itself and continue as instructions.
+	event = strings.ReplaceAll(event, "</event>", "<\\/event>")
 	const maxEvent = 64 << 10
 	if len(event) > maxEvent {
 		event = textutil.Truncate(event, maxEvent) + "\n...[truncated]"

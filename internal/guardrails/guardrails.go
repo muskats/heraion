@@ -156,6 +156,9 @@ var patterns = []struct {
 	// user:password in a URL, e.g. postgres://app:hunter2@db -> postgres://[REDACTED]@db.
 	{regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@`), "${1}" + mask + "@"},
 	{regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`), mask},
+	// The BEGIN line alone, so FindSecretLines, which checks one line at a
+	// time, still finds a key added to a file.
+	{regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`), mask},
 }
 
 // Redactor masks known secret values and common credential patterns.

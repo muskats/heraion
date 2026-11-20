@@ -87,7 +87,8 @@ func (s *Source) Origin() string {
 	return o
 }
 
-// Set reports whether any of the env vars is configured (even if empty).
+// Set reports whether any of the env vars has a value. It does not read the
+// file, so Set can be true while Value fails, e.g. for a missing file.
 func (s *Source) Set() bool {
 	if s == nil || s.getenv == nil {
 		return false

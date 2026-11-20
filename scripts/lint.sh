@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Static checks: formatting, go vet, module tidiness, golangci-lint,
-# govulncheck, GitHub workflow lint and shellcheck.
+# Static checks: formatting, Chart.yaml version, go vet, module tidiness,
+# golangci-lint, govulncheck, GitHub workflow lint and shellcheck.
 #
 #   scripts/lint.sh            all checks
 #   SKIP_VULN=1 scripts/lint.sh  without govulncheck (it needs network access)
@@ -14,6 +14,9 @@ mapfile -t gofiles < <(git ls-files '*.go' 2>/dev/null || find . -name '*.go' -n
 unformatted=$(gofmt -l "${gofiles[@]}")
 [[ -z "$unformatted" ]] || die "not gofmt'ed (run gofmt -w):"$'\n'"$unformatted"
 ok "gofmt"
+
+log "chart version"
+scripts/check-version.sh
 
 log "go vet"
 go vet ./...

@@ -57,7 +57,7 @@ playbooks:
 To limit the server to some namespaces, set `namespaces: [shop, payments]` (empty: all). The
 `clusterRules` are then bound with a RoleBinding in each of them, and HeraIon refuses k8s tool
 calls for other namespaces, without a namespace, or with `all_namespaces`. Cluster-scoped
-resources such as nodes are no longer readable. To change access, override
+resources such as nodes are not readable. To change access, override
 `mcpServers.k8s.deploy.rbac.clusterRules`.
 
 ## Grafana (`grafana`)

@@ -113,6 +113,7 @@ func TestCheckNonBreaking(t *testing.T) {
 		{"downgrade with longer number", mod("Dockerfile", "FROM alpine:3.100", "FROM alpine:3.20"), false},
 		{"version added", mod("Dockerfile", "FROM alpine", "FROM alpine:3.20"), false},
 		{"version removed", mod("Dockerfile", "FROM alpine:3.20", "FROM alpine"), false},
+		{"ip address", mod("values.yaml", "  host: 10.0.0.1", "  host: 10.9.0.1"), false},
 		{"version moved", mod("Dockerfile", "1.2 x", "x 1.2"), false},
 		{"no newline at end", change{files("Dockerfile", "FROM alpine:3.18"), files("Dockerfile", "FROM alpine:3.20")}, true},
 		{"second block checked", change{files("Dockerfile", "FROM alpine:3.18\na\nb\nc\nd\ne\nf\ng\nRUN make\n"),

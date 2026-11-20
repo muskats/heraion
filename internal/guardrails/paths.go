@@ -2,7 +2,6 @@ package guardrails
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -28,9 +27,14 @@ var DefaultDenyPaths = []string{
 // Matching ignores case, since some checkouts are on case-insensitive disks
 // and some servers (e.g. GitHub's CODEOWNERS lookup) are lenient.
 func (g *Guard) CheckWritePath(p string) error {
-	for _, pat := range append(slices.Clone(DefaultDenyPaths), g.o.DenyPaths...) {
+	for _, pat := range DefaultDenyPaths {
 		if MatchPath(pat, p) {
 			return fmt.Errorf("writing %s is not allowed (matches %q): CI and ownership files are never changed", p, pat)
+		}
+	}
+	for _, pat := range g.o.DenyPaths {
+		if MatchPath(pat, p) {
+			return fmt.Errorf("writing %s is not allowed: this playbook denies %q", p, pat)
 		}
 	}
 	if len(g.o.AllowPaths) == 0 {

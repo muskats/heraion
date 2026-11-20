@@ -140,12 +140,19 @@ func TestCreateDeduplicatesAndBudgets(t *testing.T) {
 		t.Errorf("search %q", f.searches[0])
 	}
 
-	// Same key again: found by the fingerprint search, nothing created, budget kept.
+	// Same key again in this run: answered from the run's own record, as
+	// Jira's search may not index the new issue yet.
+	out, err = call(t, tl, a)
+	if err != nil || !strings.Contains(out, "already handled in this run") || len(f.searches) != 1 {
+		t.Fatalf("%q %v", out, err)
+	}
+	// Same key in a later run: found by the fingerprint search, nothing created, budget kept.
+	tl.Created = nil
 	out, err = call(t, tl, a)
 	if err != nil || !strings.Contains(out, "already exists: OPS-1") || len(f.created) != 1 {
 		t.Fatalf("%q %v", out, err)
 	}
-	if tl.Created[1].Outcome != jira.OutcomeDuplicate {
+	if tl.Created[0].Outcome != jira.OutcomeDuplicate {
 		t.Error("duplicate not recorded")
 	}
 	// Budget is 2: one more works, then refused.

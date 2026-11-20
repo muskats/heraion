@@ -81,6 +81,7 @@ func cmdCheck(ctx context.Context, args []string) error {
 	if *connect && *role != "gateway" {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
+		jiraChecked := false
 		for name, srv := range cfg.MCPServers {
 			sess, tools, err := mcp.Dial(ctx, name, srv, version)
 			switch {
@@ -92,9 +93,13 @@ func cmdCheck(ctx context.Context, args []string) error {
 				c.ok("mcp", fmt.Sprintf("%s: %d tools", name, len(tools)))
 				if cfg.Jira != nil && name == cfg.Jira.Server {
 					c.jiraTools(name, tools, cfg.Jira.Projects)
+					jiraChecked = true
 				}
 				_ = sess.Close()
 			}
+		}
+		if cfg.Jira != nil && !jiraChecked {
+			c.fail("jira", "create_issue needs mcp server "+cfg.Jira.Server+", which could not be reached")
 		}
 		c.llm(ctx, cfg)
 	}

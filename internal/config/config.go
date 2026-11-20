@@ -157,7 +157,8 @@ type Git struct {
 	// Endpoint is the API URL, e.g. https://git.example.com. Empty means SaaS.
 	Endpoint string `json:"endpoint,omitempty"`
 	// CloneBaseURL builds clone URLs as <base>/<owner>/<repo>.git. Defaults
-	// to Endpoint, or https://github.com for GitHub. For stash,
+	// to Endpoint, or https://github.com, https://gitlab.com or
+	// https://bitbucket.org when Endpoint is empty. For stash,
 	// bitbucketserver and azure, unset means: ask the API (see
 	// ResolvesCloneURL).
 	CloneBaseURL string `json:"cloneBaseURL,omitempty"`
@@ -255,6 +256,8 @@ func (c *Config) applyDefaults() {
 			c.Git.CloneBaseURL = "https://github.com"
 		} else if c.Git.Endpoint == "" && c.Git.Provider == "gitlab" {
 			c.Git.CloneBaseURL = "https://gitlab.com"
+		} else if c.Git.Endpoint == "" && (c.Git.Provider == "bitbucket" || c.Git.Provider == "bitbucketcloud") {
+			c.Git.CloneBaseURL = "https://bitbucket.org"
 		} else {
 			c.Git.CloneBaseURL = c.Git.Endpoint
 		}
@@ -328,8 +331,6 @@ const (
 // Jira project keys, e.g. OPS, SEC2, MY_PROJ.
 var projectKeyRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,254}$`)
 
-// Kubernetes namespace names (RFC 1123 labels), e.g. shop, kube-system.
-
 var knownProviders = map[string]bool{
 	"github": true, "gitlab": true, "gitea": true, "bitbucket": true,
 	"bitbucketcloud": true, "stash": true, "bitbucketserver": true,
@@ -374,6 +375,12 @@ func (l *LLM) validate() []error {
 	}
 	if l.MaxSteps < 1 {
 		errs = append(errs, errors.New("llm.maxSteps must be >= 1"))
+	}
+	if l.MaxTokens < 1 {
+		errs = append(errs, errors.New("llm.maxTokens must be >= 1"))
+	}
+	if l.Timeout.Duration <= 0 {
+		errs = append(errs, errors.New("llm.timeout must be positive"))
 	}
 	return errs
 }
@@ -456,6 +463,9 @@ func (gw *Gateway) validate() []error {
 		errs = append(errs, fmt.Errorf("gateway.metricsListen %q must differ from gateway.listen", gw.MetricsListen))
 	}
 	// The body is stored in a Secret, whose data is capped at 1 MiB.
+	if gw.MaxConcurrentJobs < 0 {
+		errs = append(errs, errors.New("gateway.maxConcurrentJobs must be >= 0 (0: no limit)"))
+	}
 	if gw.MaxBodyBytes < 0 || gw.MaxBodyBytes > MaxBodyBytesLimit {
 		errs = append(errs, fmt.Errorf("gateway.maxBodyBytes must be between 1 and %d", MaxBodyBytesLimit))
 	}

@@ -131,6 +131,14 @@ func TestFindSecretLines(t *testing.T) {
 	}
 }
 
+func TestFindSecretLinesPrivateKey(t *testing.T) {
+	key := "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\n"
+	patch := gitPatch(t, files("f", "a\n"), files("f", "a\n"+key))
+	if got := NewRedactor().FindSecretLines(patch); len(got) != 1 || got[0] != "+[REDACTED]" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestIssueBudgetAndProjects(t *testing.T) {
 	g := New(Options{DryRun: true, JiraProjects: []string{"OPS"}, MaxIssues: 1})
 	if g.CheckProject("OPS") != nil || g.CheckProject("SEC") == nil {

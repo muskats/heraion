@@ -120,7 +120,7 @@ Built-in tools:
 | Tool | Does |
 |---|---|
 | `repo_list`, `repo_read_file`, `repo_write_file` | Read and edit a clone of an allowed repo |
-| `open_pr` | Commit the edits and open a pull request (in yolo mode: push them) |
+| `open_pr` | Commit the edits and open a pull request (in yolo mode: push them). Each call ends with a clean clone, so after a refusal the model writes the files again |
 | `create_issue` | Create a Jira issue through mcp-atlassian, see [Jira and Confluence](#jira-and-confluence) |
 
 MCP tools are named `<server>.<tool>`, so `k8s.*` matches every tool of the `k8s` server.
@@ -155,9 +155,9 @@ changed file is one of:
 
 | File | Allowed change |
 |---|---|
-| Lockfile (`go.sum`, `package-lock.json`, `yarn.lock`, `poetry.lock`, ...) | Any |
+| Lockfile (`go.sum`, `package-lock.json`, `yarn.lock`, `poetry.lock`, ...) | Any, including download URLs and hashes: review lockfile diffs too |
 | Ignore file (`.trivyignore`, `.grype.yaml`, `.snyk`, `*.vex.json`, ...) | Added lines only, e.g. `CVE-2024-1234 # not reachable` |
-| Any other file | Only versions change, each an upgrade within the same major version: `v1.4.2` -> `v1.5.0`, `3.1.4-r5` -> `3.1.4-r6`. A major bump, a downgrade, a new variant (`-alpine` -> `-bookworm`) or a quantity (`1.5Gi`) is refused. For `0.x` the minor version counts as major |
+| Any other file | Only versions change, each an upgrade within the same major version: `v1.4.2` -> `v1.5.0`, `3.1.4-r5` -> `3.1.4-r6`. A major bump, a downgrade, a new variant (`-alpine` -> `-bookworm`), a quantity (`1.5Gi`) or an IP address (`10.0.0.1`) is refused. For `0.x` the minor version counts as major. Any other dotted number counts as a version, e.g. `ratio: 1.5` -> `1.9` passes; narrow with `writePaths` |
 
 New, deleted and renamed files are refused, except new ignore files and lockfiles. Without
 `writePaths`, safe mode writes only dependency manifests, image references, lockfiles and
@@ -167,7 +167,8 @@ those paths apply instead, and the diff check still runs.
 Yolo mode pushes without force, so the push only works as a fast-forward. If it is rejected,
 for example by branch protection or because the branch moved since the clone, the same commit
 goes to `heraion/<playbook>/<key>` as a PR, with the usual duplicate and closed-PR checks. With
-`--dry-run`, yolo logs the commit and its diff instead of pushing.
+`maxPRs: 2`, a run can push two commits to the default branch, the second on top of the first.
+With `--dry-run`, yolo logs the commit and its diff instead of pushing.
 
 ## Jira and Confluence
 
@@ -182,6 +183,11 @@ mcpServers:
     enabled: true
     deploy:
       env:
+        # env replaces the chart's list, so keep these three: ENABLED_TOOLS keeps
+        # write tools such as jira_update_issue away from the model.
+        - { name: STATELESS, value: "true" }
+        - { name: HOME, value: /tmp }
+        - { name: ENABLED_TOOLS, value: "jira_search,jira_get_issue,jira_create_issue,confluence_search,confluence_get_page" }
         - { name: JIRA_URL, value: https://jira.example.com }
         - { name: JIRA_PROJECTS_FILTER, value: "OPS,CHG" }
         - { name: CONFLUENCE_URL, value: https://wiki.example.com }
@@ -208,15 +214,17 @@ through HeraIon's `create_issue`, which wraps the server's `jira_search` and
 1. The model calls `create_issue` with a project, a summary, a Markdown description and a
    `key` such as `oomkilled-payments-api`.
 2. HeraIon checks the project against `jira.projects`, masks secrets, and adds the labels
-   `heraion`, `heraion-<playbook>` and a fingerprint such as `heraion-1b2c3d4e5f60`.
-3. It searches `project = "OPS" AND labels = "heraion-1b2c3d4e5f60" AND statusCategory != Done`.
+   from `jira.labels` (chart default `heraion`), `heraion-<playbook>` and a fingerprint such
+   as `heraion-1b2c3d4e5f60`.
+3. A key already used in the same run returns that earlier result. Otherwise HeraIon searches
+   `project = "OPS" AND labels = "heraion-1b2c3d4e5f60" AND statusCategory != Done`.
    A match is returned instead of a new issue. Once the issue is done, the next occurrence
    opens a new one.
 4. Otherwise it spends one of `maxIssues` and calls `jira_create_issue`. In dry-run only the
    log line is written.
 
-`heraion check --connect` fails if the server lacks these tools or their arguments, e.g.
-after an mcp-atlassian upgrade.
+`heraion check --connect` fails if the server cannot be reached or lacks these tools or their
+arguments, e.g. after an mcp-atlassian upgrade.
 
 ## Webhooks
 
@@ -301,8 +309,8 @@ Git server:
 ```yaml
 git:
   provider: gitea                        # github (default), gitlab, gitea, bitbucket, stash, gogs, azure
-  endpoint: https://git.example.com      # API URL; empty for github.com and gitlab.com
-  cloneBaseURL: https://git.example.com  # default: endpoint, github.com or gitlab.com
+  endpoint: https://git.example.com      # API URL; empty for github.com, gitlab.com and bitbucket.org
+  cloneBaseURL: https://git.example.com  # default: endpoint, github.com, gitlab.com or bitbucket.org
   username: x-access-token               # clone and push user; the token is the password
 ```
 
@@ -316,7 +324,7 @@ for each repo's clone URL. The token needs to read the repos, push branches and 
 |---|---|
 | Repo allowlist | With `repos: [acme/web]`, a tool call for `acme/billing` fails |
 | Namespaces | With `namespaces: [shop]`, `k8s.resources_list` in `kube-system`, without a namespace or with `all_namespaces` fails; the chart binds the k8s server's RBAC to `shop` only. Empty: all namespaces |
-| File access | `../../etc/passwd`, `.git/config` and symlinks out of the clone are refused |
+| File access | `../../etc/passwd`, `.git/config` and symlinks out of the clone are refused, and nothing is written through a symlink |
 | PR budget | With `maxPRs: 1`, a second `open_pr` call fails. `maxPRs: 0` removes `open_pr` |
 | Write paths | CI and ownership files (`.github/workflows/**`, `.gitlab-ci.yml`, `Jenkinsfile`, `CODEOWNERS`, ...) are never written, also not through a symlink. `writePaths: [Dockerfile, "deploy/**"]` narrows further, `denyPaths` adds patterns |
 | Rejected PRs | A PR closed without merging blocks a new PR on the same branch for `reopenAfter` (default `168h`; `0s`: forever) |
@@ -343,7 +351,7 @@ make build                    # bin/heraion
 
 | Stage | Script | Checks |
 |---|---|---|
-| `lint` | `scripts/lint.sh` | gofmt, go vet, `go mod tidy` drift, golangci-lint ([.golangci.yml](.golangci.yml)), govulncheck, actionlint, shellcheck |
+| `lint` | `scripts/lint.sh` | gofmt, `Chart.yaml` version equals appVersion, go vet, `go mod tidy` drift, golangci-lint ([.golangci.yml](.golangci.yml)), govulncheck, actionlint, shellcheck |
 | `unit` | `scripts/test-unit.sh` | `go test -race`, coverage floor `COVERAGE_MIN` (default 80%), `build/coverage.html` |
 | `chart` | `scripts/test-chart.sh` | helm lint, helm-unittest ([charts/heraion/tests](charts/heraion/tests)), chart/binary cross-check, kubeconform for Kubernetes 1.27 and 1.33, values that must be rejected |
 | `e2e` | `scripts/test-e2e.sh` | [test/e2e](test/e2e): the binary on the rendered chart config, against a mock kube-apiserver, LLM and Gitea API and a real Git remote: webhook to Job and event Secret, worker run to pushed branch and PR, dedup, closed-PR cooldown, write-path and secret refusals |
@@ -362,6 +370,12 @@ as shellcheck become required.
 | `SKIP_VULN=1`, `SKIP_DEPS=1` | Skip govulncheck or `helm dependency build`, e.g. offline |
 | `SKIP_UNITTEST=1` | Skip helm-unittest locally (refused when `CI=true`) |
 | `KEEP_GOING=1` | `ci.sh` runs every stage even after a failure |
+
+Releasing: set `version` and `appVersion` in [Chart.yaml](charts/heraion/Chart.yaml) to the
+same value, e.g. `2.0.0`, merge to `main`, then push the tag `v2.0.0`. The release workflow
+refuses a tag that does not match `Chart.yaml` or is not on `main`, and publishes the image
+`docker.io/muskats/heraion:2.0.0` (also `v2.0.0`) and the chart
+`oci://ghcr.io/muskats/charts/heraion` version `2.0.0`.
 
 Still to do: end-to-end tests on a `kind` cluster, and against real GitHub and Gitea servers.
 

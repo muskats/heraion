@@ -306,6 +306,10 @@ func (tb *Toolbox) openPR(ctx context.Context, raw json.RawMessage) (string, err
 	return msg, err
 }
 
+// discarded ends every open_pr refusal: the clone is reset after each call,
+// so the model must write the files it still wants again.
+const discarded = "All edits in this repo were discarded: write the files you still want again, then call open_pr."
+
 // checkChangedPaths re-checks every changed path: a write through a symlink
 // in the repo can land somewhere repo_write_file would have refused.
 func (tb *Toolbox) checkChangedPaths(r *Repo) error {
@@ -315,7 +319,7 @@ func (tb *Toolbox) checkChangedPaths(r *Repo) error {
 	}
 	for _, p := range paths {
 		if err := tb.Guard.CheckWritePath(p); err != nil {
-			return fmt.Errorf("not opening a PR: %w", err)
+			return fmt.Errorf("not opening a PR: %w. %s", err, discarded)
 		}
 	}
 	return nil
@@ -336,13 +340,13 @@ func (tb *Toolbox) commit(r *Repo, branch, message string, log *slog.Logger) (st
 	// credential, e.g. one the model copied from a tool result.
 	if leaks := tb.Guard.Redactor().FindSecretLines(patch); len(leaks) > 0 {
 		log.Warn("refusing PR with secret-like content", "lines", len(leaks))
-		return "", fmt.Errorf("not opening a PR: the change adds %d line(s) that look like credentials, e.g. %q; remove them",
-			len(leaks), textutil.Truncate(leaks[0], 200))
+		return "", fmt.Errorf("not opening a PR: the change adds %d line(s) that look like credentials, e.g. %q. %s",
+			len(leaks), textutil.Truncate(leaks[0], 200), discarded)
 	}
 	if tb.Guard.Mode() == config.ModeSafe {
 		if err := guardrails.CheckNonBreaking(patch); err != nil {
 			log.Info("refusing PR in safe mode", "reason", err)
-			return "", fmt.Errorf("not opening a PR: %w. Leave this change out, or mention it in your summary", err)
+			return "", fmt.Errorf("not opening a PR: %w. Leave this change out, or mention it in your summary. %s", err, discarded)
 		}
 	}
 	return patch.String(), nil
