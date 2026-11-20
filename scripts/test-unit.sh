@@ -21,7 +21,7 @@ COVERAGE_MIN="${COVERAGE_MIN:-80}"
 read -r -a pkgs <<<"${*:-$(go_packages | tr '\n' ' ')}"
 read -r -a extra <<<"${GO_TEST_FLAGS:-}"
 # Coverage of every package, including code only exercised by other packages' tests.
-args=(-race -covermode=atomic -coverpkg=./internal/...,./cmd/... -coverprofile="$BUILD_DIR/coverage.out" "${extra[@]}" "${pkgs[@]}")
+args=(-race -covermode=atomic "-coverpkg=./internal/...,./cmd/..." -coverprofile="$BUILD_DIR/coverage.out" "${extra[@]}" "${pkgs[@]}")
 
 log "go test ${pkgs[*]}"
 if [[ "${JUNIT:-}" == 1 ]] && optional gotestsum; then
