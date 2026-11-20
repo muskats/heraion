@@ -1,9 +1,9 @@
 name: ci
-# Pull requests into the default branch, and release tags. A push to a branch,
-# main included, runs nothing.
+# Checks only, nothing is published: pushes to main and pull requests into it.
+# Tags run release.yaml instead.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   pull_request:
     branches: [main]
 
