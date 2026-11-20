@@ -6,7 +6,6 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -16,6 +15,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"sigs.k8s.io/yaml"
 
@@ -30,8 +32,6 @@ const (
 	EnvLLMBaseURL = "HERAION_LLM_BASE_URL"
 	EnvLLMModel   = "HERAION_LLM_MODEL"
 	EnvGitToken   = "HERAION_GIT_TOKEN"
-	EnvJiraToken  = "HERAION_JIRA_TOKEN"
-	EnvConfToken  = "HERAION_CONFLUENCE_TOKEN"
 	EnvDryRun     = "HERAION_DRY_RUN"
 )
 
@@ -52,12 +52,9 @@ type Config struct {
 	// MCPServers maps a name to a server. Server "k8s" exposes tools such
 	// as "k8s.resources_list".
 	MCPServers map[string]*MCPServer `json:"mcpServers,omitempty"`
-	// Jira enables create_issue (projects) and jira_search / jira_get_issue
-	// (readSpaces). Nil: no Jira.
-	Jira *Jira `json:"jira,omitempty"`
-	// Confluence enables confluence_search and confluence_get_page. Nil: none.
-	Confluence *Confluence `json:"confluence,omitempty"`
-	Gateway    Gateway     `json:"gateway,omitempty"`
+	// Jira enables create_issue through an mcp-atlassian server. Nil: none.
+	Jira    *Jira   `json:"jira,omitempty"`
+	Gateway Gateway `json:"gateway,omitempty"`
 }
 
 // MCPServer is one MCP server reached over HTTP, e.g.
@@ -89,51 +86,19 @@ type MCPServer struct {
 	SecretHeaders map[string]*secret.Source `json:"-"` // from HeadersFromEnv
 }
 
-// Atlassian deployments.
-const (
-	DeploymentCloud      = "cloud"
-	DeploymentDataCenter = "datacenter"
-)
-
-// Confluence is a site the read tools may use, e.g.
+// Jira is where create_issue writes, through the jira_search and
+// jira_create_issue tools of an mcp-atlassian server, e.g.
 //
-//	confluence: {url: https://acme.atlassian.net/wiki, email: bot@acme.com, spaces: [OPS, RUN]}
-type Confluence struct {
-	// URL is where /rest/api starts, e.g. https://acme.atlassian.net/wiki or
-	// https://wiki.example.com. A Cloud site URL without /wiki gets it added.
-	URL        string `json:"url"`
-	Deployment string `json:"deployment,omitempty"` // as for Jira
-	Email      string `json:"email,omitempty"`      // as for Jira
-	// Spaces pages may be read from, e.g. [OPS, RUNBOOKS].
-	Spaces []string `json:"spaces"`
-	// MaxPageBytes cuts long pages before they reach the model. Default 32 KiB.
-	MaxPageBytes int `json:"maxPageBytes,omitempty"`
-
-	Token *secret.Source `json:"-"` // HERAION_CONFLUENCE_TOKEN[_FILE|_FALLBACK]
-}
-
-// Jira is the site create_issue writes to, e.g.
-//
-//	jira: {url: https://acme.atlassian.net, email: bot@acme.com, projects: [OPS]}
+//	jira: {server: atlassian, projects: [OPS], issueType: Task, labels: [heraion]}
 type Jira struct {
-	URL string `json:"url"`
-	// Deployment is "cloud" (REST v3, ADF) or "datacenter" (REST v2, wiki
-	// markup). Default: cloud for *.atlassian.net, else datacenter.
-	Deployment string `json:"deployment,omitempty"`
-	// Email turns on Basic auth (Cloud API tokens). Empty: Bearer token
-	// (Data Center personal access token, or a Cloud OAuth token).
-	Email string `json:"email,omitempty"`
-	// Projects issues may be created in, e.g. [OPS, SEC]. Empty: no create_issue.
-	Projects []string `json:"projects,omitempty"`
-	// ReadSpaces may be searched and read, e.g. [CHG, OPS]. Empty: no read tools.
-	// (Jira Cloud calls projects "spaces" since 2025; the API still says project.)
-	ReadSpaces []string `json:"readSpaces,omitempty"`
+	// Server is the mcpServers entry running mcp-atlassian, e.g. "atlassian".
+	Server string `json:"server"`
+	// Projects issues may be created in, e.g. [OPS, SEC].
+	Projects []string `json:"projects"`
 	// IssueType is used when the model does not pick one. Default "Task".
 	IssueType string `json:"issueType,omitempty"`
 	// Labels are added to every issue, e.g. [heraion].
 	Labels []string `json:"labels,omitempty"`
-
-	Token *secret.Source `json:"-"` // HERAION_JIRA_TOKEN[_FILE|_FALLBACK]
 }
 
 // Gateway configures `heraion serve`.
@@ -218,23 +183,8 @@ func (g Git) ResolvesCloneURL() bool {
 	return false
 }
 
-// Duration is a time.Duration that unmarshals from strings like "15m".
-type Duration struct{ time.Duration }
-
-func (d *Duration) UnmarshalJSON(b []byte) error {
-	var s string
-	if err := json.Unmarshal(b, &s); err != nil {
-		return fmt.Errorf("duration must be a string like \"15m\": %w", err)
-	}
-	v, err := time.ParseDuration(s)
-	if err != nil {
-		return err
-	}
-	d.Duration = v
-	return nil
-}
-
-func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
+// Duration is a duration written as a string, e.g. "15m".
+type Duration = metav1.Duration
 
 // Load reads path (which may be empty), applies env overrides and defaults,
 // and validates the result.
@@ -260,12 +210,6 @@ func Load(path string) (*Config, error) {
 func (c *Config) applyEnv(getenv func(string) string) {
 	c.LLM.APIKey = secret.New(EnvLLMAPIKey, getenv)
 	c.Git.Token = secret.New(EnvGitToken, getenv)
-	if c.Jira != nil {
-		c.Jira.Token = secret.New(EnvJiraToken, getenv)
-	}
-	if c.Confluence != nil {
-		c.Confluence.Token = secret.New(EnvConfToken, getenv)
-	}
 	if v := getenv(EnvLLMBaseURL); v != "" {
 		c.LLM.BaseURL = v
 	}
@@ -345,26 +289,8 @@ func (c *Config) applyDefaults() {
 			m.Timeout.Duration = 60 * time.Second
 		}
 	}
-	if j := c.Jira; j != nil {
-		j.URL = strings.TrimRight(j.URL, "/")
-		if j.Deployment == "" {
-			j.Deployment = deploymentFor(j.URL)
-		}
-		if j.IssueType == "" {
-			j.IssueType = "Task"
-		}
-	}
-	if cf := c.Confluence; cf != nil {
-		cf.URL = strings.TrimRight(cf.URL, "/")
-		if cf.Deployment == "" {
-			cf.Deployment = deploymentFor(cf.URL)
-		}
-		if u, err := url.Parse(cf.URL); err == nil && cf.Deployment == DeploymentCloud && u.Path == "" {
-			cf.URL += "/wiki"
-		}
-		if cf.MaxPageBytes == 0 {
-			cf.MaxPageBytes = 32 << 10
-		}
+	if j := c.Jira; j != nil && j.IssueType == "" {
+		j.IssueType = "Task"
 	}
 	if c.Gateway.Listen == "" {
 		c.Gateway.Listen = ":8080"
@@ -402,26 +328,12 @@ const (
 // Jira project keys, e.g. OPS, SEC2, MY_PROJ.
 var projectKeyRE = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,254}$`)
 
-// Confluence space keys, e.g. OPS, RUNBOOKS, or ~accountid for personal spaces.
-var spaceKeyRE = regexp.MustCompile(`^~?[A-Za-z0-9_]{1,255}$`)
-
-// deploymentFor guesses cloud for *.atlassian.net, else datacenter.
-func deploymentFor(raw string) string {
-	if u, err := url.Parse(raw); err == nil && strings.HasSuffix(u.Hostname(), ".atlassian.net") {
-		return DeploymentCloud
-	}
-	return DeploymentDataCenter
-}
-
 // Kubernetes namespace names (RFC 1123 labels), e.g. shop, kube-system.
-var namespaceRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
-
-var serverNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 
 var knownProviders = map[string]bool{
 	"github": true, "gitlab": true, "gitea": true, "bitbucket": true,
 	"bitbucketcloud": true, "stash": true, "bitbucketserver": true,
-	"gogs": true, "azure": true, "fake": true,
+	"gogs": true, "azure": true,
 }
 
 // Validate returns every problem at once.
@@ -435,7 +347,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	for _, ns := range c.Namespaces {
-		if !namespaceRE.MatchString(ns) {
+		if !DNSLabel(ns, 63) {
 			errs = append(errs, fmt.Errorf("namespaces: %q is not a Kubernetes namespace name", ns))
 		}
 	}
@@ -443,10 +355,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	if c.Jira != nil {
-		errs = append(errs, c.Jira.validate()...)
-	}
-	if c.Confluence != nil {
-		errs = append(errs, c.Confluence.validate()...)
+		errs = append(errs, c.Jira.validate(c.MCPServers)...)
 	}
 	errs = append(errs, validateMCP(c.MCPServers)...)
 	errs = append(errs, c.Gateway.validate()...)
@@ -491,20 +400,17 @@ func (g *Git) validate() []error {
 	return errs
 }
 
-func (j *Jira) validate() []error {
+func (j *Jira) validate(servers map[string]*MCPServer) []error {
 	var errs []error
-	if err := checkURL(j.URL); err != nil || j.URL == "" {
-		errs = append(errs, fmt.Errorf("jira.url: invalid %q", j.URL))
+	if servers[j.Server] == nil {
+		errs = append(errs, fmt.Errorf("jira.server %q must name an mcpServers entry running mcp-atlassian", j.Server))
 	}
-	if err := checkDeployment("jira.deployment", j.Deployment); err != nil {
-		errs = append(errs, err)
+	if len(j.Projects) == 0 {
+		errs = append(errs, errors.New("jira.projects must list at least one project key, e.g. [OPS]"))
 	}
-	if len(j.Projects) == 0 && len(j.ReadSpaces) == 0 {
-		errs = append(errs, errors.New("jira: set projects (create issues) and/or readSpaces (read issues), e.g. [OPS]"))
-	}
-	for _, p := range append(slices.Clone(j.Projects), j.ReadSpaces...) {
+	for _, p := range j.Projects {
 		if !projectKeyRE.MatchString(p) {
-			errs = append(errs, fmt.Errorf("jira: %q is not a space (project) key", p))
+			errs = append(errs, fmt.Errorf("jira.projects: %q is not a project key", p))
 		}
 	}
 	for _, l := range j.Labels {
@@ -515,39 +421,12 @@ func (j *Jira) validate() []error {
 	return errs
 }
 
-func (cf *Confluence) validate() []error {
-	var errs []error
-	if err := checkURL(cf.URL); err != nil || cf.URL == "" {
-		errs = append(errs, fmt.Errorf("confluence.url: invalid %q", cf.URL))
-	}
-	if err := checkDeployment("confluence.deployment", cf.Deployment); err != nil {
-		errs = append(errs, err)
-	}
-	if len(cf.Spaces) == 0 {
-		errs = append(errs, errors.New("confluence.spaces must list at least one space key, e.g. [OPS]"))
-	}
-	for _, k := range cf.Spaces {
-		if !spaceKeyRE.MatchString(k) {
-			errs = append(errs, fmt.Errorf("confluence.spaces: %q is not a space key", k))
-		}
-	}
-	return errs
-}
-
-// checkDeployment accepts cloud or datacenter, e.g. for key "jira.deployment".
-func checkDeployment(key, d string) error {
-	if d != DeploymentCloud && d != DeploymentDataCenter {
-		return fmt.Errorf("%s %q must be %s or %s", key, d, DeploymentCloud, DeploymentDataCenter)
-	}
-	return nil
-}
-
 // validateMCP checks each server. Empty secret env vars are checked by the
 // pod that uses them: the gateway has no MCP secrets.
 func validateMCP(servers map[string]*MCPServer) []error {
 	var errs []error
 	for name, m := range servers {
-		if !serverNameRE.MatchString(name) {
+		if !DNSLabel(name, 32) {
 			errs = append(errs, fmt.Errorf("mcpServers: name %q must be a lowercase DNS label (max 32 chars)", name))
 		}
 		if m == nil {
@@ -581,7 +460,7 @@ func (gw *Gateway) validate() []error {
 		errs = append(errs, fmt.Errorf("gateway.maxBodyBytes must be between 1 and %d", MaxBodyBytesLimit))
 	}
 	for name, h := range gw.Hooks {
-		if !serverNameRE.MatchString(name) {
+		if !DNSLabel(name, 32) {
 			errs = append(errs, fmt.Errorf("gateway.hooks: name %q must be a lowercase DNS label", name))
 		}
 		if h == nil {
@@ -638,12 +517,6 @@ func checkURLSchemes(s string, allowFile bool) error {
 // Secrets returns the credentials to mask in prompts and logs.
 func (c *Config) Secrets() []*secret.Source {
 	out := []*secret.Source{c.LLM.APIKey, c.Git.Token}
-	if c.Jira != nil {
-		out = append(out, c.Jira.Token)
-	}
-	if c.Confluence != nil {
-		out = append(out, c.Confluence.Token)
-	}
 	for _, m := range c.MCPServers {
 		if m == nil {
 			continue
@@ -658,4 +531,10 @@ func (c *Config) Secrets() []*secret.Source {
 		}
 	}
 	return out
+}
+
+// DNSLabel reports whether s is a DNS-1123 label of at most max characters,
+// e.g. DNSLabel("trivy-remediate", 52) is true, DNSLabel("Shop_1", 63) false.
+func DNSLabel(s string, max int) bool {
+	return len(s) <= max && len(validation.IsDNS1123Label(s)) == 0
 }

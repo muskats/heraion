@@ -6,15 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/muskats/heraion/internal/dispatch"
@@ -45,11 +42,7 @@ func cmdServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	kc, err := kubeClient()
-	if err != nil {
-		return err
-	}
-	ns, err := namespace(cfg.Gateway.Namespace)
+	kc, ns, err := kubeClient(cfg.Gateway.Namespace)
 	if err != nil {
 		return err
 	}
@@ -62,7 +55,7 @@ func cmdServe(ctx context.Context, args []string) error {
 	servers := []*http.Server{newHTTPServer(cfg.Gateway.Listen, srv.Handler())}
 	if addr := cfg.Gateway.MetricsListen; addr != "" {
 		reg := prometheus.NewRegistry()
-		reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}), d.Metrics())
+		reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 		reg.MustRegister(srv.Collectors()...)
 		mux := http.NewServeMux()
 		mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -100,30 +93,22 @@ func newHTTPServer(addr string, h http.Handler) *http.Server {
 	}
 }
 
-// kubeClient uses the pod's service account, or KUBECONFIG when run locally.
-func kubeClient() (kubernetes.Interface, error) {
-	rc, err := rest.InClusterConfig()
-	if errors.Is(err, rest.ErrNotInCluster) {
-		rc, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-			clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).ClientConfig()
-	}
+// kubeClient uses KUBECONFIG or ~/.kube/config when present, else the pod's
+// service account. The namespace is the configured one, else the kubeconfig
+// context's, else POD_NAMESPACE or the service account's.
+func kubeClient(namespace string) (kubernetes.Interface, string, error) {
+	cc := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{})
+	rc, err := cc.ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("kubernetes client config: %w", err)
+		return nil, "", fmt.Errorf("kubernetes client config: %w", err)
+	}
+	if namespace == "" {
+		if namespace, _, err = cc.Namespace(); err != nil {
+			return nil, "", fmt.Errorf("kubernetes namespace: %w", err)
+		}
 	}
 	rc.UserAgent = "heraion-gateway/" + version
-	return kubernetes.NewForConfig(rc)
-}
-
-func namespace(configured string) (string, error) {
-	if configured != "" {
-		return configured, nil
-	}
-	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
-		return ns, nil
-	}
-	b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	if err != nil {
-		return "", errors.New("cannot determine namespace: set gateway.namespace or POD_NAMESPACE")
-	}
-	return strings.TrimSpace(string(b)), nil
+	kc, err := kubernetes.NewForConfig(rc)
+	return kc, namespace, err
 }

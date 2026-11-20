@@ -1,0 +1,53 @@
+suite: values that must be rejected
+# A webhook playbook without a hook: gateway_test.yaml.
+templates:
+  - worker.yaml
+set:
+  llm: { baseURL: http://x, model: m }
+  playbooks:
+    trivy-remediate: { enabled: true }
+tests:
+  - it: no llm.baseURL
+    set: { llm.baseURL: "" }
+    asserts:
+      - failedTemplate: { errorPattern: "llm.baseURL is required" }
+  - it: no llm.model
+    set: { llm.model: "" }
+    asserts:
+      - failedTemplate: { errorPattern: "llm.model is required" }
+  - it: unknown top-level key
+    set: { notAKey: 1 }
+    asserts:
+      - failedTemplate: { errorPattern: "notAKey" }
+  - it: unknown guardrail key
+    set: { playbooks.trivy-remediate.guardrails.maxPR: 1 }
+    asserts:
+      - failedTemplate: { errorPattern: "maxPR" }
+  - it: reopenAfter is not a duration
+    set: { playbooks.trivy-remediate.guardrails.reopenAfter: week }
+    asserts:
+      - failedTemplate: {}
+  - it: unknown mode
+    set: { mode: reckless }
+    asserts:
+      - failedTemplate: {}
+  - it: unknown playbook mode
+    set: { playbooks.trivy-remediate.mode: reckless }
+    asserts:
+      - failedTemplate: {}
+  - it: invalid namespace name
+    set: { namespaces: [Shop_1] }
+    asserts:
+      - failedTemplate: {}
+  - it: maxBodyBytes over the Secret limit
+    set: { gateway.maxBodyBytes: 2000000 }
+    asserts:
+      - failedTemplate: {}
+  - it: csiKey without secrets.csi
+    set: { llm.apiKey.csiKey: llm-api-key }
+    asserts:
+      - failedTemplate: { errorPattern: "secrets.csi.enabled" }
+  - it: empty schedule
+    set: { playbooks.trivy-remediate.trigger.schedule: "" }
+    asserts:
+      - failedTemplate: {}

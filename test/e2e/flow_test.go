@@ -121,7 +121,6 @@ func TestWebhookToPullRequest(t *testing.T) {
 			`heraion_webhook_requests_total{code="202",hook="alertmanager"} 2`,
 			`heraion_webhook_requests_total{code="401",hook="alertmanager"} 2`,
 			`heraion_dispatches_total{hook="alertmanager",playbook="` + playbook + `",result="at_capacity"} 1`,
-			`heraion_jobs{playbook="` + playbook + `",status="active"} 1`,
 			"go_goroutines",
 		} {
 			if !strings.Contains(string(body), want) {
@@ -272,6 +271,16 @@ func TestWebhookToPullRequest(t *testing.T) {
 		user := llm.Requests[0].Messages[1].Text()
 		if strings.Contains(user, "ghp_") || strings.Contains(user, "git-token") || !strings.Contains(user, "x[REDACTED]y") {
 			t.Errorf("event not masked before the cut: ...%s", user[len(user)-80:])
+		}
+	})
+
+	t.Run("an old closed PR is found beyond the first page", func(t *testing.T) {
+		for i := range 60 {
+			gt.add(repo, fmt.Sprintf("other %d", i), fmt.Sprintf("feature/%d", i), repo)
+		}
+		llm, _ := worker(t, eventFile, llmtest.Turn{Calls: bump}, llmtest.Turn{Final: "done"})
+		if !strings.Contains(toolResults(llm), "closed without merging") {
+			t.Errorf("closed PR on page 2 missed: %s", toolResults(llm))
 		}
 	})
 }

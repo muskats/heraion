@@ -57,7 +57,7 @@ global:
 #                                                   the key in the table below
 #   3. value: sk-...                                the chart puts it in its own Secret
 #
-# Default keys: llm-api-key, git-token, jira-token, confluence-token,
+# Default keys: llm-api-key, git-token,
 # hook-<name>, mcp-<server>-<header> (e.g. mcp-datadog-dd-api-key) and
 # mcp-<server>-env-<name> for mcpServers.<name>.deploy.secretEnv.
 secrets:
@@ -102,40 +102,15 @@ git:
     key: ""          # default git-token
     value: ""
 
-# Jira. projects enables create_issue; readSpaces enables jira_search and
-# jira_get_issue. A playbook gets a tool when its tools list allows it, e.g.
-# tools: [k8s.*, jira_search, create_issue].
+# create_issue: Jira issues through the mcp-atlassian server named in
+# server (mcpServers.atlassian below), with a project allowlist, issue budget,
+# de-duplication and dry-run. The server's own jira_create_issue is hidden.
 jira:
   enabled: false
-  url: ""               # e.g. https://acme.atlassian.net or https://jira.example.com
-  deployment: ""        # cloud or datacenter; default: cloud for *.atlassian.net
-  email: ""             # Cloud: account of the API token (Basic auth). Empty: Bearer token (Data Center PAT)
-  projects: []          # spaces (projects) issues may be created in, e.g. [OPS]
-  readSpaces: []        # spaces that may be read, e.g. [CHG, OPS]
+  server: atlassian     # an enabled mcpServers entry running mcp-atlassian
+  projects: []          # projects issues may be created in, e.g. [OPS]
   issueType: Task
   labels: [heraion]     # added to every issue
-  token:                # credential, default key jira-token
-    serviceAccountToken: { audience: "", expirationSeconds: 3600 }
-    csiKey: ""
-    existingSecret: ""
-    key: ""
-    value: ""
-
-# Confluence (read only): confluence_search and confluence_get_page, limited to
-# spaces. Cloud and Data Center; the same Atlassian API token works on Cloud.
-confluence:
-  enabled: false
-  url: ""               # e.g. https://acme.atlassian.net/wiki or https://wiki.example.com
-  deployment: ""        # cloud or datacenter; default: cloud for *.atlassian.net
-  email: ""             # Cloud: account of the API token. Empty: Bearer token (Data Center PAT)
-  spaces: []            # e.g. [RUNBOOKS, OPS]
-  maxPageBytes: 32768   # longer pages are cut
-  token:                # credential, default key confluence-token
-    serviceAccountToken: { audience: "", expirationSeconds: 3600 }
-    csiKey: ""
-    existingSecret: ""
-    key: ""
-    value: ""
 
 # Repos HeraIon may change, e.g. [acme/web, acme/api]. Playbooks can only narrow this.
 repos: []
@@ -179,11 +154,11 @@ playbooks:
   alertmanager-triage:
     enabled: false   # needs gateway.hooks.alertmanager and mcpServers.k8s
     trigger: { webhook: alertmanager }
-    tools: [k8s.*, repo_*, open_pr, create_issue, jira_search, jira_get_issue, confluence_search, confluence_get_page]
+    tools: [k8s.*, repo_*, open_pr, create_issue, atlassian.jira_search, atlassian.jira_get_issue, atlassian.confluence_search, atlassian.confluence_get_page]
     prompt: |
       An Alertmanager webhook delivered the alert group below. For each firing alert,
       identify the workload from its labels, check recent changes and runbooks with the
-      jira_* and confluence_* tools if they are available, gather evidence with the k8s tools (pod
+      atlassian.* tools if they are available, gather evidence with the k8s tools (pod
       status, restarts, events, logs, resource usage, owning controller) and determine
       the most likely root cause. Only if the cause is a configuration value in one of
       the allowed repositories, open one minimal PR (branch key: alertname + workload).
@@ -380,6 +355,40 @@ mcpServers:
               - clustersbomreports
             verbs: [get, list, watch]
         rules: []
+  # Jira and Confluence, Cloud or Data Center:
+  # https://github.com/sooperset/mcp-atlassian. The filters bind every tool,
+  # reads and writes, e.g. JIRA_PROJECTS_FILTER: "OPS,CHG".
+  atlassian:
+    enabled: false
+    mode: deploy
+    path: /mcp
+    transport: streamable
+    allowTools: []
+    denyTools: []
+    required: false
+    timeout: 60s
+    deploy:
+      image:
+        registry: ghcr.io
+        repository: sooperset/mcp-atlassian
+        tag: "0.24.7"
+        pullPolicy: IfNotPresent
+      args: ["--transport", "streamable-http", "--port", "9000"]
+      port: 9000
+      env:
+        - { name: STATELESS, value: "true" }
+        - { name: HOME, value: /tmp }
+        # The tools HeraIon uses; create_issue needs jira_search and jira_create_issue.
+        - { name: ENABLED_TOOLS, value: "jira_search,jira_get_issue,jira_create_issue,confluence_search,confluence_get_page" }
+        - { name: JIRA_URL, value: "" }                  # e.g. https://acme.atlassian.net
+        - { name: JIRA_PROJECTS_FILTER, value: "" }      # e.g. "OPS,CHG"
+        - { name: CONFLUENCE_URL, value: "" }            # e.g. https://acme.atlassian.net/wiki
+        - { name: CONFLUENCE_SPACES_FILTER, value: "" }  # e.g. "RUNBOOKS"
+      # Cloud: JIRA_USERNAME (env) + JIRA_API_TOKEN. Data Center: JIRA_PERSONAL_TOKEN.
+      # Confluence likewise. Default keys mcp-atlassian-env-<name>, e.g.
+      # mcp-atlassian-env-jira-api-token.
+      secretEnv: {}
+      rbac: { clusterRules: [], rules: [] }
   grafana:
     enabled: false          # also installs the grafana-mcp subchart
     mode: dependency

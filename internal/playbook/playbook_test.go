@@ -55,6 +55,8 @@ func TestValidation(t *testing.T) {
 		"no trigger":   "name: a\ntools: [x]\nprompt: p\n",
 		"two triggers": "name: a\ntrigger: {manual: true, webhook: am}\ntools: [x]\nprompt: p\n",
 		"bad cron":     "name: a\ntrigger: {schedule: '* *'}\ntools: [x]\nprompt: p\n",
+		"cron range":   "name: a\ntrigger: {schedule: '99 * * * *'}\ntools: [x]\nprompt: p\n",
+		"cron macro":   "name: a\ntrigger: {schedule: '@bogus'}\ntools: [x]\nprompt: p\n",
 		"no tools":     "name: a\ntrigger: {manual: true}\nprompt: p\n",
 		"no prompt":    "name: a\ntrigger: {manual: true}\ntools: [x]\n",
 		"bad output":   "name: a\ntrigger: {manual: true}\ntools: [x]\nprompt: p\noutput: email\n",

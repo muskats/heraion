@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/muskats/heraion/internal/config"
-	"github.com/muskats/heraion/internal/confluence"
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/jira"
 	"github.com/muskats/heraion/internal/llm"
@@ -20,25 +19,16 @@ import (
 	"github.com/muskats/heraion/internal/textutil"
 )
 
-// Options for Run. Tests set LLM, PRs, Jira and Confluence to replace the
-// real clients.
+// Options for Run. Tests set LLM and PRs to replace the real clients.
 type Options struct {
-	Config     *config.Config
-	Playbook   *playbook.Playbook
-	Event      []byte // raw trigger payload (webhook body), may be empty
-	Redactor   *guardrails.Redactor
-	Log        *slog.Logger
-	LLM        llm.Chatter
-	PRs        scm.PRService
-	Jira       JiraClient
-	Confluence confluence.Reader
-	Version    string
-}
-
-// JiraClient is what a run needs from Jira. *jira.Client implements it.
-type JiraClient interface {
-	jira.API
-	jira.Reader
+	Config   *config.Config
+	Playbook *playbook.Playbook
+	Event    []byte // raw trigger payload (webhook body), may be empty
+	Redactor *guardrails.Redactor
+	Log      *slog.Logger
+	LLM      llm.Chatter
+	PRs      scm.PRService
+	Version  string
 }
 
 // Report summarises a finished run.
@@ -61,8 +51,6 @@ type scope struct {
 	repos      []string
 	namespaces []string // Kubernetes namespaces; empty: all
 	projects   []string // Jira projects for create_issue
-	readSpaces []string // Jira spaces for jira_search and jira_get_issue
-	confSpaces []string // Confluence spaces
 }
 
 // Run executes the playbook.
@@ -108,36 +96,22 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		ReopenAfter: pb.Guardrails.ReopenAfter.Duration}
 
 	all := tb.Tools()
+	patterns := pb.Tools
+	if cfg.Jira != nil && len(s.projects) > 0 && pb.AllowsTool("create_issue") {
+		patterns = append(slices.Clone(patterns), cfg.Jira.Server+"."+jira.CreateTool) // the guard needs the server
+	}
 	var issues *jira.Tool
-	if cfg.Jira != nil {
-		jc := o.Jira
-		if jc == nil {
-			jc = jira.NewClient(cfg.Jira)
-		}
-		if len(s.readSpaces) > 0 {
-			all = append(all, jira.ReadTools(jc, cfg.Jira.URL, s.readSpaces)...)
-		}
-		if len(s.projects) > 0 {
-			// In dry-run the tool only logs, so the client is never called.
-			issues = &jira.Tool{API: jc, Playbook: pb.Name, IssueType: cfg.Jira.IssueType,
-				Labels: cfg.Jira.Labels, Guard: guard, Log: log}
-			all = append(all, issues)
-		}
-	}
-	if cfg.Confluence != nil && len(s.confSpaces) > 0 {
-		r := o.Confluence
-		if r == nil {
-			r = confluence.NewClient(cfg.Confluence)
-		}
-		all = append(all, confluence.Tools(r, cfg.Confluence.URL, s.confSpaces, cfg.Confluence.MaxPageBytes, red.Redact)...)
-	}
 	if len(cfg.MCPServers) > 0 {
-		mgr, mcpTools, err := mcp.Connect(ctx, cfg.MCPServers, pb.Tools, o.Version, log)
+		mgr, mcpTools, err := mcp.Connect(ctx, cfg.MCPServers, patterns, o.Version, log)
 		if err != nil {
 			return nil, err
 		}
 		defer mgr.Close()
+		mcpTools, issues = issueGuard(cfg.Jira, mcpTools, s.projects, pb.Name, guard, log)
 		all = append(all, mcp.LimitNamespaces(mcpTools, cfg.Namespaces)...)
+		if issues != nil {
+			all = append(all, issues)
+		}
 	}
 	tools, err := allowedTools(pb, s.repos, all)
 	if err != nil {
@@ -181,15 +155,41 @@ func resolveScope(cfg *config.Config, pb *playbook.Playbook, log *slog.Logger) s
 	warnNarrowed(log, "repos", pb.Repos, s.repos)
 	if cfg.Jira != nil {
 		s.projects = pb.EffectiveJiraProjects(cfg.Jira.Projects)
-		s.readSpaces = pb.EffectiveJiraReadSpaces(cfg.Jira.ReadSpaces)
 		warnNarrowed(log, "jiraProjects", pb.JiraProjects, s.projects)
-		warnNarrowed(log, "jiraReadSpaces", pb.JiraReadSpaces, s.readSpaces)
-	}
-	if cfg.Confluence != nil {
-		s.confSpaces = pb.EffectiveConfluenceSpaces(cfg.Confluence.Spaces)
-		warnNarrowed(log, "confluenceSpaces", pb.ConfluenceSpaces, s.confSpaces)
 	}
 	return s
+}
+
+// issueGuard removes every "<server>.jira_create_issue" tool, so issues are
+// only created through create_issue and its guardrails. With jira set, it
+// returns create_issue backed by that server's tools.
+func issueGuard(j *config.Jira, tools []llm.Tool, projects []string, playbookName string,
+	guard *guardrails.Guard, log *slog.Logger) ([]llm.Tool, *jira.Tool) {
+	var search, create llm.Tool
+	out := tools[:0:0]
+	for _, t := range tools {
+		server, name, _ := strings.Cut(t.Name(), ".")
+		switch {
+		case name == jira.CreateTool:
+			if j != nil && server == j.Server {
+				create = t
+			}
+			continue
+		case j != nil && server == j.Server && name == jira.SearchTool:
+			search = t
+		}
+		out = append(out, t)
+	}
+	if j == nil || len(projects) == 0 {
+		return out, nil
+	}
+	if search == nil || create == nil {
+		log.Warn("create_issue unavailable: the jira server does not offer both tools",
+			"server", j.Server, "tools", []string{jira.SearchTool, jira.CreateTool})
+		return out, nil
+	}
+	return out, &jira.Tool{API: jira.MCP{Searcher: search, Creator: create}, Playbook: playbookName,
+		IssueType: j.IssueType, Labels: j.Labels, Guard: guard, Log: log}
 }
 
 // allowedTools keeps the tools the playbook allows that can do something:
@@ -258,12 +258,6 @@ Rules:
 	} else {
 		fmt.Fprintf(&b, "You may open at most %d pull request(s) in this run. Use a stable 'branch' key per change so reruns de-duplicate.\n", pb.Guardrails.MaxPRs)
 		b.WriteString(modePrompt[s.mode])
-	}
-	if len(s.readSpaces) > 0 && pb.AllowsTool("jira_search") {
-		fmt.Fprintf(&b, "jira_search and jira_get_issue read recent issues in: %s. Check them for related changes and known problems.\n", strings.Join(s.readSpaces, ", "))
-	}
-	if len(s.confSpaces) > 0 && pb.AllowsTool("confluence_search") {
-		fmt.Fprintf(&b, "confluence_search and confluence_get_page read recent pages in: %s, e.g. runbooks and change logs.\n", strings.Join(s.confSpaces, ", "))
 	}
 	if len(s.projects) > 0 && pb.AllowsTool("create_issue") && pb.Guardrails.MaxIssues > 0 {
 		fmt.Fprintf(&b, "You may create at most %d Jira issue(s) with create_issue, in: %s. Create one only for a finding that needs a human, and use a stable 'key' so reruns de-duplicate.\n",

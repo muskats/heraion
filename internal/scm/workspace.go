@@ -256,52 +256,48 @@ func (r *Repo) List(p string, recursive bool, max int) ([]string, bool, error) {
 	return out, truncated, err
 }
 
-// Commit commits all changes to a new branch and returns the diff. changed
-// is false if there was nothing to commit.
-func (r *Repo) Commit(branch, message string) (patch string, changed bool, err error) {
+// Commit commits all changes to a new branch and returns the diff from the
+// base commit. The patch is nil if there was nothing to commit.
+func (r *Repo) Commit(branch, message string) (*object.Patch, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	wt, err := r.g.Worktree()
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	st, err := wt.Status()
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	if st.IsClean() {
-		return "", false, nil
+		return nil, nil
 	}
 	ref := plumbing.NewBranchReferenceName(branch)
 	// An earlier open_pr in this run may have left the local branch; we are
 	// on the base branch again (Reset), so start it over.
 	if err := r.g.Storer.RemoveReference(ref); err != nil {
-		return "", false, fmt.Errorf("reset branch %s: %w", branch, err)
+		return nil, fmt.Errorf("reset branch %s: %w", branch, err)
 	}
 	if err := wt.Checkout(&git.CheckoutOptions{Branch: ref, Create: true, Keep: true}); err != nil {
-		return "", false, fmt.Errorf("create branch %s: %w", branch, err)
+		return nil, fmt.Errorf("create branch %s: %w", branch, err)
 	}
 	if err := wt.AddWithOptions(&git.AddOptions{All: true}); err != nil {
-		return "", false, err
+		return nil, err
 	}
 	sig := &object.Signature{Name: r.author.AuthorName, Email: r.author.AuthorEmail, When: time.Now()}
 	h, err := wt.Commit(message, &git.CommitOptions{Author: sig, Committer: sig})
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	head, err := r.g.CommitObject(h)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	base, err := r.g.CommitObject(r.baseHash)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	p, err := base.Patch(head)
-	if err != nil {
-		return "", false, err
-	}
-	return p.String(), true, nil
+	return base.Patch(head)
 }
 
 // Push force-pushes branch. Only heraion/... branches are allowed, so force

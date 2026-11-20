@@ -14,17 +14,8 @@ repos: [platform/web, platform/payments-api]
 namespaces: [shop, payments]
 jira:
   enabled: true
-  url: https://acme.atlassian.net
-  email: heraion-bot@acme.com
+  server: atlassian
   projects: [OPS, SEC]
-  readSpaces: [CHG, OPS]
-  token: {}                 # key jira-token in secrets.existingSecret
-confluence:
-  enabled: true
-  url: https://acme.atlassian.net/wiki
-  email: heraion-bot@acme.com
-  spaces: [RUN, OPS]
-  token: { existingSecret: atlassian, key: api-token }   # same token as Jira on Cloud
 dryRun: true
 mode: yolo
 playbooks:
@@ -47,6 +38,20 @@ gateway:
   podDisruptionBudget: { enabled: true }
 mcpServers:
   k8s: { enabled: true }
+  atlassian:
+    enabled: true
+    deploy:
+      env:
+        - { name: STATELESS, value: "true" }
+        - { name: JIRA_URL, value: https://acme.atlassian.net }
+        - { name: JIRA_USERNAME, value: heraion-bot@acme.com }
+        - { name: JIRA_PROJECTS_FILTER, value: "OPS,SEC,CHG" }
+        - { name: CONFLUENCE_URL, value: https://acme.atlassian.net/wiki }
+        - { name: CONFLUENCE_USERNAME, value: heraion-bot@acme.com }
+        - { name: CONFLUENCE_SPACES_FILTER, value: "RUN,OPS" }
+      secretEnv:
+        JIRA_API_TOKEN: { existingSecret: atlassian, key: api-token }
+        CONFLUENCE_API_TOKEN: { existingSecret: atlassian, key: api-token }   # same token on Cloud
   grafana: { enabled: true }
   datadog:
     enabled: true

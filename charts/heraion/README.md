@@ -9,8 +9,7 @@ propose fixes as pull requests.
 - [Secrets](#secrets)
 - [Playbooks](#playbooks)
 - [Webhooks](#webhooks)
-- [Jira issues](#jira-issues)
-- [Reading Jira and Confluence](#reading-jira-and-confluence)
+- [Jira and Confluence](#jira-and-confluence)
 - [MCP servers](#mcp-servers)
 - [LLM endpoint](#llm-endpoint)
 - [Security defaults](#security-defaults)
@@ -62,7 +61,7 @@ Example values files:
 |---|---|
 | [values-minimal.yaml](../../examples/helm/values-minimal.yaml) | One scheduled playbook, a shared Secret, OpenAI, GitHub |
 | [values-selfhosted.yaml](../../examples/helm/values-selfhosted.yaml) | Gitea, LiteLLM, Alertmanager webhooks, HPA and PDB |
-| [values-integrations.yaml](../../examples/helm/values-integrations.yaml) | Jira, Grafana and Datadog MCP servers |
+| [values-integrations.yaml](../../examples/helm/values-integrations.yaml) | Jira/Confluence (mcp-atlassian), Grafana and Datadog MCP servers |
 | [values-identity.yaml](../../examples/helm/values-identity.yaml) | No static secrets: CSI driver with IRSA, projected ServiceAccount tokens |
 
 ## What gets deployed
@@ -96,8 +95,6 @@ These credentials can each use any of the sources below:
 |---|---|---|
 | `llm.apiKey` | `HERAION_LLM_API_KEY` | `llm-api-key` |
 | `git.token` | `HERAION_GIT_TOKEN` | `git-token` |
-| `jira.token` | `HERAION_JIRA_TOKEN` | `jira-token` |
-| `confluence.token` | `HERAION_CONFLUENCE_TOKEN` | `confluence-token` |
 | `gateway.hooks.<name>.secret` | `HERAION_HOOK_<NAME>_SECRET` | `hook-<name>` |
 | `mcpServers.<name>.secretHeaders.<header>` | `HERAION_MCP_<NAME>_<HEADER>` | `mcp-<name>-<header>` |
 
@@ -134,7 +131,7 @@ kubectl -n heraion create secret generic heraion \
   --from-literal=llm-api-key=sk-... \
   --from-literal=git-token=ghp_... \
   --from-literal=hook-alertmanager=$(openssl rand -hex 32) \
-  --from-literal=jira-token=...
+  --from-literal=mcp-atlassian-env-jira-personal-token=...
 ```
 
 ```yaml
@@ -243,7 +240,7 @@ so the source is chosen at render time. The order is: the entry's own `existingS
 
 ```yaml
 mcpServers:
-  jira:
+  atlassian:
     deploy:
       secretEnv:
         JIRA_PERSONAL_TOKEN: { existingSecret: jira, key: pat }
@@ -256,7 +253,7 @@ Playbooks are defined under `playbooks.<name>`. The chart ships two, both disabl
 | Playbook | Trigger | Needs |
 |---|---|---|
 | `trivy-remediate` | Every 6 hours | `mcpServers.k8s`, Trivy Operator, `repos` |
-| `alertmanager-triage` | Webhook `alertmanager` | `gateway.hooks.alertmanager`, `mcpServers.k8s`; optionally `jira` and `confluence` |
+| `alertmanager-triage` | Webhook `alertmanager` | `gateway.hooks.alertmanager`, `mcpServers.k8s`; optionally `mcpServers.atlassian` and `jira` |
 
 Enable one, change its schedule, or add your own:
 
@@ -334,116 +331,40 @@ Load control:
   `heraion-<playbook>-<hash>-event`, owned by its Job, and mounted into the worker at
   `/var/run/heraion/event/payload`.
 
-## Jira issues
+## Jira and Confluence
 
-The built-in `create_issue` tool opens Jira issues for findings that need a person. How
-de-duplication and formatting work is described in the
-[main README](../../README.md#jira-issues).
-
-Jira Cloud with an API token. Create the token at
-https://id.atlassian.com/manage-profile/security/api-tokens, as the account in `email`:
+Turn on the `mcpServers.atlassian` preset
+([mcp-atlassian](https://github.com/sooperset/mcp-atlassian) 0.24.7) and `jira` for
+`create_issue`. The URLs, tokens and project/space filters are the server's env:
 
 ```yaml
+mcpServers:
+  atlassian:
+    enabled: true
+    deploy:
+      env:
+        - { name: STATELESS, value: "true" }
+        - { name: HOME, value: /tmp }
+        - { name: ENABLED_TOOLS, value: "jira_search,jira_get_issue,jira_create_issue,confluence_search,confluence_get_page" }
+        - { name: JIRA_URL, value: https://acme.atlassian.net }
+        - { name: JIRA_USERNAME, value: heraion-bot@acme.com }
+        - { name: JIRA_PROJECTS_FILTER, value: "OPS,CHG" }
+      secretEnv:
+        JIRA_API_TOKEN: { existingSecret: atlassian, key: api-token }
 jira:
   enabled: true
-  url: https://acme.atlassian.net
-  email: heraion-bot@acme.com
-  projects: [OPS, SEC]
-  token: { existingSecret: jira, key: api-token }
-```
-
-Jira Data Center with a personal access token (Profile, then Personal Access Tokens). Leave
-`email` empty, so the token is sent as `Bearer`:
-
-```yaml
-jira:
-  enabled: true
-  url: https://jira.example.com
+  server: atlassian
   projects: [OPS]
-  issueType: Bug
-  token: {}            # key jira-token in secrets.existingSecret
 ```
 
-Then allow the tool in a playbook:
+| Deployment | Credentials |
+|---|---|
+| Jira Cloud | `JIRA_USERNAME` (env) and `JIRA_API_TOKEN` from https://id.atlassian.com/manage-profile/security/api-tokens |
+| Jira Data Center | `JIRA_PERSONAL_TOKEN` |
+| Confluence | Same with `CONFLUENCE_*`; on Cloud the Jira API token works |
 
-```yaml
-playbooks:
-  alertmanager-triage:
-    enabled: true      # already lists create_issue in its tools
-  cve-without-fix:
-    trigger: { schedule: "0 6 * * 1" }
-    tools: [k8s.resources_list, k8s.resources_get, create_issue]
-    jiraProjects: [SEC]
-    output: report
-    guardrails: { maxIssues: 5 }
-    prompt: |
-      List HIGH and CRITICAL CVEs without a fixed version and create one SEC issue per
-      image, with the affected workloads. Key: "<image>-<cve>".
-```
-
-Notes:
-
-- The account needs permission to browse and create issues in each project.
-- `create_issue` is offered only when `jira.enabled` is true, the playbook's `tools` matches
-  it, at least one project is left after `jiraProjects`, and `guardrails.maxIssues` is not 0.
-- If `networkPolicy.workerEgress` is set, allow egress to the Jira host.
-- `helm test` checks the token with `GET /rest/api/{2|3}/myself`.
-
-## Reading Jira and Confluence
-
-Read-only and optional. Each part needs `enabled: true` and at least one space. What the
-tools return and how the space limit works is described in the
-[main README](../../README.md#reading-jira-and-confluence).
-
-Jira: add `readSpaces` next to (or instead of) `projects`. The same token is used for both.
-
-```yaml
-jira:
-  enabled: true
-  url: https://acme.atlassian.net
-  email: heraion-bot@acme.com
-  projects: [OPS]            # create_issue
-  readSpaces: [CHG, OPS]     # jira_search, jira_get_issue
-  token: {}                  # key jira-token
-```
-
-Confluence. On Cloud, `url` may be the site (`/wiki` is added) and the Jira API token works,
-so point both at the same Secret key:
-
-```yaml
-confluence:
-  enabled: true
-  url: https://acme.atlassian.net/wiki     # Data Center: e.g. https://wiki.example.com
-  email: heraion-bot@acme.com              # Data Center: leave empty for a PAT
-  spaces: [RUNBOOKS, OPS]
-  token: { existingSecret: heraion, key: jira-token }
-```
-
-Use them in a playbook, optionally narrowed:
-
-```yaml
-playbooks:
-  alertmanager-triage:
-    enabled: true            # already lists the jira_* and confluence_* tools
-  weekly-change-review:
-    trigger: { schedule: "0 8 * * 1" }
-    tools: [jira_search, jira_get_issue, confluence_search, confluence_get_page, k8s.*]
-    jiraReadSpaces: [CHG]
-    confluenceSpaces: [OPS]
-    output: report
-    prompt: |
-      Summarize last week's changes in CHG and compare them with the cluster: list
-      changes marked Done that are not visible in the running workloads.
-```
-
-Notes:
-
-- The account needs read (browse) permission in each space. Use a dedicated bot account
-  that can only see what HeraIon may read.
-- A tool is offered only when its part is enabled, the playbook's `tools` matches it, and at
-  least one space is left after narrowing.
-- If `networkPolicy.workerEgress` is set, allow egress to the Jira and Confluence hosts.
-- `helm test` checks the Confluence token with `GET /rest/api/user/current`.
+Setting `env` replaces the preset's list, so keep `STATELESS`, `HOME` and `ENABLED_TOOLS`.
+How `create_issue` de-duplicates is in the [main README](../../README.md#jira-and-confluence).
 
 ## MCP servers
 
@@ -620,31 +541,13 @@ rejected by [values.schema.json](values.schema.json).
 
 | Key | Default | Description |
 |---|---|---|
-| `jira.enabled` | `false` | Turn on `create_issue` (with `projects`) and the read tools (with `readSpaces`) |
-| `jira.url` | `""` | Site URL, e.g. `https://acme.atlassian.net` |
-| `jira.deployment` | `""` | `cloud` or `datacenter`; default: `cloud` for `*.atlassian.net` |
-| `jira.email` | `""` | Cloud: owner of the API token (Basic auth). Empty: Bearer token |
-| `jira.projects` | `[]` | Spaces (projects) issues may be created in |
-| `jira.readSpaces` | `[]` | Spaces `jira_search` and `jira_get_issue` may read; `projects` or `readSpaces` is required |
+| `jira.enabled` | `false` | Turn on `create_issue` |
+| `jira.server` | `atlassian` | Enabled `mcpServers` entry running mcp-atlassian |
+| `jira.projects` | `[]` | Projects issues may be created in; required when enabled |
 | `jira.issueType` | `Task` | Used when the model does not choose one |
 | `jira.labels` | `[heraion]` | Added to every issue |
-| `jira.token` | `{}` | Credential, see [Secrets](#secrets) |
 | `playbooks.<name>.jiraProjects` | `[]` | Narrows `jira.projects` for one playbook |
-| `playbooks.<name>.jiraReadSpaces` | `[]` | Narrows `jira.readSpaces` for one playbook |
 | `playbooks.<name>.guardrails.maxIssues` | `1` | New issues per run; `0` removes `create_issue` |
-
-### Confluence
-
-| Key | Default | Description |
-|---|---|---|
-| `confluence.enabled` | `false` | Turn on `confluence_search` and `confluence_get_page` |
-| `confluence.url` | `""` | Base of `/rest/api`, e.g. `https://acme.atlassian.net/wiki` |
-| `confluence.deployment` | `""` | `cloud` or `datacenter`; default: `cloud` for `*.atlassian.net` |
-| `confluence.email` | `""` | Cloud: owner of the API token. Empty: Bearer token |
-| `confluence.spaces` | `[]` | Space keys that may be read; required when enabled |
-| `confluence.maxPageBytes` | `32768` | Longer pages are cut |
-| `confluence.token` | `{}` | Credential, see [Secrets](#secrets) |
-| `playbooks.<name>.confluenceSpaces` | `[]` | Narrows `confluence.spaces` for one playbook |
 
 ### Worker
 
@@ -740,12 +643,13 @@ ok    secret     HERAION_LLM_API_KEY (file) for llm
 ok    secret     HERAION_GIT_TOKEN (env) for git
 ok    mcp        k8s: 18 tools
 ok    llm        GET https://api.openai.com/v1/models: 200
-ok    jira       https://acme.atlassian.net (cloud), create in [OPS], read [CHG OPS]
-ok    confluence https://acme.atlassian.net/wiki (cloud), spaces [RUNBOOKS]
+ok    mcp        atlassian: 5 tools
+ok    jira       create_issue through atlassian, in [OPS]
 ```
 
 The check fails on a missing or unreadable required secret, a required MCP server that is
-down, a 401 or 403 from the LLM endpoint, or a Jira or Confluence token that is rejected.
+down, a 401 or 403 from the LLM endpoint, or a `jira.server` that lacks the tools and
+arguments `create_issue` calls.
 Secret values are never printed, only their source: `file`, `env` or `fallback`.
 
 Chart development:
@@ -757,10 +661,9 @@ scripts/test-chart.sh   # or: make chart-test
 | Check | What it covers |
 |---|---|
 | `helm lint --strict` | Defaults and every [ci/](ci/) values file |
-| helm-unittest | The suites in [tests/](tests/) |
+| helm-unittest | The suites in [tests/](tests/), including values that must be rejected ([reject_test.yaml](tests/reject_test.yaml)) |
 | [chart_test.go](chart_test.go) | Renders the chart and loads the result with the binary's own config, playbook and Job-template loaders, so a key the binary does not know fails |
 | kubeconform | Rendered output of the defaults, [ci/](ci/) and [examples/helm](../../examples/helm) against Kubernetes 1.27 and 1.33 |
-| Rejected values | Values the schema or templates must refuse, e.g. an unknown guardrail key |
 
 ## Upgrading
 
@@ -776,6 +679,17 @@ helm upgrade heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f my-value
 - With `rbac.create: false`, keep your RBAC in line with the chart's: see
   [Security defaults](#security-defaults).
 - Breaking changes are listed in the release notes of each chart version.
+
+Breaking changes since 0.1.0:
+
+| Before | Now |
+|---|---|
+| `jira.url`, `email`, `deployment`, `token` | `mcpServers.atlassian.deploy.env` (`JIRA_URL`, `JIRA_USERNAME`) and `secretEnv` (`JIRA_API_TOKEN` or `JIRA_PERSONAL_TOKEN`) |
+| `jira.readSpaces`, `confluence.spaces` | `JIRA_PROJECTS_FILTER`, `CONFLUENCE_SPACES_FILTER` on the server |
+| `confluence.*` | `CONFLUENCE_*` env on the server |
+| Tools `jira_search`, `jira_get_issue`, `confluence_*` | `atlassian.jira_search`, ... from the server |
+| Playbook `jiraReadSpaces`, `confluenceSpaces` | Removed; the server filter is the boundary. Use a second mcp-atlassian entry for another scope |
+| `heraion_jobs`, `heraion_job_last_success_timestamp_seconds` | kube-state-metrics, see the [main README](../../README.md#monitoring) |
 
 ## Uninstall
 

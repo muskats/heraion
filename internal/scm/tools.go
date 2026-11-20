@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
@@ -55,50 +54,57 @@ const (
 	maxListEntries = 2000
 )
 
+// Arguments of the built-in tools; their JSON Schemas come from these.
+type (
+	listArgs struct {
+		Repo      string `json:"repo" jsonschema:"Repository as owner/name"`
+		Path      string `json:"path,omitempty" jsonschema:"Directory relative to the repo root; default '.'"`
+		Recursive bool   `json:"recursive,omitempty" jsonschema:"Walk subdirectories (capped at 2000 entries)"`
+	}
+	readArgs struct {
+		Repo string `json:"repo" jsonschema:"Repository as owner/name"`
+		Path string `json:"path" jsonschema:"File path relative to the repo root"`
+	}
+	writeArgs struct {
+		Repo    string `json:"repo" jsonschema:"Repository as owner/name"`
+		Path    string `json:"path" jsonschema:"File path relative to the repo root"`
+		Content string `json:"content" jsonschema:"Full new file content"`
+	}
+	openPRArgs struct {
+		Repo   string `json:"repo" jsonschema:"Repository as owner/name"`
+		Title  string `json:"title" jsonschema:"Short PR title"`
+		Body   string `json:"body" jsonschema:"Markdown description: problem, evidence, change, risk"`
+		Branch string `json:"branch,omitempty" jsonschema:"Stable short key for this change, e.g. 'bump-openssl-3.0.15'. Reusing a key de-duplicates."`
+	}
+)
+
 // Tools returns the built-in tools.
 func (tb *Toolbox) Tools() []llm.Tool {
-	repos := tb.Guard.Repos()
-	if repos == nil {
-		repos = []string{} // "enum": null is not a valid schema
-	}
-	repoEnum, _ := json.Marshal(repos)
-	repoProp := fmt.Sprintf(`"repo":{"type":"string","enum":%s,"description":"Repository as owner/name"}`, repoEnum)
+	repos := map[string][]string{"repo": tb.Guard.Repos()}
 	return []llm.Tool{
 		&llm.FuncTool{
 			ToolName: "repo_list",
 			Desc:     "List files and directories in a repository. Directories end in '/'.",
-			Params: `{"type":"object","properties":{` + repoProp + `,
-				"path":{"type":"string","description":"Directory relative to the repo root; default '.'"},
-				"recursive":{"type":"boolean","description":"Walk subdirectories (capped at ` + strconv.Itoa(maxListEntries) + ` entries)"}},
-				"required":["repo"]}`,
-			Fn: tb.list,
+			Params:   llm.SchemaFor[listArgs](repos),
+			Fn:       tb.list,
 		},
 		&llm.FuncTool{
 			ToolName: "repo_read_file",
 			Desc:     "Read a text file from a repository.",
-			Params: `{"type":"object","properties":{` + repoProp + `,
-				"path":{"type":"string","description":"File path relative to the repo root"}},
-				"required":["repo","path"]}`,
-			Fn: tb.read,
+			Params:   llm.SchemaFor[readArgs](repos),
+			Fn:       tb.read,
 		},
 		&llm.FuncTool{
 			ToolName: "repo_write_file",
 			Desc:     "Create or overwrite a file in the local clone. Changes are only proposed through open_pr.",
-			Params: `{"type":"object","properties":{` + repoProp + `,
-				"path":{"type":"string","description":"File path relative to the repo root"},
-				"content":{"type":"string","description":"Full new file content"}},
-				"required":["repo","path","content"]}`,
-			Fn: tb.write,
+			Params:   llm.SchemaFor[writeArgs](repos),
+			Fn:       tb.write,
 		},
 		&llm.FuncTool{
 			ToolName: "open_pr",
 			Desc:     openPRDesc[tb.Guard.Mode()],
-			Params: `{"type":"object","properties":{` + repoProp + `,
-				"title":{"type":"string","description":"Short PR title"},
-				"body":{"type":"string","description":"Markdown description: problem, evidence, change, risk"},
-				"branch":{"type":"string","description":"Stable short key for this change, e.g. 'bump-openssl-3.0.15'. Reusing a key de-duplicates."}},
-				"required":["repo","title","body"]}`,
-			Fn: tb.openPR,
+			Params:   llm.SchemaFor[openPRArgs](repos),
+			Fn:       tb.openPR,
 		},
 	}
 }
@@ -123,10 +129,7 @@ func (tb *Toolbox) repo(ctx context.Context, name string) (*Repo, error) {
 }
 
 func (tb *Toolbox) list(ctx context.Context, raw json.RawMessage) (string, error) {
-	var a struct {
-		Repo, Path string
-		Recursive  bool
-	}
+	var a listArgs
 	if err := llm.DecodeArgs(raw, &a); err != nil {
 		return "", err
 	}
@@ -149,7 +152,7 @@ func (tb *Toolbox) list(ctx context.Context, raw json.RawMessage) (string, error
 }
 
 func (tb *Toolbox) read(ctx context.Context, raw json.RawMessage) (string, error) {
-	var a struct{ Repo, Path string }
+	var a readArgs
 	if err := llm.DecodeArgs(raw, &a); err != nil {
 		return "", err
 	}
@@ -161,7 +164,7 @@ func (tb *Toolbox) read(ctx context.Context, raw json.RawMessage) (string, error
 }
 
 func (tb *Toolbox) write(ctx context.Context, raw json.RawMessage) (string, error) {
-	var a struct{ Repo, Path, Content string }
+	var a writeArgs
 	if err := llm.DecodeArgs(raw, &a); err != nil {
 		return "", err
 	}
@@ -244,7 +247,7 @@ func (tb *Toolbox) existingPR(ctx context.Context, repo, branch string, log *slo
 }
 
 func (tb *Toolbox) openPR(ctx context.Context, raw json.RawMessage) (string, error) {
-	var a struct{ Repo, Title, Body, Branch string }
+	var a openPRArgs
 	if err := llm.DecodeArgs(raw, &a); err != nil {
 		return "", err
 	}
@@ -322,11 +325,11 @@ func (tb *Toolbox) checkChangedPaths(r *Repo) error {
 // refuses a diff that adds a credential, or in safe mode one that is not
 // non-breaking.
 func (tb *Toolbox) commit(r *Repo, branch, message string, log *slog.Logger) (string, error) {
-	patch, changed, err := r.Commit(branch, message)
+	patch, err := r.Commit(branch, message)
 	if err != nil {
 		return "", err
 	}
-	if !changed {
+	if patch == nil {
 		return "", errors.New("no changes to commit: write files with repo_write_file first")
 	}
 	// File contents are pushed as written, so refuse a change that adds a
@@ -342,7 +345,7 @@ func (tb *Toolbox) commit(r *Repo, branch, message string, log *slog.Logger) (st
 			return "", fmt.Errorf("not opening a PR: %w. Leave this change out, or mention it in your summary", err)
 		}
 	}
-	return patch, nil
+	return patch.String(), nil
 }
 
 // logDryRun logs the change instead of pushing it.

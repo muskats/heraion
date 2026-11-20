@@ -131,7 +131,9 @@ func (s *goscmService) list(ctx context.Context, repo, branch string, opts goscm
 			}
 			out = append(out, toPR(pr))
 		}
-		if len(prs) < size {
+		// Stop on an empty page, not a short one: servers cap the page size,
+		// e.g. Gitea returns at most 50 even when asked for 100.
+		if len(prs) == 0 {
 			break
 		}
 	}

@@ -17,7 +17,7 @@ need git
 mkdir -p "$BUILD_DIR"
 
 # The test renders the chart with `helm template`, which needs the subcharts.
-[[ "${SKIP_DEPS:-}" == 1 ]] || bash "$ROOT/scripts/chart-deps.sh"
+[[ "${SKIP_DEPS:-}" == 1 ]] || helm dependency build "$CHART_DIR" >/dev/null
 
 read -r -a extra <<<"${GO_TEST_FLAGS:-}"
 args=(-tags e2e -count=1 -timeout 10m "${extra[@]}" ./test/e2e/)

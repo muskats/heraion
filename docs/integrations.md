@@ -91,23 +91,38 @@ mcpServers:
       DD-APPLICATION-KEY: { existingSecret: datadog, key: app-key }
 ```
 
-## Jira
+## Jira and Confluence (`atlassian`)
 
-There are two separate parts:
+[mcp-atlassian](https://github.com/sooperset/mcp-atlassian), Cloud or Data Center. The
+chart's `mcpServers.atlassian` preset enables only `jira_search`, `jira_get_issue`,
+`jira_create_issue`, `confluence_search` and `confluence_get_page`. `JIRA_PROJECTS_FILTER`
+and `CONFLUENCE_SPACES_FILTER` bound every tool, reads and writes.
 
-| Need | Use |
-|---|---|
-| Create issues | The built-in `create_issue` tool (`jira.projects`), with a project allowlist, issue budget, de-duplication and dry-run. See the [chart README](../charts/heraion/README.md#jira-issues) |
-| Read recent issues in chosen spaces | The built-in `jira_search` and `jira_get_issue` tools (`jira.readSpaces`). See [Reading Jira and Confluence](../charts/heraion/README.md#reading-jira-and-confluence) |
-| Read recent Confluence pages in chosen spaces | The built-in `confluence_search` and `confluence_get_page` tools (`confluence.*`) |
-| Anything else, e.g. boards, sprints, JQL across all spaces | A Jira MCP server, as below. Keep it read-only |
+```yaml
+mcpServers:
+  atlassian:
+    enabled: true
+    deploy:
+      env:
+        - { name: STATELESS, value: "true" }
+        - { name: HOME, value: /tmp }
+        - { name: ENABLED_TOOLS, value: "jira_search,jira_get_issue,jira_create_issue,confluence_search,confluence_get_page" }
+        - { name: JIRA_URL, value: https://acme.atlassian.net }
+        - { name: JIRA_USERNAME, value: heraion-bot@acme.com }      # Cloud only
+        - { name: JIRA_PROJECTS_FILTER, value: "OPS,CHG" }
+      secretEnv:
+        JIRA_API_TOKEN: { existingSecret: atlassian, key: api-token }  # Data Center: JIRA_PERSONAL_TOKEN
+jira:
+  enabled: true
+  server: atlassian
+  projects: [OPS]
+```
 
-Server or Data Center: run [mcp-atlassian](https://github.com/sooperset/mcp-atlassian) with a
-personal access token and `READ_ONLY_MODE=true`, as in
-[values-integrations.yaml](../examples/helm/values-integrations.yaml).
-
-Cloud: use Atlassian's hosted server as an `external` entry with an `Authorization` secret
-header. Check Atlassian's docs for the current URL.
+`env` is a list, so setting it replaces the preset's list: keep `STATELESS`, `HOME` and
+`ENABLED_TOOLS`. Issues are created only through `create_issue`, which adds a project
+allowlist, issue budget, de-duplication and dry-run, see the
+[README](../README.md#jira-and-confluence). Atlassian's hosted server (Rovo) works for reads
+as an `external` entry, but `create_issue` needs mcp-atlassian.
 
 To start a run from a Jira webhook:
 
@@ -121,7 +136,7 @@ gateway:
 playbooks:
   jira-bug-to-pr:
     trigger: { webhook: jira } # POST /hooks/jira
-    tools: ["jira.*", repo_*, open_pr]
+    tools: [atlassian.jira_get_issue, repo_*, open_pr]
     prompt: ...
 ```
 

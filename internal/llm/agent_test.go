@@ -7,7 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/openai/openai-go/v3"
 
 	"github.com/muskats/heraion/internal/secret"
 
@@ -34,7 +35,6 @@ func newAgent(t *testing.T, srv *llmtest.Server, tools ...llm.Tool) *llm.Agent {
 		t.Fatal(err)
 	}
 	c := llm.NewClient(srv.BaseURL(), secret.Static("sk-test"))
-	c.RetryBase = time.Millisecond
 	return &llm.Agent{LLM: c, Model: "m", Tools: reg, Limits: llm.Limits{MaxSteps: 5}}
 }
 
@@ -111,7 +111,7 @@ func TestRetryOn429ButNot400(t *testing.T) {
 
 	srv = llmtest.New(t, llmtest.Turn{Status: 400}, llmtest.Turn{Final: "never"})
 	_, err = newAgent(t, srv).Run(context.Background(), "s", "u")
-	var apiErr *llm.APIError
+	var apiErr *openai.Error
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest || len(srv.Requests) != 1 {
 		t.Fatalf("400 must not be retried: %v (%d requests)", err, len(srv.Requests))
 	}
@@ -182,8 +182,8 @@ func TestCutOffAnswerIsAnError(t *testing.T) {
 
 type emptyChat struct{}
 
-func (emptyChat) Chat(context.Context, llm.ChatRequest) (*llm.ChatResponse, error) {
-	return &llm.ChatResponse{}, nil
+func (emptyChat) Chat(context.Context, openai.ChatCompletionNewParams) (*openai.ChatCompletion, error) {
+	return &openai.ChatCompletion{}, nil
 }
 
 func TestNoChoicesIsAnError(t *testing.T) {
@@ -196,7 +196,7 @@ func TestNoChoicesIsAnError(t *testing.T) {
 func TestMissingAPIKeyIsNotRetried(t *testing.T) {
 	srv := llmtest.New(t)
 	c := llm.NewClient(srv.BaseURL(), secret.FromMap("KEY", map[string]string{"KEY_FILE": "/nonexistent"}))
-	if _, err := c.Chat(context.Background(), llm.ChatRequest{Model: "m"}); err == nil || !strings.Contains(err.Error(), "llm api key") {
+	if _, err := c.Chat(context.Background(), openai.ChatCompletionNewParams{Model: "m"}); err == nil || !strings.Contains(err.Error(), "llm api key") {
 		t.Fatalf("got %v", err)
 	}
 	if len(srv.Requests) != 0 {

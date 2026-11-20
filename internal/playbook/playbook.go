@@ -12,10 +12,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/robfig/cron/v3"
 
 	"sigs.k8s.io/yaml"
 
@@ -38,12 +39,8 @@ type Playbook struct {
 	Repos       []string `json:"repos,omitempty"`
 	// JiraProjects narrows jira.projects, e.g. [OPS]. Empty: all of them.
 	JiraProjects []string `json:"jiraProjects,omitempty"`
-	// JiraReadSpaces narrows jira.readSpaces, ConfluenceSpaces narrows
-	// confluence.spaces. Empty: all of them.
-	JiraReadSpaces   []string `json:"jiraReadSpaces,omitempty"`
-	ConfluenceSpaces []string `json:"confluenceSpaces,omitempty"`
-	Prompt           string   `json:"prompt"`
-	Output           string   `json:"output,omitempty"`
+	Prompt       string   `json:"prompt"`
+	Output       string   `json:"output,omitempty"`
 	// Mode is safe, full or yolo, see config.Mode. Empty: the global mode.
 	// A riskier mode than the global one is narrowed to it.
 	Mode       config.Mode `json:"mode,omitempty"`
@@ -80,8 +77,6 @@ func DefaultGuardrails() Guardrails {
 		ReopenAfter: config.Duration{Duration: 7 * 24 * time.Hour}}
 }
 
-var nameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,50}[a-z0-9])?$`)
-
 // Parse decodes and validates a single playbook.
 func Parse(b []byte) (*Playbook, error) {
 	// Decoding keeps fields the YAML does not mention, so prefilled defaults
@@ -99,7 +94,7 @@ func Parse(b []byte) (*Playbook, error) {
 // Validate reports every problem in the playbook at once.
 func (p *Playbook) Validate() error {
 	var errs []error
-	if !nameRE.MatchString(p.Name) {
+	if !config.DNSLabel(p.Name, 52) {
 		errs = append(errs, fmt.Errorf("name %q must be a lowercase DNS label (max 52 chars)", p.Name))
 	}
 	if strings.TrimSpace(p.Prompt) == "" {
@@ -108,13 +103,14 @@ func (p *Playbook) Validate() error {
 	n := 0
 	if p.Trigger.Schedule != "" {
 		n++
-		if len(strings.Fields(p.Trigger.Schedule)) != 5 && !strings.HasPrefix(p.Trigger.Schedule, "@") {
-			errs = append(errs, fmt.Errorf("trigger.schedule %q must be a 5-field cron expression", p.Trigger.Schedule))
+		// The same parser the kube-apiserver uses for CronJob schedules.
+		if _, err := cron.ParseStandard(p.Trigger.Schedule); err != nil {
+			errs = append(errs, fmt.Errorf("trigger.schedule %q: %w", p.Trigger.Schedule, err))
 		}
 	}
 	if p.Trigger.Webhook != "" {
 		n++
-		if !nameRE.MatchString(p.Trigger.Webhook) {
+		if !config.DNSLabel(p.Trigger.Webhook, 52) {
 			errs = append(errs, fmt.Errorf("trigger.webhook %q must be a lowercase DNS label", p.Trigger.Webhook))
 		}
 	}
@@ -204,16 +200,6 @@ func intersect(local, global []string) []string {
 		}
 	}
 	return out
-}
-
-// EffectiveJiraReadSpaces works like EffectiveRepos, for jira.readSpaces.
-func (p *Playbook) EffectiveJiraReadSpaces(global []string) []string {
-	return intersect(p.JiraReadSpaces, global)
-}
-
-// EffectiveConfluenceSpaces works like EffectiveRepos, for confluence.spaces.
-func (p *Playbook) EffectiveConfluenceSpaces(global []string) []string {
-	return intersect(p.ConfluenceSpaces, global)
 }
 
 // EffectiveMode is the playbook mode narrowed to the global one, e.g.

@@ -16,7 +16,7 @@ import (
 	"github.com/muskats/heraion/internal/textutil"
 )
 
-// API is what the tool needs from a Jira client. *Client implements it.
+// API is what the tool needs from Jira. MCP implements it.
 type API interface {
 	Create(ctx context.Context, in NewIssue) (*Issue, error)
 	FindOpen(ctx context.Context, jql string) (*Issue, error)
@@ -65,22 +65,18 @@ func (t *Tool) Description() string {
 		"as a pull request. If an open issue with the same key exists, it is returned instead."
 }
 
-func (t *Tool) Schema() json.RawMessage {
-	projects, _ := json.Marshal(t.Guard.Projects())
-	return json.RawMessage(`{"type":"object","properties":{
-		"project":{"type":"string","enum":` + string(projects) + `,"description":"Jira project key"},
-		"summary":{"type":"string","description":"One-line title, e.g. 'payments-api OOMKilled 14 times in 1h'"},
-		"description":{"type":"string","description":"Markdown: what happened, evidence, impact, suggested next steps"},
-		"issueType":{"type":"string","description":"e.g. Bug, Task, Incident. Default: ` + t.IssueType + `"},
-		"priority":{"type":"string","description":"e.g. High. Leave empty for the project default"},
-		"labels":{"type":"array","items":{"type":"string"},"description":"Extra labels, no spaces"},
-		"key":{"type":"string","description":"Stable key for this finding, e.g. 'oomkilled-payments-api'. Reusing a key de-duplicates."}},
-		"required":["project","summary","description","key"]}`)
+type args struct {
+	Project     string   `json:"project" jsonschema:"Jira project key"`
+	Summary     string   `json:"summary" jsonschema:"One-line title, e.g. 'payments-api OOMKilled 14 times in 1h'"`
+	Description string   `json:"description" jsonschema:"Markdown: what happened, evidence, impact, suggested next steps"`
+	IssueType   string   `json:"issueType,omitempty" jsonschema:"e.g. Bug, Task, Incident. Default: the configured type"`
+	Priority    string   `json:"priority,omitempty" jsonschema:"e.g. High. Leave empty for the project default"`
+	Labels      []string `json:"labels,omitempty" jsonschema:"Extra labels, no spaces"`
+	Key         string   `json:"key" jsonschema:"Stable key for this finding, e.g. 'oomkilled-payments-api'. Reusing a key de-duplicates."`
 }
 
-type args struct {
-	Project, Summary, Description, IssueType, Priority, Key string
-	Labels                                                  []string
+func (t *Tool) Schema() json.RawMessage {
+	return json.RawMessage(llm.SchemaFor[args](map[string][]string{"project": t.Guard.Projects()}))
 }
 
 func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {

@@ -19,5 +19,5 @@ dependencies:
   # Optional Grafana MCP server, enabled with mcpServers.grafana.enabled.
   - name: grafana-mcp
     version: "0.34.0"
-    repository: https://grafana-community.github.io/helm-charts
+    repository: oci://ghcr.io/grafana-community/helm-charts
     condition: mcpServers.grafana.enabled

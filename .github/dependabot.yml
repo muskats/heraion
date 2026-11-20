@@ -1,0 +1,17 @@
+# Weekly update PRs. Tool versions in scripts/lib.sh are bumped by hand.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      k8s: { patterns: ["k8s.io/*", "sigs.k8s.io/*"] }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: helm
+    directory: /charts/heraion
+    schedule: { interval: weekly }

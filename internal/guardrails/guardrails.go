@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-git/go-git/v5/plumbing/format/diff"
+
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/secret"
 )
@@ -222,17 +224,21 @@ func (r *Redactor) Redact(s string) string {
 	return s
 }
 
-// FindSecretLines returns the lines added by a unified diff that hold a
-// secret, e.g. "+token: ghp_...", masked. Context and removed lines are
-// ignored: they are already in the repository.
-func (r *Redactor) FindSecretLines(patch string) []string {
+// FindSecretLines returns the lines a patch adds that hold a secret, e.g.
+// "+token: ghp_...", masked. Unchanged and removed lines are ignored: they
+// are already in the repository.
+func (r *Redactor) FindSecretLines(patch diff.Patch) []string {
 	var out []string
-	for _, l := range strings.Split(patch, "\n") {
-		if !strings.HasPrefix(l, "+") || strings.HasPrefix(l, "+++ ") {
-			continue
-		}
-		if m := r.Redact(l); m != l {
-			out = append(out, m)
+	for _, fp := range patch.FilePatches() {
+		for _, c := range fp.Chunks() {
+			if c.Type() != diff.Add {
+				continue
+			}
+			for _, l := range chunkLines(c) {
+				if m := r.Redact(l); m != l {
+					out = append(out, "+"+m)
+				}
+			}
 		}
 	}
 	return out

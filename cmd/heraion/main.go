@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -172,8 +173,9 @@ func cmdRun(ctx context.Context, args []string) error {
 	return err
 }
 
-// newLogger returns a JSON logger that masks secrets in string and error
-// values, e.g. "token ghp_abc..." is logged as "token [REDACTED]".
+// newLogger returns a JSON logger that masks secrets in every value, e.g.
+// "token ghp_abc..." is logged as "token [REDACTED]". Slices and structs are
+// JSON-encoded first; one that contained a secret is logged as that string.
 func newLogger(level string, red *guardrails.Redactor) *slog.Logger {
 	var lv slog.Level
 	if err := lv.UnmarshalText([]byte(level)); err != nil {
@@ -188,6 +190,10 @@ func newLogger(level string, red *guardrails.Redactor) *slog.Logger {
 			case slog.KindAny:
 				if e, ok := a.Value.Any().(error); ok {
 					a.Value = slog.StringValue(red.Redact(e.Error()))
+				} else if b, err := json.Marshal(a.Value.Any()); err == nil {
+					if r := red.Redact(string(b)); r != string(b) {
+						a.Value = slog.StringValue(r)
+					}
 				}
 			}
 			return a

@@ -5,9 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -170,46 +168,5 @@ func TestJobName(t *testing.T) {
 func TestTemplateNeedsWorkerContainer(t *testing.T) {
 	if _, err := LoadTemplate("testdata/missing.yaml"); err == nil {
 		t.Fatal("expected error")
-	}
-}
-
-func TestMetrics(t *testing.T) {
-	d, c := newDispatcher(t, 0)
-	ctx := context.Background()
-	done := metav1.NewTime(time.Unix(1_700_000_000, 0))
-	for _, j := range []struct {
-		name, pb string
-		cond     batchv1.JobConditionType
-	}{
-		{"a", "trivy", batchv1.JobComplete},
-		{"b", "trivy", batchv1.JobFailed},
-		{"c", "trivy", ""},
-		{"d", "triage", ""},
-	} {
-		job := d.build(j.pb, "", nil)
-		job.Name = j.name
-		if j.cond != "" {
-			job.Status.Conditions = []batchv1.JobCondition{{Type: j.cond, Status: corev1.ConditionTrue}}
-			job.Status.CompletionTime = &done
-		}
-		if _, err := c.BatchV1().Jobs("heraion").Create(ctx, job, metav1.CreateOptions{}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want := `
-# HELP heraion_job_last_success_timestamp_seconds Completion time of the newest succeeded worker Job per playbook, e.g. to alert when a schedule stops succeeding.
-# TYPE heraion_job_last_success_timestamp_seconds gauge
-heraion_job_last_success_timestamp_seconds{playbook="trivy"} 1.7e+09
-# HELP heraion_jobs Worker Jobs by playbook and status (active, succeeded, failed). Finished Jobs count until ttlSecondsAfterFinished removes them.
-# TYPE heraion_jobs gauge
-heraion_jobs{playbook="triage",status="active"} 1
-heraion_jobs{playbook="triage",status="failed"} 0
-heraion_jobs{playbook="triage",status="succeeded"} 0
-heraion_jobs{playbook="trivy",status="active"} 1
-heraion_jobs{playbook="trivy",status="failed"} 1
-heraion_jobs{playbook="trivy",status="succeeded"} 1
-`
-	if err := testutil.CollectAndCompare(d.Metrics(), strings.NewReader(want)); err != nil {
-		t.Error(err)
 	}
 }

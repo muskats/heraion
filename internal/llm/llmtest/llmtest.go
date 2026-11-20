@@ -8,9 +8,46 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
-
-	"github.com/muskats/heraion/internal/llm"
 )
+
+// Request is a recorded chat-completions request.
+type Request struct {
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+	Tools    []struct {
+		Function struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+		} `json:"function"`
+	} `json:"tools"`
+	Temperature *float64 `json:"temperature"`
+}
+
+// Message is a recorded chat message.
+type Message struct {
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"` // a string or content parts
+	ToolCallID string          `json:"tool_call_id"`
+	ToolCalls  []struct {
+		ID       string                           `json:"id"`
+		Function struct{ Name, Arguments string } `json:"function"`
+	} `json:"tool_calls"`
+}
+
+// Text returns the message text, joining content parts, or "".
+func (m Message) Text() string {
+	var s string
+	if json.Unmarshal(m.Content, &s) == nil {
+		return s
+	}
+	var parts []struct{ Text string }
+	_ = json.Unmarshal(m.Content, &parts)
+	for _, p := range parts {
+		s += p.Text
+	}
+	return s
+}
 
 // Turn is one scripted model response: either tool calls or final text.
 type Turn struct {
@@ -32,7 +69,7 @@ type Server struct {
 	*httptest.Server
 	mu       sync.Mutex
 	turns    []Turn
-	Requests []llm.ChatRequest
+	Requests []Request
 	Auth     []string
 }
 
@@ -52,7 +89,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	var req llm.ChatRequest
+	var req Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -72,7 +109,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 
 	if turn.Status != 0 {
 		w.Header().Set("Retry-After", "0")
-		http.Error(w, `{"error":"scripted"}`, turn.Status)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(turn.Status)
+		_, _ = w.Write([]byte(`{"error":{"message":"scripted","type":"test"}}`))
 		return
 	}
 	msg := map[string]any{"role": "assistant", "content": nil}

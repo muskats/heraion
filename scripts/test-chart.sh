@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Helm chart checks: lint, helm-unittest, the chart <-> binary cross-check,
-# kubeconform against several Kubernetes versions, and values the schema or
-# templates must reject.
+# Helm chart checks: lint, helm-unittest (also the values that must be
+# rejected, tests/reject_test.yaml), the chart <-> binary cross-check and
+# kubeconform against several Kubernetes versions.
 #
 # Env:
 #   SKIP_DEPS=1      do not run `helm dependency build` (subcharts already in charts/)
@@ -20,7 +20,8 @@ base=(--set llm.baseURL=http://llm.example/v1 --set llm.model=m)
 if [[ "${SKIP_DEPS:-}" == 1 ]]; then
 	warn "helm dependency build skipped (SKIP_DEPS=1)"
 else
-	bash "$ROOT/scripts/chart-deps.sh"
+	log "helm dependency build"
+	helm dependency build "$CHART_DIR" >/dev/null
 fi
 
 log "helm lint"
@@ -66,23 +67,3 @@ for v in $KUBE_VERSIONS; do
 		die "kubeconform failed for Kubernetes $v"
 done
 ok "kubeconform"
-
-log "values that must be rejected"
-reject() {
-	local why=$1
-	shift
-	if helm template t "$CHART_DIR" "${base[@]}" "$@" >/dev/null 2>&1; then
-		die "accepted, but should be rejected: $why ($*)"
-	fi
-	ok "rejects: $why"
-}
-reject "no llm.model" --set llm.model=
-reject "unknown top-level key" --set notAKey=1
-reject "unknown guardrail key" --set playbooks.trivy-remediate.enabled=true --set playbooks.trivy-remediate.guardrails.maxPR=1
-reject "reopenAfter is not a duration" --set playbooks.trivy-remediate.enabled=true --set playbooks.trivy-remediate.guardrails.reopenAfter=week
-reject "unknown mode" --set mode=reckless
-reject "invalid namespace name" --set 'namespaces={Shop_1}'
-reject "unknown playbook mode" --set playbooks.trivy-remediate.enabled=true --set playbooks.trivy-remediate.mode=reckless
-reject "maxBodyBytes over the Secret limit" --set gateway.maxBodyBytes=2000000
-reject "webhook playbook without a hook" --set playbooks.alertmanager-triage.enabled=true
-reject "csiKey without secrets.csi" --set llm.apiKey.csiKey=llm-api-key --set playbooks.trivy-remediate.enabled=true

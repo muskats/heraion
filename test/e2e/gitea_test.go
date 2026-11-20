@@ -97,7 +97,11 @@ func (g *gitea) handle(w http.ResponseWriter, r *http.Request) {
 			state = "open"
 		}
 		var out []map[string]any
-		for _, pr := range g.prs[repo] {
+		// Newest first and at most 50 per page, as Gitea's default
+		// MAX_RESPONSE_ITEMS does.
+		prs := g.prs[repo]
+		for i := len(prs) - 1; i >= 0; i-- {
+			pr := prs[i]
 			if state == "all" || pr["state"] == state {
 				out = append(out, pr)
 			}
@@ -110,6 +114,7 @@ func (g *gitea) handle(w http.ResponseWriter, r *http.Request) {
 		if limit < 1 {
 			limit = 30
 		}
+		limit = min(limit, 50)
 		lo, hi := min((page-1)*limit, len(out)), min(page*limit, len(out))
 		send(w, http.StatusOK, append([]map[string]any{}, out[lo:hi]...))
 	case http.MethodPost:

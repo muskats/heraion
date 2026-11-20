@@ -93,6 +93,9 @@ func TestMatchPath(t *testing.T) {
 		{"deploy/*.yaml", "deploy/x/a.yaml", false},
 		{"a/**/b", "a/b", true},
 		{"a/**/b", "a/x/y/b", true},
+		{"deploy/**", "deploy", true},
+		{"deploy/**", "deploy/a/values.yaml", true},
+		{".GitHub/Workflows/**", ".github/workflows/ci.yml", true},
 		{"[bad", "[bad", false},
 	}
 	for _, c := range cases {
@@ -120,7 +123,8 @@ func TestNewPatterns(t *testing.T) {
 
 func TestFindSecretLines(t *testing.T) {
 	r := NewRedactor("supersecret-token")
-	patch := "--- a/f\n+++ b/f\n context ghp_abcdefghijklmnopqrstuvwxyz0123\n-old supersecret-token\n+image: app:2\n+token: supersecret-token\n"
+	patch := gitPatch(t, files("f", "context ghp_abcdefghijklmnopqrstuvwxyz0123\nold supersecret-token\n"),
+		files("f", "context ghp_abcdefghijklmnopqrstuvwxyz0123\nimage: app:2\ntoken: supersecret-token\n"))
 	got := r.FindSecretLines(patch)
 	if len(got) != 1 || got[0] != "+token: [REDACTED]" {
 		t.Fatalf("got %q", got)

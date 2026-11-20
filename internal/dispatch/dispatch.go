@@ -251,9 +251,19 @@ func (d *Dispatcher) active(ctx context.Context) (int, error) {
 	}
 	n := 0
 	for i := range jobs {
-		if jobStatus(&jobs[i]) == StatusActive {
+		if !finished(&jobs[i]) {
 			n++
 		}
 	}
 	return n, nil
+}
+
+// finished reports whether the Job has a Complete or Failed condition.
+func finished(j *batchv1.Job) bool {
+	for _, c := range j.Status.Conditions {
+		if c.Status == corev1.ConditionTrue && (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) {
+			return true
+		}
+	}
+	return false
 }

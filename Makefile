@@ -23,7 +23,7 @@ image:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) .
 
 chart-deps:
-	scripts/chart-deps.sh
+	helm dependency build charts/heraion
 
 clean:
 	rm -rf bin build .tools

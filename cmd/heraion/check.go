@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,8 +13,8 @@ import (
 	"time"
 
 	"github.com/muskats/heraion/internal/config"
-	"github.com/muskats/heraion/internal/confluence"
 	"github.com/muskats/heraion/internal/jira"
+	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/mcp"
 	"github.com/muskats/heraion/internal/playbook"
 	"github.com/muskats/heraion/internal/secret"
@@ -28,8 +29,7 @@ import (
 //	warn  secret     HERAION_GIT_TOKEN not set
 //	ok    mcp        k8s: 18 tools
 //	ok    llm        GET https://api.openai.com/v1/models: 200
-//	ok    jira       https://acme.atlassian.net (cloud), create in [OPS], read [CHG OPS]
-//	ok    confluence https://acme.atlassian.net/wiki (cloud), spaces [RUNBOOKS]
+//	ok    jira       create_issue through atlassian, in [OPS]
 func cmdCheck(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	cfgPath := configFlag(fs)
@@ -71,12 +71,6 @@ func cmdCheck(ctx context.Context, args []string) error {
 	default:
 		c.secret(cfg.LLM.APIKey, false, "llm")
 		c.secret(cfg.Git.Token, false, "git")
-		if cfg.Jira != nil {
-			c.secret(cfg.Jira.Token, true, "jira")
-		}
-		if cfg.Confluence != nil {
-			c.secret(cfg.Confluence.Token, true, "confluence")
-		}
 		for name, m := range cfg.MCPServers {
 			for h, src := range m.SecretHeaders {
 				c.secret(src, true, "mcp "+name+" "+h)
@@ -96,24 +90,13 @@ func cmdCheck(ctx context.Context, args []string) error {
 				c.warn("mcp", err.Error()+" (optional: runs continue without it)")
 			default:
 				c.ok("mcp", fmt.Sprintf("%s: %d tools", name, len(tools)))
+				if cfg.Jira != nil && name == cfg.Jira.Server {
+					c.jiraTools(name, tools, cfg.Jira.Projects)
+				}
 				_ = sess.Close()
 			}
 		}
 		c.llm(ctx, cfg)
-		if cfg.Jira != nil {
-			if err := jira.NewClient(cfg.Jira).Myself(ctx); err != nil {
-				c.fail("jira", err.Error())
-			} else {
-				c.ok("jira", fmt.Sprintf("%s (%s), create in %v, read %v", cfg.Jira.URL, cfg.Jira.Deployment, cfg.Jira.Projects, cfg.Jira.ReadSpaces))
-			}
-		}
-		if cfg.Confluence != nil {
-			if err := confluence.NewClient(cfg.Confluence).Myself(ctx); err != nil {
-				c.fail("confluence", err.Error())
-			} else {
-				c.ok("confluence", fmt.Sprintf("%s (%s), spaces %v", cfg.Confluence.URL, cfg.Confluence.Deployment, cfg.Confluence.Spaces))
-			}
-		}
 	}
 	return c.result()
 }
@@ -182,4 +165,35 @@ func (c *checker) llm(ctx context.Context, cfg *config.Config) {
 	default:
 		c.warn("llm", msg+" (endpoint may not implement /models)")
 	}
+}
+
+// jiraTools fails unless the server offers the tools and arguments
+// create_issue calls, e.g. after an mcp-atlassian upgrade renamed one.
+func (c *checker) jiraTools(server string, tools []llm.Tool, projects []string) {
+	var missing []string
+	for tool, args := range jira.RequiredArgs {
+		var schema struct{ Properties map[string]json.RawMessage }
+		found := false
+		for _, t := range tools {
+			if t.Name() == server+"."+tool {
+				found = true
+				_ = json.Unmarshal(t.Schema(), &schema)
+			}
+		}
+		if !found {
+			missing = append(missing, tool)
+			continue
+		}
+		for _, a := range args {
+			if _, ok := schema.Properties[a]; !ok {
+				missing = append(missing, tool+"."+a)
+			}
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		c.fail("jira", fmt.Sprintf("%s lacks %v; create_issue needs mcp-atlassian 0.24 or later with these tools enabled", server, missing))
+		return
+	}
+	c.ok("jira", fmt.Sprintf("create_issue through %s, in %v", server, projects))
 }

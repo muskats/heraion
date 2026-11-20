@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/go-git/go-git/v5/plumbing/format/diff"
 )
 
 // SafePaths are the files safe mode may write when the playbook sets no
@@ -40,8 +42,7 @@ func matchAny(pats []string, p string) bool {
 	return false
 }
 
-// CheckNonBreaking fails unless every change in the unified diff patch is
-// non-breaking:
+// CheckNonBreaking fails unless every change in the patch is non-breaking:
 //
 //	lockfile                      any change
 //	ignore file (.trivyignore)    added lines only
@@ -52,9 +53,9 @@ func matchAny(pats []string, p string) bool {
 //
 // New, deleted, renamed and binary files are refused, except ignore files
 // and lockfiles, which may be new.
-func CheckNonBreaking(patch string) error {
-	for _, f := range parsePatch(patch) {
-		if err := f.check(); err != nil {
+func CheckNonBreaking(patch diff.Patch) error {
+	for _, fp := range patch.FilePatches() {
+		if err := toFileDiff(fp).check(); err != nil {
 			return fmt.Errorf("not a non-breaking change (safe mode): %w", err)
 		}
 	}
@@ -112,80 +113,50 @@ func (f *fileDiff) check() error {
 	return nil
 }
 
-// parsePatch reads a git unified diff, e.g. from go-git's Patch.String().
-func parsePatch(patch string) []*fileDiff {
-	var (
-		out      []*fileDiff
-		f        *fileDiff
-		inHunk   bool
-		cur      *block
-		flushBlk = func() {
-			if f != nil && cur != nil && (len(cur.del) > 0 || len(cur.add) > 0) {
-				f.blocks = append(f.blocks, *cur)
-			}
-			cur = nil
+// toFileDiff groups a go-git file patch into blocks: each run of deleted
+// lines with the added lines right after it.
+func toFileDiff(fp diff.FilePatch) *fileDiff {
+	from, to := fp.Files()
+	f := &fileDiff{binary: fp.IsBinary()}
+	if from != nil {
+		f.oldPath = from.Path()
+	}
+	if to != nil {
+		f.newPath = to.Path()
+	}
+	var cur *block
+	flush := func() {
+		if cur != nil {
+			f.blocks = append(f.blocks, *cur)
 		}
-	)
-	for _, l := range strings.Split(patch, "\n") {
-		if strings.HasPrefix(l, "diff --git ") {
-			flushBlk()
-			f, inHunk = &fileDiff{}, false
-			out = append(out, f)
-			// Paths come from ---/+++; this header alone has them for binary files.
-			if a, b, ok := strings.Cut(strings.TrimPrefix(l, "diff --git "), " b/"); ok {
-				f.oldPath, f.newPath = strings.TrimPrefix(a, "a/"), b
+		cur = nil
+	}
+	for _, c := range fp.Chunks() {
+		switch c.Type() {
+		case diff.Delete:
+			if cur != nil && len(cur.add) > 0 {
+				flush()
 			}
-			continue
-		}
-		if f == nil {
-			continue
-		}
-		if !inHunk {
-			switch {
-			case strings.HasPrefix(l, "new file mode"):
-				f.oldPath = ""
-			case strings.HasPrefix(l, "deleted file mode"):
-				f.newPath = ""
-			case strings.HasPrefix(l, "Binary files") || strings.HasPrefix(l, "GIT binary patch"):
-				f.binary = true
-			case strings.HasPrefix(l, "--- "):
-				f.oldPath = diffPath(l[4:], "a/")
-			case strings.HasPrefix(l, "+++ "):
-				f.newPath = diffPath(l[4:], "b/")
-			case strings.HasPrefix(l, "@@"):
-				inHunk = true
-			}
-			continue
-		}
-		switch {
-		case strings.HasPrefix(l, "@@"):
-			flushBlk()
-		case strings.HasPrefix(l, "-"):
-			if cur == nil || len(cur.add) > 0 {
-				flushBlk()
-				cur = &block{}
-			}
-			cur.del = append(cur.del, l[1:])
-		case strings.HasPrefix(l, "+"):
 			if cur == nil {
 				cur = &block{}
 			}
-			cur.add = append(cur.add, l[1:])
-		case strings.HasPrefix(l, `\`): // "\ No newline at end of file"
+			cur.del = append(cur.del, chunkLines(c)...)
+		case diff.Add:
+			if cur == nil {
+				cur = &block{}
+			}
+			cur.add = append(cur.add, chunkLines(c)...)
 		default:
-			flushBlk()
+			flush()
 		}
 	}
-	flushBlk()
-	return out
+	flush()
+	return f
 }
 
-func diffPath(s, prefix string) string {
-	s = strings.TrimSpace(s)
-	if s == "/dev/null" {
-		return ""
-	}
-	return strings.TrimPrefix(s, prefix)
+// chunkLines splits a chunk into lines, e.g. "a\nb\n" -> [a b].
+func chunkLines(c diff.Chunk) []string {
+	return strings.Split(strings.TrimSuffix(c.Content(), "\n"), "\n")
 }
 
 // versionRE matches "3.18", "v1.2.3", "3.1.4-r5", "20.11-alpine3.19" and

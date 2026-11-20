@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // DecodeArgs unmarshals a tool's JSON arguments into v, e.g.
@@ -15,6 +17,36 @@ func DecodeArgs(raw json.RawMessage, v any) error {
 		return fmt.Errorf("invalid arguments: %w", err)
 	}
 	return nil
+}
+
+// SchemaFor returns the JSON Schema of the arguments struct T, with enums
+// set on some properties, e.g.
+//
+//	type args struct {
+//		Repo string `json:"repo" jsonschema:"Repository as owner/name"`
+//		Path string `json:"path,omitempty"` // omitempty: optional
+//	}
+//	llm.SchemaFor[args](map[string][]string{"repo": {"acme/web"}})
+func SchemaFor[T any](enums map[string][]string) string {
+	s, err := jsonschema.For[T](nil)
+	if err != nil {
+		panic(fmt.Sprintf("schema for %T: %v", *new(T), err)) // a bug in the struct tags
+	}
+	for k, vals := range enums {
+		p := s.Properties[k]
+		if p == nil {
+			panic(fmt.Sprintf("schema for %T: no property %q", *new(T), k))
+		}
+		p.Enum = make([]any, len(vals)) // empty, never null
+		for i, v := range vals {
+			p.Enum[i] = v
+		}
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 // FuncTool is a Tool backed by a function, used by the built-in tools, e.g.

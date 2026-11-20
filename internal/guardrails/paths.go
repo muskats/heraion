@@ -2,9 +2,10 @@ package guardrails
 
 import (
 	"fmt"
-	"path"
 	"slices"
 	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // DefaultDenyPaths are files a run may never write: CI definitions and code
@@ -48,38 +49,16 @@ func ValidatePathPattern(pat string) error {
 	if strings.TrimSpace(pat) == "" {
 		return fmt.Errorf("empty path pattern")
 	}
-	for _, seg := range strings.Split(pat, "/") {
-		if _, err := path.Match(seg, ""); err != nil {
-			return fmt.Errorf("path pattern %q: %w", pat, err)
-		}
+	if !doublestar.ValidatePattern(pat) {
+		return fmt.Errorf("path pattern %q is malformed", pat)
 	}
 	return nil
 }
 
-// MatchPath matches a slash-separated path against pattern, ignoring case.
-// "**" matches zero or more segments; other segments use path.Match. A
-// malformed segment never matches.
+// MatchPath matches a slash-separated path against a doublestar pattern,
+// ignoring case, e.g. "deploy/**" matches "deploy/a/values.yaml". A
+// malformed pattern never matches.
 func MatchPath(pattern, name string) bool {
-	return matchSegs(strings.Split(strings.ToLower(pattern), "/"), strings.Split(strings.ToLower(name), "/"))
-}
-
-func matchSegs(pat, name []string) bool {
-	for len(pat) > 0 {
-		if pat[0] == "**" {
-			for i := 0; i <= len(name); i++ {
-				if matchSegs(pat[1:], name[i:]) {
-					return true
-				}
-			}
-			return false
-		}
-		if len(name) == 0 {
-			return false
-		}
-		if ok, err := path.Match(pat[0], name[0]); err != nil || !ok {
-			return false
-		}
-		pat, name = pat[1:], name[1:]
-	}
-	return len(name) == 0
+	ok, err := doublestar.Match(strings.ToLower(pattern), strings.ToLower(name))
+	return err == nil && ok
 }

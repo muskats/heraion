@@ -224,7 +224,11 @@
       "type": "boolean"
     },
     "mode": {
-      "enum": ["safe", "full", "yolo"]
+      "enum": [
+        "safe",
+        "full",
+        "yolo"
+      ]
     },
     "playbooks": {
       "type": "object",
@@ -290,7 +294,11 @@
             ]
           },
           "mode": {
-            "enum": ["safe", "full", "yolo"]
+            "enum": [
+              "safe",
+              "full",
+              "yolo"
+            ]
           },
           "guardrails": {
             "type": "object",
@@ -313,15 +321,21 @@
               },
               "writePaths": {
                 "type": "array",
-                "items": { "type": "string", "minLength": 1 }
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
               },
               "denyPaths": {
                 "type": "array",
-                "items": { "type": "string", "minLength": 1 }
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
               },
               "reopenAfter": {
                 "type": "string",
-                "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$|^0$"
+                "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$|^0$"
               }
             }
           },
@@ -330,20 +344,6 @@
             "items": {
               "type": "string",
               "pattern": "^[A-Z][A-Z0-9_]*$"
-            }
-          },
-          "jiraReadSpaces": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^[A-Z][A-Z0-9_]*$"
-            }
-          },
-          "confluenceSpaces": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "pattern": "^~?[A-Za-z0-9_]+$"
             }
           }
         },
@@ -505,15 +505,30 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "port": { "type": "integer", "minimum": 1, "maximum": 65535, "not": { "const": 8080 } },
+            "enabled": {
+              "type": "boolean"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "not": {
+                "const": 8080
+              }
+            },
             "serviceMonitor": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "interval": { "type": "string" },
-                "labels": { "type": "object" }
+                "enabled": {
+                  "type": "boolean"
+                },
+                "interval": {
+                  "type": "string"
+                },
+                "labels": {
+                  "type": "object"
+                }
               }
             }
           }
@@ -1174,19 +1189,6 @@
         "enabled": {
           "type": "boolean"
         },
-        "url": {
-          "type": "string"
-        },
-        "deployment": {
-          "enum": [
-            "",
-            "cloud",
-            "datacenter"
-          ]
-        },
-        "email": {
-          "type": "string"
-        },
         "projects": {
           "type": "array",
           "items": {
@@ -1205,43 +1207,9 @@
             "pattern": "^\\S+$"
           }
         },
-        "token": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "serviceAccountToken": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "audience": {
-                  "type": "string"
-                },
-                "expirationSeconds": {
-                  "type": "integer",
-                  "minimum": 600
-                }
-              }
-            },
-            "csiKey": {
-              "type": "string"
-            },
-            "existingSecret": {
-              "type": "string"
-            },
-            "key": {
-              "type": "string"
-            },
-            "value": {
-              "type": "string"
-            }
-          }
-        },
-        "readSpaces": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[A-Z][A-Z0-9_]*$"
-          }
+        "server": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$"
         }
       },
       "if": {
@@ -1256,91 +1224,7 @@
       },
       "then": {
         "properties": {
-          "url": {
-            "minLength": 1
-          }
-        }
-      }
-    },
-    "confluence": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "url": {
-          "type": "string"
-        },
-        "deployment": {
-          "enum": [
-            "",
-            "cloud",
-            "datacenter"
-          ]
-        },
-        "email": {
-          "type": "string"
-        },
-        "spaces": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^~?[A-Za-z0-9_]+$"
-          }
-        },
-        "maxPageBytes": {
-          "type": "integer",
-          "minimum": 1024
-        },
-        "token": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "serviceAccountToken": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "audience": {
-                  "type": "string"
-                },
-                "expirationSeconds": {
-                  "type": "integer",
-                  "minimum": 600
-                }
-              }
-            },
-            "csiKey": {
-              "type": "string"
-            },
-            "existingSecret": {
-              "type": "string"
-            },
-            "key": {
-              "type": "string"
-            },
-            "value": {
-              "type": "string"
-            }
-          }
-        }
-      },
-      "if": {
-        "properties": {
-          "enabled": {
-            "const": true
-          }
-        },
-        "required": [
-          "enabled"
-        ]
-      },
-      "then": {
-        "properties": {
-          "url": {
-            "minLength": 1
-          },
-          "spaces": {
+          "projects": {
             "minItems": 1
           }
         }

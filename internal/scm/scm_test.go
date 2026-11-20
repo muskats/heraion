@@ -461,7 +461,7 @@ func TestPushToBase(t *testing.T) {
 	if err := r.WriteFile("Dockerfile", []byte("FROM alpine:3.20\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.Commit("heraion/x/bump", "bump"); err != nil {
+	if _, err := r.Commit("heraion/x/bump", "bump"); err != nil {
 		t.Fatal(err)
 	}
 	for i := range 2 { // the second push has nothing new and succeeds

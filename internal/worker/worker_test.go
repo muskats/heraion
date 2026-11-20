@@ -14,9 +14,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/muskats/heraion/internal/config"
-	"github.com/muskats/heraion/internal/confluence"
 	"github.com/muskats/heraion/internal/guardrails"
-	"github.com/muskats/heraion/internal/jira"
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/llm/llmtest"
 	"github.com/muskats/heraion/internal/playbook"
@@ -49,9 +47,7 @@ func pb(t *testing.T, src string) *playbook.Playbook {
 }
 
 func fastClient(url string) llm.Chatter {
-	c := llm.NewClient(url, secret.Static("sk-live-abcdef"))
-	c.RetryBase = time.Millisecond
-	return c
+	return llm.NewClient(url, secret.Static("sk-live-abcdef"))
 }
 
 func TestRunOpensPR(t *testing.T) {
@@ -194,47 +190,102 @@ func redactor(c *config.Config) *guardrails.Redactor {
 	return r
 }
 
-type fakeJira struct {
-	created []jira.NewIssue
-	jql     []string
+// fakeAtlassian is an mcp-atlassian server with the tools create_issue uses.
+func fakeAtlassian(t *testing.T, created *[]string) string {
+	srv := sdk.NewServer(&sdk.Implementation{Name: "mcp-atlassian", Version: "0.24.7"}, nil)
+	type searchArgs struct { // as in mcp-atlassian v0.24.7
+		JQL    string `json:"jql"`
+		Limit  int    `json:"limit,omitempty"`
+		Fields string `json:"fields,omitempty"`
+	}
+	type createArgs struct {
+		ProjectKey       string `json:"project_key"`
+		Summary          string `json:"summary"`
+		IssueType        string `json:"issue_type"`
+		Description      string `json:"description,omitempty"`
+		AdditionalFields string `json:"additional_fields,omitempty"`
+	}
+	type getArgs struct {
+		IssueKey string `json:"issue_key"`
+	}
+	sdk.AddTool(srv, &sdk.Tool{Name: "jira_search"}, func(context.Context, *sdk.CallToolRequest, searchArgs) (*sdk.CallToolResult, any, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: `{"issues":[]}`}}}, nil, nil
+	})
+	sdk.AddTool(srv, &sdk.Tool{Name: "jira_create_issue"}, func(_ context.Context, _ *sdk.CallToolRequest, a createArgs) (*sdk.CallToolResult, any, error) {
+		*created = append(*created, a.ProjectKey+": "+a.Summary)
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: `{"issue":{"key":"OPS-7","url":"https://acme.atlassian.net/browse/OPS-7"}}`}}}, nil, nil
+	})
+	sdk.AddTool(srv, &sdk.Tool{Name: "jira_get_issue"}, func(context.Context, *sdk.CallToolRequest, getArgs) (*sdk.CallToolResult, any, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: `{"key":"CHG-42"}`}}}, nil, nil
+	})
+	ts := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, nil))
+	t.Cleanup(ts.Close)
+	return ts.URL
 }
 
-func (f *fakeJira) Create(_ context.Context, in jira.NewIssue) (*jira.Issue, error) {
-	f.created = append(f.created, in)
-	return &jira.Issue{Key: "OPS-7", URL: "https://acme.atlassian.net/browse/OPS-7"}, nil
-}
-func (f *fakeJira) FindOpen(context.Context, string) (*jira.Issue, error) { return nil, nil }
-
-func TestRunCreatesJiraIssue(t *testing.T) {
+func TestRunCreatesJiraIssueThroughMCP(t *testing.T) {
 	srv := llmtest.New(t,
 		llmtest.Turn{Calls: []llmtest.Call{{Name: "create_issue", Args: map[string]string{
 			"project": "OPS", "summary": "payments-api OOMKilled", "description": "14 restarts", "key": "oom-payments"}}}},
 		llmtest.Turn{Final: "Opened OPS-7."},
 	)
+	var created []string
 	c := cfg(t, srv.BaseURL(), "file:///unused")
 	c.Repos = nil
-	c.Jira = &config.Jira{URL: "https://acme.atlassian.net", Deployment: config.DeploymentCloud, Projects: []string{"OPS", "SEC"}, IssueType: "Task"}
-	fj := &fakeJira{}
+	c.MCPServers = map[string]*config.MCPServer{"atlassian": {URL: fakeAtlassian(t, &created), Transport: "streamable",
+		Timeout: config.Duration{Duration: 5 * time.Second}}}
+	c.Jira = &config.Jira{Server: "atlassian", Projects: []string{"OPS", "SEC"}, IssueType: "Task"}
 	rep, err := worker.Run(context.Background(), worker.Options{
-		Config:   c,
-		Playbook: pb(t, "name: triage\ntrigger: {webhook: alertmanager}\ntools: [create_issue]\njiraProjects: [OPS]\noutput: report\nprompt: p\n"),
-		LLM:      fastClient(srv.BaseURL()),
-		Jira:     fj,
-		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: c,
+		Playbook: pb(t, "name: triage\ntrigger: {webhook: alertmanager}\n"+
+			"tools: [create_issue, atlassian.*]\njiraProjects: [OPS]\noutput: report\nprompt: p\n"),
+		LLM: fastClient(srv.BaseURL()),
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fj.created) != 1 || len(rep.Issues) != 1 || rep.Issues[0].Key != "OPS-7" {
-		t.Fatalf("created=%v report=%+v", fj.created, rep.Issues)
+	if len(created) != 1 || len(rep.Issues) != 1 || rep.Issues[0].Key != "OPS-7" {
+		t.Fatalf("created=%v report=%+v", created, rep.Issues)
+	}
+	// The raw jira_create_issue is hidden: issues go through the guard only.
+	var names []string
+	var schema string
+	for _, tl := range srv.Requests[0].Tools {
+		names = append(names, tl.Function.Name)
+		if tl.Function.Name == "create_issue" {
+			schema = string(tl.Function.Parameters)
+		}
+	}
+	if strings.Join(names, ",") != "atlassian__jira_get_issue,atlassian__jira_search,create_issue" {
+		t.Errorf("tools %v", names)
 	}
 	// jiraProjects narrows the enum offered to the model to OPS.
-	schema := string(srv.Requests[0].Tools[0].Function.Parameters)
 	if !strings.Contains(schema, `"enum":["OPS"]`) {
 		t.Errorf("project enum not narrowed: %s", schema)
 	}
 	if sys := srv.Requests[0].Messages[0].Text(); !strings.Contains(sys, "create_issue, in: OPS") {
 		t.Errorf("system prompt does not mention Jira: %s", sys)
+	}
+}
+
+func TestCreateIssueNeedsNoAtlassianPattern(t *testing.T) {
+	// tools: [create_issue] alone still connects the jira server.
+	srv := llmtest.New(t, llmtest.Turn{Final: "ok"})
+	var created []string
+	c := cfg(t, srv.BaseURL(), "file:///unused")
+	c.Repos = nil
+	c.MCPServers = map[string]*config.MCPServer{"atlassian": {URL: fakeAtlassian(t, &created), Transport: "streamable",
+		Timeout: config.Duration{Duration: 5 * time.Second}}}
+	c.Jira = &config.Jira{Server: "atlassian", Projects: []string{"OPS"}, IssueType: "Task"}
+	if _, err := worker.Run(context.Background(), worker.Options{
+		Config: c, Playbook: pb(t, "name: x\ntrigger: {manual: true}\ntools: [create_issue]\noutput: report\nprompt: p\n"),
+		LLM: fastClient(srv.BaseURL()), Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if tools := srv.Requests[0].Tools; len(tools) != 1 || tools[0].Function.Name != "create_issue" {
+		t.Fatalf("tools %+v", tools)
 	}
 }
 
@@ -251,58 +302,6 @@ func TestNoJiraToolWithoutConfig(t *testing.T) {
 	}
 	if tools := srv.Requests[0].Tools; len(tools) != 0 {
 		t.Fatalf("create_issue offered without jira config: %v", tools)
-	}
-}
-
-func (f *fakeJira) Search(_ context.Context, jql string, _ int) ([]jira.Summary, error) {
-	f.jql = append(f.jql, jql)
-	return []jira.Summary{{Key: "CHG-42", Type: "Change", Status: "Done", Updated: "2026-11-18T10:02", Summary: "Upgrade ingress-nginx"}}, nil
-}
-func (f *fakeJira) Get(context.Context, string, int) (*jira.Detail, error) { return nil, nil }
-
-type fakeConfluence struct{}
-
-func (fakeConfluence) Search(context.Context, string, int) ([]confluence.Hit, error) { return nil, nil }
-func (fakeConfluence) GetPage(context.Context, string) (*confluence.Page, error)     { return nil, nil }
-
-func TestRunReadsJiraAndConfluence(t *testing.T) {
-	srv := llmtest.New(t,
-		llmtest.Turn{Calls: []llmtest.Call{{Name: "jira_search", Args: map[string]any{"days": 2}}}},
-		llmtest.Turn{Final: "CHG-42 changed ingress yesterday."},
-	)
-	c := cfg(t, srv.BaseURL(), "file:///unused")
-	c.Repos = nil
-	c.Jira = &config.Jira{URL: "https://acme.atlassian.net", Deployment: config.DeploymentCloud, ReadSpaces: []string{"CHG", "OPS"}}
-	c.Confluence = &config.Confluence{URL: "https://acme.atlassian.net/wiki", Deployment: config.DeploymentCloud, Spaces: []string{"RUN"}}
-	fj := &fakeJira{}
-	rep, err := worker.Run(context.Background(), worker.Options{
-		Config:     c,
-		Playbook:   pb(t, "name: triage\ntrigger: {manual: true}\ntools: [jira_*, confluence_*, create_issue]\njiraReadSpaces: [CHG]\noutput: report\nprompt: p\n"),
-		LLM:        fastClient(srv.BaseURL()),
-		Jira:       fj,
-		Confluence: fakeConfluence{},
-		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	if err != nil || rep.Final != "CHG-42 changed ingress yesterday." {
-		t.Fatalf("%v %v", rep, err)
-	}
-	var names []string
-	for _, tl := range srv.Requests[0].Tools {
-		names = append(names, tl.Function.Name)
-	}
-	// No jira.projects configured, so no create_issue even though the playbook allows it.
-	if strings.Join(names, ",") != "confluence_get_page,confluence_search,jira_get_issue,jira_search" {
-		t.Errorf("tools %v", names)
-	}
-	if len(fj.jql) != 1 || !strings.HasPrefix(fj.jql[0], `project in ("CHG") AND updated >= -2d`) {
-		t.Errorf("jiraReadSpaces not applied: %v", fj.jql)
-	}
-	sys := srv.Requests[0].Messages[0].Text()
-	if !strings.Contains(sys, "recent issues in: CHG.") || !strings.Contains(sys, "recent pages in: RUN") {
-		t.Errorf("system prompt: %s", sys)
-	}
-	if res := srv.Requests[1].Messages[3].Text(); !strings.Contains(res, "CHG-42 | Change | Done") {
-		t.Errorf("tool result %q", res)
 	}
 }
 

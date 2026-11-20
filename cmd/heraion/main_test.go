@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/muskats/heraion/internal/guardrails"
+	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/llm/llmtest"
 )
 
@@ -62,9 +63,11 @@ func TestEnvOr(t *testing.T) {
 func TestLoggerMasksSecrets(t *testing.T) {
 	_, errOut := capture(t)
 	log := newLogger("debug", guardrails.NewRedactor("configured-secret-1"))
-	log.Info("x", "msg", "token ghp_abcdefghijklmnopqrstuvwxyz0123", "err", errors.New("auth configured-secret-1 failed"))
+	log.Info("x", "msg", "token ghp_abcdefghijklmnopqrstuvwxyz0123", "err", errors.New("auth configured-secret-1 failed"),
+		"prs", []struct{ Title string }{{"leak configured-secret-1"}}, "steps", []int{1, 2})
 	got := errOut.String()
-	if strings.Contains(got, "ghp_") || strings.Contains(got, "configured-secret-1") || strings.Count(got, "[REDACTED]") != 2 {
+	if strings.Contains(got, "ghp_") || strings.Contains(got, "configured-secret-1") || strings.Count(got, "[REDACTED]") != 3 ||
+		!strings.Contains(got, `"steps":[1,2]`) {
 		t.Fatalf("not masked: %s", got)
 	}
 	// An unknown level falls back to info.
@@ -75,13 +78,21 @@ func TestLoggerMasksSecrets(t *testing.T) {
 	}
 }
 
-func TestNamespace(t *testing.T) {
-	if ns, _ := namespace("configured"); ns != "configured" {
-		t.Errorf("configured namespace: %s", ns)
+func TestKubeClientNamespace(t *testing.T) {
+	kc := filepath.Join(t.TempDir(), "kubeconfig")
+	os.WriteFile(kc, []byte(`apiVersion: v1
+kind: Config
+clusters: [{name: c, cluster: {server: "https://127.0.0.1:1"}}]
+users: [{name: u, user: {}}]
+contexts: [{name: x, context: {cluster: c, user: u, namespace: from-context}}]
+current-context: x
+`), 0o600)
+	t.Setenv("KUBECONFIG", kc)
+	if _, ns, err := kubeClient("configured"); err != nil || ns != "configured" {
+		t.Errorf("configured namespace: %q %v", ns, err)
 	}
-	t.Setenv("POD_NAMESPACE", "from-env")
-	if ns, _ := namespace(""); ns != "from-env" {
-		t.Errorf("POD_NAMESPACE: %s", ns)
+	if _, ns, err := kubeClient(""); err != nil || ns != "from-context" {
+		t.Errorf("context namespace: %q %v", ns, err)
 	}
 }
 
@@ -198,5 +209,27 @@ func TestServeNeedsJobTemplate(t *testing.T) {
 	err := cmdServe(context.Background(), []string{"--config", setup(t, "http://x", "")})
 	if err == nil || !strings.Contains(err.Error(), "gateway.jobTemplate is required") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCheckJiraToolSchemas(t *testing.T) {
+	tool := func(name, schema string) llm.Tool {
+		return &llm.FuncTool{ToolName: "atlassian." + name, Params: schema}
+	}
+	good := []llm.Tool{
+		tool("jira_search", `{"properties":{"jql":{},"limit":{},"fields":{}}}`),
+		tool("jira_create_issue", `{"properties":{"project_key":{},"summary":{},"issue_type":{},"description":{},"additional_fields":{}}}`),
+	}
+	var out bytes.Buffer
+	c := &checker{out: &out}
+	c.jiraTools("atlassian", good, []string{"OPS"})
+	if c.failed || !strings.Contains(out.String(), "ok    jira       create_issue through atlassian, in [OPS]") {
+		t.Fatalf("good schemas: %s", out.String())
+	}
+	out.Reset()
+	c = &checker{out: &out}
+	c.jiraTools("atlassian", []llm.Tool{tool("jira_search", `{"properties":{"query":{}}}`)}, nil)
+	if !c.failed || !strings.Contains(out.String(), "[jira_create_issue jira_search.fields jira_search.jql jira_search.limit]") {
+		t.Fatalf("drift not reported: %s", out.String())
 	}
 }

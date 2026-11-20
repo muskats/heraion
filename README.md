@@ -121,9 +121,7 @@ Built-in tools:
 |---|---|
 | `repo_list`, `repo_read_file`, `repo_write_file` | Read and edit a clone of an allowed repo |
 | `open_pr` | Commit the edits and open a pull request (in yolo mode: push them) |
-| `create_issue` | Create a Jira issue, see [Jira issues](#jira-issues) |
-| `jira_search`, `jira_get_issue` | Read recent issues in chosen Jira spaces, see [Reading Jira and Confluence](#reading-jira-and-confluence) |
-| `confluence_search`, `confluence_get_page` | Read recent pages in chosen Confluence spaces |
+| `create_issue` | Create a Jira issue through mcp-atlassian, see [Jira and Confluence](#jira-and-confluence) |
 
 MCP tools are named `<server>.<tool>`, so `k8s.*` matches every tool of the `k8s` server.
 
@@ -171,106 +169,54 @@ for example by branch protection or because the branch moved since the clone, th
 goes to `heraion/<playbook>/<key>` as a PR, with the usual duplicate and closed-PR checks. With
 `--dry-run`, yolo logs the commit and its diff instead of pushing.
 
-## Jira issues
+## Jira and Confluence
 
-`create_issue` opens an issue in Jira Cloud or Jira Data Center. Use it for findings that need
-a person, e.g. an alert without a config fix, or a CVE with no fixed version yet.
+Jira and Confluence, Cloud or Data Center, are reached through
+[mcp-atlassian](https://github.com/sooperset/mcp-atlassian) (chart value
+`mcpServers.atlassian`). Its filters bound every tool, reads and writes:
 
 ```yaml
-# config.yaml (the chart writes this from jira.* values)
+# chart values
+mcpServers:
+  atlassian:
+    enabled: true
+    deploy:
+      env:
+        - { name: JIRA_URL, value: https://jira.example.com }
+        - { name: JIRA_PROJECTS_FILTER, value: "OPS,CHG" }
+        - { name: CONFLUENCE_URL, value: https://wiki.example.com }
+        - { name: CONFLUENCE_SPACES_FILTER, value: RUNBOOKS }
+      secretEnv:
+        JIRA_PERSONAL_TOKEN: { existingSecret: jira, key: pat }   # Cloud: JIRA_USERNAME + JIRA_API_TOKEN
 jira:
-  url: https://acme.atlassian.net   # or https://jira.example.com
-  email: heraion-bot@acme.com       # Cloud API token: Basic auth. Omit for a Data Center PAT
-  projects: [OPS]
-  issueType: Task
-  labels: [heraion]
+  enabled: true
+  server: atlassian
+  projects: [OPS]            # create_issue
 ```
 
 ```yaml
 # playbook
-tools: [k8s.*, create_issue]
-jiraProjects: [OPS]                # optional, narrows jira.projects
-guardrails: { maxIssues: 1 }       # default 1
+tools: [k8s.*, atlassian.jira_search, atlassian.confluence_search, create_issue]
+jiraProjects: [OPS]          # optional, narrows jira.projects
+guardrails: { maxIssues: 1 } # default 1
 ```
 
-The token is `HERAION_JIRA_TOKEN`: a Cloud API token with `email`, or a Data Center personal
-access token without it.
-
-| | Jira Cloud | Jira Data Center |
-|---|---|---|
-| Detected by | `url` on `*.atlassian.net`, or `deployment: cloud` | Anything else, or `deployment: datacenter` |
-| Create | `POST /rest/api/3/issue`, description in ADF | `POST /rest/api/2/issue`, description in wiki markup |
-| Search | `POST /rest/api/3/search/jql` | `POST /rest/api/2/search` |
-| Auth | `Basic base64(email:api-token)` | `Bearer <personal access token>` |
-
-How an issue is created:
+Reading uses the server's tools directly, e.g. `atlassian.jira_get_issue`. Creating goes
+through HeraIon's `create_issue`, which wraps the server's `jira_search` and
+`jira_create_issue`; the model never sees `jira_create_issue` itself.
 
 1. The model calls `create_issue` with a project, a summary, a Markdown description and a
-   `key` such as `oomkilled-payments-api`. HeraIon converts the Markdown to ADF or wiki markup.
-2. HeraIon adds the labels `heraion`, `heraion-<playbook>` and a fingerprint such as
-   `heraion-1b2c3d4e5f60`, computed from the playbook, project and key.
-3. Before creating, it searches
-   `project = "OPS" AND labels = "heraion-1b2c3d4e5f60" AND statusCategory != Done`. If that
-   finds an issue, it is returned and nothing new is created. Once the issue is done, the next
-   occurrence opens a new one.
+   `key` such as `oomkilled-payments-api`.
+2. HeraIon checks the project against `jira.projects`, masks secrets, and adds the labels
+   `heraion`, `heraion-<playbook>` and a fingerprint such as `heraion-1b2c3d4e5f60`.
+3. It searches `project = "OPS" AND labels = "heraion-1b2c3d4e5f60" AND statusCategory != Done`.
+   A match is returned instead of a new issue. Once the issue is done, the next occurrence
+   opens a new one.
+4. Otherwise it spends one of `maxIssues` and calls `jira_create_issue`. In dry-run only the
+   log line is written.
 
-In dry-run the issue is only logged. To search for related tickets, use the read tools in
-[Reading Jira and Confluence](#reading-jira-and-confluence).
-
-## Reading Jira and Confluence
-
-Optional read-only tools give the agent context, e.g. "ingress-nginx was upgraded in CHG-42
-yesterday" or the rollback steps from a runbook. Each one is limited to the spaces you choose.
-
-```yaml
-# config.yaml (the chart writes this from jira.* and confluence.* values)
-jira:
-  url: https://acme.atlassian.net
-  email: heraion-bot@acme.com
-  readSpaces: [CHG, OPS]           # jira_search, jira_get_issue
-confluence:
-  url: https://acme.atlassian.net/wiki
-  email: heraion-bot@acme.com
-  spaces: [RUNBOOKS]               # confluence_search, confluence_get_page
-```
-
-```yaml
-# playbook
-tools: [k8s.*, jira_search, jira_get_issue, confluence_search, confluence_get_page]
-jiraReadSpaces: [CHG]              # optional, narrows jira.readSpaces
-confluenceSpaces: [RUNBOOKS]       # optional, narrows confluence.spaces
-```
-
-| Tool | Arguments | Returns |
-|---|---|---|
-| `jira_search` | `space`, `days` (default 7, max 90), `text`, `limit` (max 50) | One line per issue: `CHG-42 \| Change \| Done \| High \| 2026-11-18T10:02 \| Upgrade ingress-nginx to 1.12` |
-| `jira_get_issue` | `key`, e.g. `CHG-42` | Fields, description and the last 5 comments as text |
-| `confluence_search` | `space`, `days` (default 30, max 365), `text`, `limit` (max 50) | One line per page: id, space, last change, title, excerpt |
-| `confluence_get_page` | `id` from `confluence_search` | The page as plain text, cut at `maxPageBytes` (default 32 KiB) |
-
-How the space limit is enforced:
-
-- HeraIon writes the query itself, e.g.
-  `project in ("CHG") AND updated >= -7d AND text ~ "ingress" ORDER BY updated DESC` or
-  `space in ("RUNBOOKS") AND type = page AND lastmodified >= now("-30d")`. The model only
-  supplies the search text, which is escaped.
-- `jira_get_issue` and `confluence_get_page` check the space of the returned issue or page
-  before giving anything to the model. An issue that moved to another space is refused.
-- Content is marked as untrusted, and secrets in it are masked like any tool result.
-- Comment authors are not sent to the model.
-
-| API | Jira Cloud | Jira Data Center |
-|---|---|---|
-| Search | `POST /rest/api/3/search/jql` | `POST /rest/api/2/search` |
-| Get issue | `GET /rest/api/3/issue/{key}` (ADF converted to text) | `GET /rest/api/2/issue/{key}` |
-
-| API | Confluence Cloud | Confluence Data Center |
-|---|---|---|
-| Search | `GET /wiki/rest/api/search?cql=...` (v1; v2 has no CQL search) | `GET /rest/api/content/search?cql=...` |
-| Get page | `GET /wiki/api/v2/pages/{id}?body-format=storage` | `GET /rest/api/content/{id}?expand=body.storage,space,version` |
-
-The Confluence token is `HERAION_CONFLUENCE_TOKEN`. On Cloud, the same Atlassian API token as
-Jira works.
+`heraion check --connect` fails if the server lacks these tools or their arguments, e.g.
+after an mcp-atlassian upgrade.
 
 ## Webhooks
 
@@ -310,18 +256,18 @@ the prometheus-operator.
 |---|---|---|
 | `heraion_webhook_requests_total` | `hook`, `code` | Webhook requests by HTTP status; unknown hook names count as `hook="unknown"` |
 | `heraion_dispatches_total` | `hook`, `playbook`, `result` | `created`, `duplicate`, `at_capacity` (429) or `error` |
-| `heraion_jobs` | `playbook`, `status` | Worker Jobs that are `active`, `succeeded` or `failed`, webhook and CronJob runs alike, until `ttlSecondsAfterFinished` removes them |
-| `heraion_job_last_success_timestamp_seconds` | `playbook` | When the playbook last succeeded |
 | `go_*`, `process_*` | | Go runtime and process |
 
-Example alert: no successful `trivy-remediate` run for 13 hours.
+Job state comes from [kube-state-metrics](https://github.com/kubernetes/kube-state-metrics).
+For the playbook label, run it with
+`--metric-labels-allowlist=jobs=[heraion.io/playbook]`:
 
 ```promql
-time() - heraion_job_last_success_timestamp_seconds{playbook="trivy-remediate"} > 13 * 3600
+# no successful scheduled trivy-remediate run for 13 hours (survives Job cleanup)
+time() - kube_cronjob_status_last_successful_time{cronjob=~".*-heraion-trivy-remediate"} > 13 * 3600
+# failed worker Jobs per playbook, webhook and scheduled runs alike
+sum by (label_heraion_io_playbook) (kube_job_status_failed * on (namespace, job_name) group_left(label_heraion_io_playbook) kube_job_labels{label_heraion_io_playbook!=""})
 ```
-
-The job metrics come from the gateway, which is only deployed with a webhook playbook. Without
-one, use kube-state-metrics (`kube_job_status_failed{job_name=~".*heraion.*"}`) or the logs.
 
 Workers are short-lived Jobs, so per-run details are in their JSON logs, one `run finished`
 line per run, e.g. for Loki:
@@ -345,8 +291,6 @@ come from env vars. A secret in the file is rejected.
 |---|---|
 | `HERAION_LLM_API_KEY` | `sk-...`; also `_FILE` and `_FALLBACK`, see [Secrets](#secrets) |
 | `HERAION_GIT_TOKEN` | A token that can push branches and open PRs; also `_FILE` and `_FALLBACK` |
-| `HERAION_JIRA_TOKEN` | Jira Cloud API token or Data Center PAT; also `_FILE` and `_FALLBACK` |
-| `HERAION_CONFLUENCE_TOKEN` | Confluence Cloud API token or Data Center PAT; also `_FILE` and `_FALLBACK` |
 | `HERAION_LLM_BASE_URL`, `HERAION_LLM_MODEL` | Override the file, e.g. `http://vllm:8000/v1` |
 | `HERAION_DRY_RUN` | `true` |
 | `HERAION_CONFIG`, `HERAION_PLAYBOOK`, `HERAION_EVENT_FILE` | Defaults for `heraion run` flags; gateway Jobs set `HERAION_EVENT_FILE` to the mounted payload |
@@ -376,8 +320,8 @@ for each repo's clone URL. The token needs to read the repos, push branches and 
 | PR budget | With `maxPRs: 1`, a second `open_pr` call fails. `maxPRs: 0` removes `open_pr` |
 | Write paths | CI and ownership files (`.github/workflows/**`, `.gitlab-ci.yml`, `Jenkinsfile`, `CODEOWNERS`, ...) are never written, also not through a symlink. `writePaths: [Dockerfile, "deploy/**"]` narrows further, `denyPaths` adds patterns |
 | Rejected PRs | A PR closed without merging blocks a new PR on the same branch for `reopenAfter` (default `168h`; `0s`: forever) |
-| Jira projects | With `jira.projects: [OPS]`, an issue for `SEC` is refused |
-| Read spaces | With `jira.readSpaces: [CHG]` and `confluence.spaces: [RUNBOOKS]`, reading `HR-1` or a page in `HR` is refused |
+| Jira projects | With `jira.projects: [OPS]`, `create_issue` for `SEC` is refused |
+| Atlassian spaces | With `JIRA_PROJECTS_FILTER=CHG,OPS` on mcp-atlassian, reading `HR-1` or creating in `HR` is refused by the server |
 | Issue budget | With `maxIssues: 1`, a second new issue is refused. `maxIssues: 0` removes `create_issue` |
 | Branches | Only `heraion/<playbook>/...` branches are pushed, and in yolo mode the default branch, fast-forward only |
 | Mode | A playbook's `mode` can only be equal to or safer than the global one; in `safe` mode `open_pr` refuses changes that are not version upgrades within the same major version, lockfile updates or new ignore-file entries |

@@ -113,8 +113,6 @@ dict "root" $ "role" "worker"|"gateway"
 {{- if eq .role "worker" -}}
 {{- $out = append $out (dict "env" "HERAION_LLM_API_KEY" "key" "llm-api-key" "ref" $v.llm.apiKey) -}}
 {{- $out = append $out (dict "env" "HERAION_GIT_TOKEN" "key" "git-token" "ref" $v.git.token) -}}
-{{- if $v.jira.enabled }}{{ $out = append $out (dict "env" "HERAION_JIRA_TOKEN" "key" "jira-token" "ref" $v.jira.token) }}{{ end -}}
-{{- if $v.confluence.enabled }}{{ $out = append $out (dict "env" "HERAION_CONFLUENCE_TOKEN" "key" "confluence-token" "ref" $v.confluence.token) }}{{ end -}}
 {{- range $n, $s := $v.mcpServers }}{{ if $s.enabled }}{{ range $h, $ref := $s.secretHeaders -}}
 {{- $out = append $out (dict "env" (include "heraion.mcpHeaderEnv" (dict "server" $n "header" $h)) "key" (printf "mcp-%s-%s" $n (include "heraion.keySuffix" $h)) "ref" $ref) -}}
 {{- end }}{{ end }}{{ end -}}
@@ -299,17 +297,9 @@ dict "root" $ "role" "worker"|"gateway"
 {{- with $v.namespaces }}{{ $_ := set $cfg "namespaces" . }}{{ end -}}
 {{- if $mcp }}{{ $_ := set $cfg "mcpServers" $mcp }}{{ end -}}
 {{- with $v.jira }}{{ if .enabled -}}
-{{- if not (or .projects .readSpaces) }}{{ fail "jira: set projects (create issues) and/or readSpaces (read issues)" }}{{ end -}}
-{{- $j := dict "url" (required "jira.url is required when jira.enabled" .url) "issueType" .issueType -}}
-{{- range $k := list "deployment" "email" "labels" "projects" "readSpaces" }}{{ with index $v.jira $k }}{{ $_ := set $j $k . }}{{ end }}{{ end -}}
-{{- if not (include "heraion.credConfigured" (dict "root" $ "ref" .token)) }}{{ fail "jira.token: set serviceAccountToken, csiKey, existingSecret or value (or secrets.existingSecret)" }}{{ end -}}
-{{- $_ := set $cfg "jira" $j -}}
-{{- end }}{{ end -}}
-{{- with $v.confluence }}{{ if .enabled -}}
-{{- $c := dict "url" (required "confluence.url is required when confluence.enabled" .url) "spaces" (required "confluence.spaces is required when confluence.enabled" .spaces) "maxPageBytes" .maxPageBytes -}}
-{{- range $k := list "deployment" "email" }}{{ with index $v.confluence $k }}{{ $_ := set $c $k . }}{{ end }}{{ end -}}
-{{- if not (include "heraion.credConfigured" (dict "root" $ "ref" .token)) }}{{ fail "confluence.token: set serviceAccountToken, csiKey, existingSecret or value (or secrets.existingSecret)" }}{{ end -}}
-{{- $_ := set $cfg "confluence" $c -}}
+{{- $srv := index ($v.mcpServers | default dict) .server -}}
+{{- if not (and $srv $srv.enabled) }}{{ fail (printf "jira.server %q must be an enabled mcpServers entry running mcp-atlassian" .server) }}{{ end -}}
+{{- $_ := set $cfg "jira" (dict "server" .server "projects" (required "jira.projects is required when jira.enabled" .projects) "issueType" .issueType "labels" .labels) -}}
 {{- end }}{{ end -}}
 {{- $gw := dict "listen" ":8080" "jobTemplate" "/etc/heraion/job/job-template.yaml"
       "maxConcurrentJobs" $v.gateway.maxConcurrentJobs "maxBodyBytes" $v.gateway.maxBodyBytes "hooks" $hooks -}}

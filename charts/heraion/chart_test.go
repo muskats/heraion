@@ -11,14 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	batchv1 "k8s.io/api/batch/v1"
-	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/dispatch"
 	"github.com/muskats/heraion/internal/playbook"
-	"github.com/muskats/heraion/internal/secret"
 )
 
 type object struct {
@@ -97,11 +94,11 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 	if h := cfg.MCPServers["datadog"].HeadersFromEnv; h["DD-API-KEY"] != "HERAION_MCP_DATADOG_DD_API_KEY" {
 		t.Errorf("datadog headers %v", h)
 	}
-	if j := cfg.Jira; j == nil || j.Deployment != config.DeploymentCloud || len(j.Projects) != 2 || len(j.ReadSpaces) != 2 || j.Email == "" {
+	if j := cfg.Jira; j == nil || j.Server != "atlassian" || len(j.Projects) != 2 || j.IssueType != "Task" {
 		t.Errorf("jira %+v", cfg.Jira)
 	}
-	if cf := cfg.Confluence; cf == nil || cf.Deployment != config.DeploymentCloud || len(cf.Spaces) != 2 || cf.MaxPageBytes != 32768 {
-		t.Errorf("confluence %+v", cfg.Confluence)
+	if a := cfg.MCPServers["atlassian"]; a == nil || !strings.HasSuffix(a.URL, ":9000/mcp") {
+		t.Errorf("atlassian %+v", a)
 	}
 	if cfg.Mode != config.ModeYolo {
 		t.Errorf("mode %q", cfg.Mode)
@@ -136,7 +133,7 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 		env[e.Name] = true
 	}
 	// existingSecret refs arrive as <ENV>, inline values as <ENV>_FALLBACK.
-	for _, want := range []string{"HERAION_CONFIG", "HERAION_LLM_API_KEY", "HERAION_GIT_TOKEN_FALLBACK", "HERAION_JIRA_TOKEN", "HERAION_CONFLUENCE_TOKEN",
+	for _, want := range []string{"HERAION_CONFIG", "HERAION_LLM_API_KEY", "HERAION_GIT_TOKEN_FALLBACK",
 		"HERAION_MCP_DATADOG_DD_API_KEY", "HERAION_MCP_DATADOG_DD_APPLICATION_KEY_FALLBACK"} {
 		if !env[want] {
 			t.Errorf("worker env missing %s", want)
@@ -179,21 +176,6 @@ func TestMinimalInstall(t *testing.T) {
 	}
 }
 
-func TestFailsWithoutRequiredValues(t *testing.T) {
-	if _, err := exec.LookPath("helm"); err != nil {
-		t.Skip("helm not installed")
-	}
-	cases := [][]string{
-		{"--set", "llm.model=m"},
-		{"--set", "llm.baseURL=http://x", "--set", "llm.model=m", "--set", "playbooks.alertmanager-triage.enabled=true"},
-	}
-	for _, c := range cases {
-		if out, err := exec.Command("helm", append([]string{"template", "t", "."}, c...)...).CombinedOutput(); err == nil {
-			t.Errorf("%v: expected failure, got\n%s", c, out[:min(len(out), 300)])
-		}
-	}
-}
-
 // Every examples/helm/values-*.yaml must render and load.
 func TestExampleValues(t *testing.T) {
 	files, _ := filepath.Glob("../../examples/helm/values-*.yaml")
@@ -233,78 +215,6 @@ func TestLiteLLMDefaultURL(t *testing.T) {
 	cm := find(objs, "ConfigMap", "t-heraion-config")
 	if !svc || !strings.Contains(cm.Data["config.yaml"], "baseURL: http://t-litellm-gateway:4000/v1") {
 		t.Fatalf("service found=%v, config:\n%s", svc, cm.Data["config.yaml"])
-	}
-}
-
-// All three levels on one credential, plus a shared Secret for the others.
-// The rendered env is then resolved with the binary's own resolver.
-func TestSecretHierarchy(t *testing.T) {
-	objs := render(t, "--set", "llm.baseURL=http://x", "--set", "llm.model=m",
-		"--set", "playbooks.trivy-remediate.enabled=true",
-		"--set", "secrets.existingSecret=shared",
-		"--set", "llm.apiKey.serviceAccountToken.audience=litellm",
-		"--set", "llm.apiKey.existingSecret=llm", "--set", "llm.apiKey.key=api-key",
-		"--set", "llm.apiKey.value=sk-literal")
-	var cron object
-	for _, o := range objs {
-		if o.Kind == "CronJob" {
-			cron = o
-		}
-	}
-	var cj batchv1.CronJob
-	if err := yaml.Unmarshal(cron.Raw, &cj); err != nil {
-		t.Fatal(err)
-	}
-	pod := cj.Spec.JobTemplate.Spec.Template.Spec
-	env := map[string]corev1.EnvVar{}
-	for _, e := range pod.Containers[0].Env {
-		env[e.Name] = e
-	}
-
-	if got := env["HERAION_LLM_API_KEY_FILE"].Value; got != "/var/run/secrets/heraion/sa/llm-api-key" {
-		t.Errorf("_FILE = %q", got)
-	}
-	ref := env["HERAION_LLM_API_KEY"].ValueFrom.SecretKeyRef
-	if ref.Name != "llm" || ref.Key != "api-key" || ref.Optional == nil || !*ref.Optional {
-		t.Errorf("existingSecret ref %+v", ref)
-	}
-	if fb := env["HERAION_LLM_API_KEY_FALLBACK"].ValueFrom.SecretKeyRef; fb.Name != "t-heraion-secrets" || fb.Key != "llm-api-key" {
-		t.Errorf("fallback ref %+v", fb)
-	}
-	// git.token sets nothing itself: it uses the shared Secret's default key.
-	if g := env["HERAION_GIT_TOKEN"].ValueFrom.SecretKeyRef; g.Name != "shared" || g.Key != "git-token" {
-		t.Errorf("shared secret ref %+v", g)
-	}
-
-	var sa *corev1.ServiceAccountTokenProjection
-	for _, v := range pod.Volumes {
-		if v.Projected != nil {
-			sa = v.Projected.Sources[0].ServiceAccountToken
-		}
-	}
-	if sa == nil || sa.Audience != "litellm" || sa.Path != "llm-api-key" {
-		t.Fatalf("projected token %+v", sa)
-	}
-
-	// Runtime: no token file and the optional key missing -> the literal wins.
-	src := secret.FromMap("HERAION_LLM_API_KEY", map[string]string{
-		"HERAION_LLM_API_KEY_FILE":     "/nonexistent/llm-api-key",
-		"HERAION_LLM_API_KEY":          "",
-		"HERAION_LLM_API_KEY_FALLBACK": "sk-literal",
-	})
-	if v, _ := src.Value(); v != "sk-literal" || src.Origin() != secret.OriginFallback {
-		t.Errorf("runtime resolution: %q from %s", v, src.Origin())
-	}
-}
-
-func TestCSIRequiresProviderClass(t *testing.T) {
-	if _, err := exec.LookPath("helm"); err != nil {
-		t.Skip("helm not installed")
-	}
-	out, err := exec.Command("helm", "template", "t", ".", "--set", "llm.baseURL=http://x", "--set", "llm.model=m",
-		"--set", "playbooks.trivy-remediate.enabled=true", "--set", "llm.apiKey.csiKey=llm-api-key").CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "secrets.csi.enabled") {
-		t.Fatalf("csiKey without secrets.csi must fail, got %v\n%s", err, out)
 	}
 }
 

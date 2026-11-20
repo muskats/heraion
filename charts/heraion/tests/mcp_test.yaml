@@ -52,3 +52,20 @@ tests:
     documentSelector: { path: kind, value: ClusterRoleBinding, skipEmptyTemplates: true }
     asserts:
       - hasDocuments: { count: 0 }
+  - it: atlassian connector gets its token from secretEnv and pins the tools
+    set:
+      secrets.existingSecret: shared
+      mcpServers.atlassian.enabled: true
+      mcpServers.atlassian.deploy.secretEnv:
+        JIRA_API_TOKEN: {}
+    documentSelector: { path: kind, value: Deployment }
+    asserts:
+      - equal: { path: "spec.template.spec.containers[0].image", value: "ghcr.io/sooperset/mcp-atlassian:0.24.7" }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content: { name: ENABLED_TOOLS, value: "jira_search,jira_get_issue,jira_create_issue,confluence_search,confluence_get_page" }
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: JIRA_API_TOKEN
+            valueFrom: { secretKeyRef: { name: shared, key: mcp-atlassian-env-jira-api-token } }

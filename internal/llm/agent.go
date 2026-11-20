@@ -10,6 +10,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/shared"
+
 	"github.com/muskats/heraion/internal/textutil"
 )
 
@@ -75,24 +78,28 @@ func (r *Registry) Names() []string {
 	return names
 }
 
-func (r *Registry) specs() []ToolSpec {
+func (r *Registry) specs() ([]openai.ChatCompletionToolUnionParam, error) {
 	wires := make([]string, 0, len(r.byWire))
 	for w := range r.byWire {
 		wires = append(wires, w)
 	}
 	sort.Strings(wires) // stable order helps prompt caching
-	specs := make([]ToolSpec, 0, len(wires))
+	specs := make([]openai.ChatCompletionToolUnionParam, 0, len(wires))
 	for _, w := range wires {
 		t := r.byWire[w]
-		schema := t.Schema()
-		if len(schema) == 0 {
-			schema = json.RawMessage(`{"type":"object","properties":{}}`)
+		params := shared.FunctionParameters{"type": "object", "properties": map[string]any{}}
+		if s := t.Schema(); len(s) > 0 {
+			if err := json.Unmarshal(s, &params); err != nil {
+				return nil, fmt.Errorf("tool %s: schema: %w", t.Name(), err)
+			}
 		}
-		specs = append(specs, ToolSpec{Type: "function", Function: FunctionSpec{
-			Name: w, Description: t.Description(), Parameters: schema,
-		}})
+		fn := shared.FunctionDefinitionParam{Name: w, Parameters: params}
+		if d := t.Description(); d != "" {
+			fn.Description = openai.String(d)
+		}
+		specs = append(specs, openai.ChatCompletionFunctionTool(fn))
 	}
-	return specs
+	return specs, nil
 }
 
 // Limits bound a single agent run.
@@ -144,11 +151,13 @@ func (a *Agent) Run(ctx context.Context, system, user string) (*Result, error) {
 	if tools == nil {
 		tools = &Registry{byWire: map[string]Tool{}}
 	}
-	specs := tools.specs()
-
-	msgs := []Message{
-		{Role: "system", Content: ptr(redact(system))},
-		{Role: "user", Content: ptr(redact(user))},
+	specs, err := tools.specs()
+	if err != nil {
+		return nil, err
+	}
+	msgs := []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage(redact(system)),
+		openai.UserMessage(redact(user)),
 	}
 	res := &Result{}
 	for res.Steps < a.Limits.MaxSteps {
@@ -156,26 +165,27 @@ func (a *Agent) Run(ctx context.Context, system, user string) (*Result, error) {
 			return res, err
 		}
 		res.Steps++
-		resp, err := a.LLM.Chat(ctx, ChatRequest{
-			Model: a.Model, Messages: msgs, Tools: specs, Temperature: a.Limits.Temperature,
-		})
+		req := openai.ChatCompletionNewParams{Model: a.Model, Messages: msgs, Tools: specs}
+		if a.Limits.Temperature != nil {
+			req.Temperature = openai.Float(*a.Limits.Temperature)
+		}
+		resp, err := a.LLM.Chat(ctx, req)
 		if err != nil {
 			return res, fmt.Errorf("step %d: %w", res.Steps, err)
 		}
 		if len(resp.Choices) == 0 {
 			return res, fmt.Errorf("step %d: llm response has no choices", res.Steps)
 		}
-		res.Usage.PromptTokens += resp.Usage.PromptTokens
-		res.Usage.CompletionTokens += resp.Usage.CompletionTokens
-		res.Usage.TotalTokens += resp.Usage.TotalTokens
+		res.Usage.PromptTokens += int(resp.Usage.PromptTokens)
+		res.Usage.CompletionTokens += int(resp.Usage.CompletionTokens)
+		res.Usage.TotalTokens += int(resp.Usage.TotalTokens)
 
 		choice := resp.Choices[0]
 		msg := choice.Message
-		msg.Role = "assistant"
-		msgs = append(msgs, msg)
+		msgs = append(msgs, msg.ToParam())
 
 		if len(msg.ToolCalls) == 0 {
-			res.Final = msg.Text()
+			res.Final = msg.Content
 			if choice.FinishReason == "length" {
 				return res, fmt.Errorf("%w: the model's answer was cut off at its output limit", ErrLimit)
 			}
@@ -194,13 +204,13 @@ func (a *Agent) Run(ctx context.Context, system, user string) (*Result, error) {
 			if len(out) > maxResult {
 				out = textutil.Truncate(out, maxResult) + fmt.Sprintf("\n...[truncated, %d bytes total]", len(out))
 			}
-			msgs = append(msgs, Message{Role: "tool", ToolCallID: tc.ID, Content: ptr(out)})
+			msgs = append(msgs, openai.ToolMessage(out, tc.ID))
 		}
 	}
 	return res, fmt.Errorf("%w: %d steps without a final answer", ErrLimit, a.Limits.MaxSteps)
 }
 
-func (a *Agent) callTool(ctx context.Context, log *slog.Logger, tools *Registry, tc ToolCall) string {
+func (a *Agent) callTool(ctx context.Context, log *slog.Logger, tools *Registry, tc openai.ChatCompletionMessageToolCallUnion) string {
 	t, ok := tools.byWire[tc.Function.Name]
 	if !ok {
 		log.Warn("model called unknown or disallowed tool", "tool", tc.Function.Name)
@@ -221,5 +231,3 @@ func (a *Agent) callTool(ctx context.Context, log *slog.Logger, tools *Registry,
 	}
 	return out
 }
-
-func ptr[T any](v T) *T { return &v }
