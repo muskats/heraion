@@ -1,6 +1,6 @@
 module github.com/muskats/heraion
 
-go 1.26.3
+go 1.26.11
 
 require (
 	github.com/go-git/go-git/v5 v5.19.3

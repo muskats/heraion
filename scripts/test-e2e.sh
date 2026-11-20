@@ -7,12 +7,17 @@
 #   HERAION_BIN=path  test this binary instead of building one (e.g. a release build)
 #   JUNIT=1           also write build/junit-e2e.xml (needs gotestsum on PATH)
 #   GO_TEST_FLAGS     extra flags, e.g. "-run TestWebhookToPullRequest/gateway"
+#   SKIP_DEPS=1       do not run `helm dependency build` (subcharts already in charts/)
+# shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 cd "$ROOT"
 need go
 need helm
 need git
 mkdir -p "$BUILD_DIR"
+
+# The test renders the chart with `helm template`, which needs the subcharts.
+[[ "${SKIP_DEPS:-}" == 1 ]] || bash "$ROOT/scripts/chart-deps.sh"
 
 read -r -a extra <<<"${GO_TEST_FLAGS:-}"
 args=(-tags e2e -count=1 -timeout 10m "${extra[@]}" ./test/e2e/)

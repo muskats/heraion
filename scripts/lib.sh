@@ -6,6 +6,9 @@
 # until a version changes. Override a tool with its env var, e.g.
 # KUBECONFORM=/usr/local/bin/kubeconform. helm-unittest is a Helm plugin, see
 # helm_unittest.
+
+# Variables set here are used by the scripts that source this file.
+# shellcheck disable=SC2034
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

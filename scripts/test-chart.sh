@@ -8,6 +8,7 @@
 #   KUBE_VERSIONS    space-separated, default "1.27.0 1.33.0"
 #   JUNIT=1          also write build/junit-chart.xml (helm-unittest results)
 #   SKIP_UNITTEST=1  skip helm-unittest locally (refused when CI=true)
+# shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 cd "$ROOT"
 need helm
@@ -19,9 +20,7 @@ base=(--set llm.baseURL=http://llm.example/v1 --set llm.model=m)
 if [[ "${SKIP_DEPS:-}" == 1 ]]; then
 	warn "helm dependency build skipped (SKIP_DEPS=1)"
 else
-	log "helm dependency build"
-	helm dependency build "$CHART_DIR" >/dev/null
-	ok "dependencies"
+	bash "$ROOT/scripts/chart-deps.sh"
 fi
 
 log "helm lint"

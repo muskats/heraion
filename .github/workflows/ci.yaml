@@ -1,8 +1,9 @@
 name: ci
-# Only the default branch: pushes to it and pull requests into it.
+# Pull requests into the default branch, and release tags. A push to a branch,
+# main included, runs nothing.
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -28,7 +29,7 @@ jobs:
           go-version-file: go.mod
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
-          version: v3.19.0
+          version: v4.3.0
       - name: cache pinned tools
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:

@@ -4,12 +4,14 @@
 #
 #   scripts/lint.sh            all checks
 #   SKIP_VULN=1 scripts/lint.sh  without govulncheck (it needs network access)
+# shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 cd "$ROOT"
 need go
 
 log "gofmt"
-unformatted=$(gofmt -l $(git ls-files '*.go' 2>/dev/null || find . -name '*.go' -not -path './.tools/*'))
+mapfile -t gofiles < <(git ls-files '*.go' 2>/dev/null || find . -name '*.go' -not -path './.tools/*')
+unformatted=$(gofmt -l "${gofiles[@]}")
 [[ -z "$unformatted" ]] || die "not gofmt'ed (run gofmt -w):"$'\n'"$unformatted"
 ok "gofmt"
 

@@ -9,6 +9,7 @@
 #   unit   scripts/test-unit.sh   go test -race with a coverage floor
 #   chart  scripts/test-chart.sh  helm lint, helm-unittest, cross-check, kubeconform, rejected values
 #   e2e    scripts/test-e2e.sh    binary + mock cluster, LLM and Gitea
+# shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 
 stages=("$@")

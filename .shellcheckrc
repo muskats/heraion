@@ -1,0 +1,2 @@
+# `# shellcheck source=lib.sh` in scripts/ resolves next to the script.
+source-path=SCRIPTDIR

@@ -11,6 +11,7 @@
 #
 # Writes build/coverage.out and build/coverage.txt (per-function summary);
 # open build/coverage.html for a line view.
+# shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 cd "$ROOT"
 need go
