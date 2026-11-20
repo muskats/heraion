@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Static binary on distroless, non-root. go-git is pure Go, so no git binary.
 
-FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27 AS build
 ARG TARGETOS TARGETARCH VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
