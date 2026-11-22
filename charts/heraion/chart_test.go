@@ -85,6 +85,9 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("binary rejects rendered config: %v\n%s", err, cm.Data["config.yaml"])
 	}
+	if cfg.LLM.MaxToolResultBytes != 32768 || cfg.LLM.MaxContextBytes != 120000 {
+		t.Errorf("llm limits %d %d", cfg.LLM.MaxToolResultBytes, cfg.LLM.MaxContextBytes)
+	}
 	if got := cfg.MCPServers["k8s"].URL; got != "http://t-heraion-mcp-k8s.default.svc:8080/mcp" {
 		t.Errorf("k8s url %s", got)
 	}

@@ -109,6 +109,27 @@ type FakePRs struct {
 	Open    map[string]*scm.PR // key: repo + " " + branch
 	// Closed holds PRs closed without merging (or merged), by the same key.
 	Closed map[string][]scm.PR
+	// Comments are the comments posted, e.g. {Repo: "acme/app", Number: 1, Body: "..."}.
+	Comments []Comment
+	// CommentErr, when set, is returned by Comment.
+	CommentErr error
+}
+
+// Comment is one comment posted through FakePRs.
+type Comment struct {
+	Repo   string
+	Number int
+	Body   string
+}
+
+func (f *FakePRs) Comment(_ context.Context, repo string, number int, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.CommentErr != nil {
+		return f.CommentErr
+	}
+	f.Comments = append(f.Comments, Comment{Repo: repo, Number: number, Body: body})
+	return nil
 }
 
 func (f *FakePRs) FindByBranch(_ context.Context, repo, branch string) ([]scm.PR, error) {

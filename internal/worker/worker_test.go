@@ -2,6 +2,7 @@ package worker_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -99,6 +100,98 @@ prompt: Fix fixable HIGH CVEs.
 	}
 	if !slices.Equal(names, []string{"open_pr", "repo_list", "repo_read_file", "repo_write_file"}) {
 		t.Errorf("tools = %v", names)
+	}
+}
+
+// runFix runs a playbook that edits the Dockerfile and opens one PR, then
+// answers final, and returns the report and the log.
+func runFix(t *testing.T, prs *scmtest.FakePRs, dryRun bool, final string) (*worker.Report, string, error) {
+	t.Helper()
+	base := t.TempDir()
+	cloneURL := scmtest.NewRemote(t, base, repo, map[string]string{"Dockerfile": "FROM alpine:3.18\n"})
+	srv := llmtest.New(t,
+		llmtest.Turn{Calls: []llmtest.Call{{Name: "repo_write_file", Args: map[string]string{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"}}}},
+		llmtest.Turn{Calls: []llmtest.Call{{Name: "open_pr", Args: map[string]string{"repo": repo, "title": "Bump alpine", "body": "b"}}}},
+		llmtest.Turn{Final: final},
+	)
+	c := cfg(t, srv.BaseURL(), cloneURL)
+	c.DryRun = dryRun
+	var logs strings.Builder
+	o := worker.Options{
+		Config:   c,
+		Playbook: pb(t, "name: fix\ntrigger: {manual: true}\ntools: [repo_*, open_pr]\nprompt: Fix.\n"),
+		Redactor: redactor(c),
+		LLM:      fastClient(srv.BaseURL()),
+		Log:      slog.New(slog.NewJSONHandler(&logs, nil)),
+	}
+	if prs != nil {
+		o.PRs = prs
+	}
+	rep, err := worker.Run(context.Background(), o)
+	return rep, logs.String(), err
+}
+
+func TestReportIsPostedOnOpenedPR(t *testing.T) {
+	prs := &scmtest.FakePRs{}
+	rep, _, err := runFix(t, prs, false, "Bumped alpine. Token git-token-123456 was not used.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs.Comments) != 1 || prs.Comments[0].Repo != repo || prs.Comments[0].Number != rep.PRs[0].Number {
+		t.Fatalf("comments %+v, PRs %+v", prs.Comments, rep.PRs)
+	}
+	body := prs.Comments[0].Body
+	if !strings.Contains(body, "Bumped alpine.") || !strings.Contains(body, "`fix`") {
+		t.Errorf("body %q", body)
+	}
+	if strings.Contains(body, "git-token-123456") {
+		t.Error("report was not redacted")
+	}
+}
+
+func TestReportNotPostedInDryRun(t *testing.T) {
+	prs := &scmtest.FakePRs{}
+	_, logs, err := runFix(t, prs, true, "Bumped alpine.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs.Comments) != 0 || len(prs.Created) != 0 {
+		t.Fatalf("dry-run posted: %+v", prs)
+	}
+	if !strings.Contains(logs, "dry-run: would post report") {
+		t.Errorf("no dry-run line in:\n%s", logs)
+	}
+}
+
+func TestReportCommentFailureIsAWarning(t *testing.T) {
+	prs := &scmtest.FakePRs{CommentErr: errors.New("not supported")}
+	rep, logs, err := runFix(t, prs, false, "Bumped alpine.")
+	if err != nil || len(rep.PRs) != 1 {
+		t.Fatalf("a failed comment must not fail the run: %v %+v", err, rep)
+	}
+	if !strings.Contains(logs, `"level":"WARN","msg":"could not post the report on the PR"`) {
+		t.Errorf("no warning in:\n%s", logs)
+	}
+}
+
+func TestBrokenTokenFileFailsTheRun(t *testing.T) {
+	srv := llmtest.New(t, llmtest.Turn{Final: "never"})
+	c := cfg(t, srv.BaseURL(), "file:///nonexistent")
+	c.Git.Token = secret.FromMap("HERAION_GIT_TOKEN", map[string]string{
+		"HERAION_GIT_TOKEN_FILE": "/nonexistent/token", "HERAION_GIT_TOKEN_FALLBACK": "lit",
+	})
+	_, err := worker.Run(context.Background(), worker.Options{
+		Config:   c,
+		Playbook: pb(t, "name: x\ntrigger: {manual: true}\ntools: ['*']\nprompt: p\n"),
+		LLM:      fastClient(srv.BaseURL()),
+		PRs:      &scmtest.FakePRs{},
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err == nil || !strings.Contains(err.Error(), "HERAION_GIT_TOKEN_FILE") {
+		t.Fatalf("got %v", err)
+	}
+	if len(srv.Requests) != 0 {
+		t.Errorf("the run must fail before the first LLM request, got %d", len(srv.Requests))
 	}
 }
 

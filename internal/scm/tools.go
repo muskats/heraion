@@ -32,6 +32,7 @@ type Toolbox struct {
 // OpenedPR records the outcome of one open_pr call.
 type OpenedPR struct {
 	Repo, Branch, URL string
+	Number            int // 0 when no PR was opened, e.g. dry-run
 	Outcome           Outcome
 }
 
@@ -395,7 +396,7 @@ func (tb *Toolbox) deliver(ctx context.Context, r *Repo, branch, title, body str
 	if err != nil {
 		return "", false, err
 	}
-	tb.Opened = append(tb.Opened, OpenedPR{Repo: r.Name, Branch: branch, URL: pr.URL, Outcome: outcome})
+	tb.Opened = append(tb.Opened, OpenedPR{Repo: r.Name, Branch: branch, URL: pr.URL, Number: pr.Number, Outcome: outcome})
 	log.Info("opened PR", "url", pr.URL, "number", pr.Number)
 	if outcome == OutcomeFellBack {
 		return fmt.Sprintf("the push to %s was rejected, so PR #%d was opened instead: %s", r.BaseBranch, pr.Number, pr.URL), true, nil

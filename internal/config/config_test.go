@@ -244,3 +244,43 @@ func TestMetricsListen(t *testing.T) {
 		t.Errorf("%v %v", c, err)
 	}
 }
+
+func TestResultAndContextLimits(t *testing.T) {
+	c, err := Load(write(t, "llm: {baseURL: https://api.openai.com/v1, model: m}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LLM.MaxToolResultBytes != 16384 || c.LLM.MaxContextBytes != 200000 {
+		t.Errorf("defaults: %d %d", c.LLM.MaxToolResultBytes, c.LLM.MaxContextBytes)
+	}
+	for _, bad := range []string{
+		"maxToolResultBytes: 512",
+		"maxToolResultBytes: 300000",
+		"{maxToolResultBytes: 65536, maxContextBytes: 4096}",
+		"maxContextBytes: -1",
+	} {
+		y := "llm: {baseURL: https://api.openai.com/v1, model: m, " + strings.Trim(bad, "{}") + "}\n"
+		if _, err := Load(write(t, y)); err == nil {
+			t.Errorf("%s: want an error", bad)
+		}
+	}
+	if _, err := Load(write(t, "llm: {baseURL: https://api.openai.com/v1, model: m, maxToolResultBytes: 1024, maxContextBytes: 1024}\n")); err != nil {
+		t.Errorf("bounds must be accepted: %v", err)
+	}
+}
+
+func TestCheckCredentials(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope")
+	c := &Config{}
+	c.applyEnv(func(k string) string {
+		return map[string]string{EnvGitToken + "_FILE": missing, EnvGitToken + "_FALLBACK": "lit"}[k]
+	})
+	err := c.CheckCredentials()
+	if err == nil || !strings.Contains(err.Error(), "git token: HERAION_GIT_TOKEN_FILE") {
+		t.Fatalf("got %v", err)
+	}
+	c.applyEnv(func(string) string { return "" })
+	if err := c.CheckCredentials(); err != nil {
+		t.Fatalf("unset credentials are fine: %v", err)
+	}
+}

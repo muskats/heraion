@@ -39,6 +39,14 @@ tests:
     set: { namespaces: [Shop_1] }
     asserts:
       - failedTemplate: {}
+  - it: maxToolResultBytes over 256 KiB
+    set: { llm.maxToolResultBytes: 300000 }
+    asserts:
+      - failedTemplate: {}
+  - it: maxContextBytes under 1 KiB
+    set: { llm.maxContextBytes: 100 }
+    asserts:
+      - failedTemplate: {}
   - it: maxBodyBytes over the Secret limit
     set: { gateway.maxBodyBytes: 2000000 }
     asserts:

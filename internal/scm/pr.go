@@ -44,6 +44,9 @@ type PRService interface {
 	// fork's branch of the same name does not count): open ones first.
 	FindByBranch(ctx context.Context, repo, branch string) ([]PR, error)
 	Create(ctx context.Context, repo string, in PRInput) (*PR, error)
+	// Comment adds a comment to PR number, e.g. the run's report. Azure
+	// DevOps and Gogs return go-scm's ErrNotSupported.
+	Comment(ctx context.Context, repo string, number int, body string) error
 }
 
 // NewPRService uses go-scm, so self-hosted servers work, e.g. provider
@@ -159,6 +162,13 @@ func (s *goscmService) Create(ctx context.Context, repo string, in PRInput) (*PR
 		return nil, fmt.Errorf("create PR on %s: %w", repo, err)
 	}
 	return &PR{Number: pr.Number, URL: pr.Link, State: PRStateOpen}, nil
+}
+
+func (s *goscmService) Comment(ctx context.Context, repo string, number int, body string) error {
+	if _, _, err := s.c.PullRequests.CreateComment(ctx, repo, number, &goscm.CommentInput{Body: body}); err != nil {
+		return fmt.Errorf("comment on PR #%d on %s: %w", number, repo, err)
+	}
+	return nil
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)

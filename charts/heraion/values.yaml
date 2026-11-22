@@ -46,7 +46,8 @@ global:
 
 # Credentials. Each one (llm.apiKey, git.token, gateway.hooks.<name>.secret,
 # mcpServers.<name>.secretHeaders.<header>) can use any of these sources. At
-# runtime the first one that yields a value wins:
+# runtime 1 is used when configured (a missing or empty file fails the run, it
+# does not fall back), otherwise the first of 2 and 3 that yields a value:
 #
 #   1. serviceAccountToken: { audience: litellm }   projected token of the pod's
 #                                                   ServiceAccount, rotated by the kubelet
@@ -84,6 +85,11 @@ llm:
   maxSteps: 30
   maxTokens: 500000
   timeout: 20m
+  # Each tool result is cut at this size, 1024 to 262144.
+  maxToolResultBytes: 16384
+  # History sent per request; above it the oldest tool results (not the last
+  # 4) become a one-line stub. 200000 bytes need a model context of about 64k tokens.
+  maxContextBytes: 200000
   # temperature: 0.2
 
 git:
@@ -307,6 +313,8 @@ mcpServers:
         registry: quay.io
         repository: containers/kubernetes_mcp_server
         tag: v0.1.2
+        # Wins over tag: set digest "" when you change tag.
+        digest: sha256:c289505b06079d7f265a6fef977ce1abbfbbb4271772db17db5b58edbf44c255
         pullPolicy: IfNotPresent
       args: ["--config", "/etc/mcp/config.toml"]
       port: 8080
@@ -372,6 +380,8 @@ mcpServers:
         registry: ghcr.io
         repository: sooperset/mcp-atlassian
         tag: "0.24.7"
+        # Wins over tag: set digest "" when you change tag.
+        digest: sha256:40e8470584820a32f7e385dadc38bf263536e0ec536f9915bd9036dae1807fb6
         pullPolicy: IfNotPresent
       args: ["--transport", "streamable-http", "--port", "9000"]
       port: 9000

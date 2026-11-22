@@ -88,7 +88,8 @@ used as given.
 {{- define "heraion.mcpName" -}}{{ printf "%s-mcp-%s" (include "heraion.fullname" .root) .name | trunc 63 | trimSuffix "-" }}{{- end }}
 
 {{/* ---------- credentials ----------
-Each credential is resolved by the binary at runtime, first hit wins:
+Each credential is resolved by the binary at runtime: 1 when set (a broken
+file is an error, not a fallthrough), otherwise the first of 2 and 3 with a value:
   1. <ENV>_FILE      serviceAccountToken (projected token) or csiKey (Secrets Store CSI file)
   2. <ENV>           existingSecret / key, default secrets.existingSecret; optional key
   3. <ENV>_FALLBACK  value, stored in the chart's Secret
@@ -261,7 +262,7 @@ dict "root" $ "role" "worker"|"gateway"
 
 {{- define "heraion.config" -}}
 {{- $v := .Values -}}
-{{- $llm := dict "baseURL" (include "heraion.llmBaseURL" .) "model" (required "llm.model is required" $v.llm.model) "maxSteps" $v.llm.maxSteps "maxTokens" $v.llm.maxTokens "timeout" $v.llm.timeout -}}
+{{- $llm := dict "baseURL" (include "heraion.llmBaseURL" .) "model" (required "llm.model is required" $v.llm.model) "maxSteps" $v.llm.maxSteps "maxTokens" $v.llm.maxTokens "timeout" $v.llm.timeout "maxToolResultBytes" $v.llm.maxToolResultBytes "maxContextBytes" $v.llm.maxContextBytes -}}
 {{- if hasKey $v.llm "temperature" }}{{ $_ := set $llm "temperature" $v.llm.temperature }}{{ end -}}
 {{- $git := dict "provider" $v.git.provider "authorName" $v.git.authorName "authorEmail" $v.git.authorEmail -}}
 {{- range $k := list "endpoint" "cloneBaseURL" "username" }}{{ with index $v.git $k }}{{ $_ := set $git $k . }}{{ end }}{{ end -}}

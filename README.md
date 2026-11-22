@@ -79,16 +79,19 @@ Example values: [minimal](examples/helm/values-minimal.yaml),
 
 ## Secrets
 
-Each credential is read from the first source that has a value: a ServiceAccount token or
-cloud secret manager file, then an existing Secret, then a literal value. Example:
+Each credential comes from a file when one is configured (a ServiceAccount token or a cloud
+secret manager file), otherwise from an existing Secret, then a literal value. A configured
+file that is missing or empty fails the run and `heraion check`; it never falls back. Example:
 
 ```yaml
 secrets:
   existingSecret: heraion        # default Secret: llm-api-key, git-token, hook-<name>, ...
 llm:
   apiKey:
-    csiKey: llm-api-key          # first: AWS/Azure/GCP secret manager via the CSI driver
-    value: sk-local-dev          # last: only if nothing else is set
+    csiKey: llm-api-key          # AWS/Azure/GCP secret manager via the CSI driver
+git:
+  token:
+    value: ghp-local-dev         # used only if heraion has no git-token key
 ```
 
 Outside Kubernetes the same order applies to env vars, e.g. `HERAION_LLM_API_KEY_FILE`, then
@@ -290,6 +293,23 @@ sum by (playbook) (sum_over_time({app_kubernetes_io_component="worker"} | json |
 `run finished` carries `status` (`ok` or `failed`), `error`, `durationSeconds`, `steps`,
 `tokens`, `mode`, `dryRun`, `prs` and `issues`.
 
+Each tool call is one `tool call` line, so a run can be reconstructed without file contents
+or secrets in the log:
+
+```json
+{"msg":"tool call","playbook":"trivy-remediate","tool":"repo_write_file","args":"{\"content\":\"<412 bytes>\",\"path\":\"Dockerfile\",\"repo\":\"acme/web\"}","resultBytes":31,"durationMs":2,"error":false}
+```
+
+| Field | Content |
+|---|---|
+| `args` | JSON arguments, masked; strings over 256 bytes and `repo_write_file` content as `"<N bytes>"`; at most 1 KiB |
+| `resultBytes`, `durationMs` | Result size before the `llm.maxToolResultBytes` cut, call duration |
+| `error`, `err` | `true` and the message when the call failed |
+
+`context trimmed` is logged once per run when older tool results are replaced to stay under
+`llm.maxContextBytes`. The final report is also posted as a comment on each PR the run opened
+(not in dry-run; a failed comment is a warning; Azure DevOps and Gogs do not support it).
+
 ## Configuration
 
 Settings come from a YAML file ([examples/config.yaml](examples/config.yaml)) and secrets
@@ -335,7 +355,7 @@ for each repo's clone URL. The token needs to read the repos, push branches and 
 | Mode | A playbook's `mode` can only be equal to or safer than the global one; in `safe` mode `open_pr` refuses changes that are not version upgrades within the same major version, lockfile updates or new ignore-file entries |
 | Duplicates | An open PR on the same branch of the same repo (a fork's branch does not count), or an open issue with the same fingerprint label, is reused |
 | Masking | `ghp_...`, `glpat-...`, `sk-...`, `ATATT3...`, JWTs, `Bearer ...`, `user:password@` in URLs, PEM keys and configured secrets become `[REDACTED]` in prompts, PRs, issues and logs. `open_pr` refuses a change that adds such a value to a file |
-| Run size | `llm.maxSteps`, `llm.maxTokens` (checked before each round of tool calls), `llm.timeout` |
+| Run size | `llm.maxSteps`, `llm.maxTokens` (checked before each round of tool calls), `llm.timeout`; each tool result is cut at `llm.maxToolResultBytes` (16 KiB), and above `llm.maxContextBytes` (200000) the oldest results become a stub. The defaults need a model context of about 64k tokens |
 | Webhook body | `gateway.maxBodyBytes`, default 256 KiB, at most 1032192 (it is stored in a Secret) |
 | No merge | The code has no merge call; yolo mode pushes a commit instead |
 
@@ -351,10 +371,10 @@ make build                    # bin/heraion
 
 | Stage | Script | Checks |
 |---|---|---|
-| `lint` | `scripts/lint.sh` | gofmt, `Chart.yaml` version equals appVersion, go vet, `go mod tidy` drift, golangci-lint ([.golangci.yml](.golangci.yml)), govulncheck, actionlint, shellcheck |
+| `lint` | `scripts/lint.sh` | gofmt, `Chart.yaml` version equals appVersion, Dockerfile Go version equals the go.mod toolchain, go vet, `go mod tidy` drift, golangci-lint ([.golangci.yml](.golangci.yml)), govulncheck, actionlint, shellcheck |
 | `unit` | `scripts/test-unit.sh` | `go test -race`, coverage floor `COVERAGE_MIN` (default 80%), `build/coverage.html` |
 | `chart` | `scripts/test-chart.sh` | helm lint, helm-unittest ([charts/heraion/tests](charts/heraion/tests)), chart/binary cross-check, kubeconform for Kubernetes 1.27 and 1.33, values that must be rejected |
-| `e2e` | `scripts/test-e2e.sh` | [test/e2e](test/e2e): the binary on the rendered chart config, against a mock kube-apiserver, LLM and Gitea API and a real Git remote: webhook to Job and event Secret, worker run to pushed branch and PR, dedup, closed-PR cooldown, write-path and secret refusals |
+| `e2e` | `scripts/test-e2e.sh` | [test/e2e](test/e2e): the binary on the rendered chart config, against a mock kube-apiserver, LLM and Gitea API and a real Git remote: webhook to Job and event Secret, worker run to pushed branch, PR and report comment, dedup, closed-PR cooldown, write-path and secret refusals |
 
 You need Go, helm and git. The scripts build the other tools (golangci-lint, govulncheck,
 kubeconform, helm-unittest, actionlint) at pinned versions into `.tools/`; the versions are in
@@ -371,11 +391,26 @@ as shellcheck become required.
 | `SKIP_UNITTEST=1` | Skip helm-unittest locally (refused when `CI=true`) |
 | `KEEP_GOING=1` | `ci.sh` runs every stage even after a failure |
 
+The Go version is in two places, the `toolchain` line of [go.mod](go.mod) and
+`ARG GO_VERSION` in the [Dockerfile](Dockerfile); the `lint` stage fails when they differ.
+Base images and the default MCP server images are pinned by digest. CI builds the image and
+scans it with Trivy (`HIGH` and `CRITICAL` with a fix fail the build).
+
 Releasing: set `version` and `appVersion` in [Chart.yaml](charts/heraion/Chart.yaml) to the
-same value, e.g. `2.0.0`, merge to `main`, then push the tag `v2.0.0`. The release workflow
-refuses a tag that does not match `Chart.yaml` or is not on `main`, and publishes the image
-`docker.io/muskats/heraion:2.0.0` (also `v2.0.0`) and the chart
-`oci://ghcr.io/muskats/charts/heraion` version `2.0.0`.
+same value, e.g. `2.1.0`, merge to `main`, then push the tag `v2.1.0`. The release workflow
+refuses a tag that does not match `Chart.yaml` or is not on `main`, runs the whole CI workflow
+on the tagged commit, and only then publishes the image `docker.io/muskats/heraion:2.1.0`
+(also `v2.1.0`, with SBOM and provenance) and the chart `oci://ghcr.io/muskats/charts/heraion`
+version `2.1.0`. Both are signed with cosign keyless signing (GitHub OIDC):
+
+```sh
+cosign verify docker.io/muskats/heraion:2.1.0 \
+  --certificate-identity https://github.com/muskats/heraion/.github/workflows/release.yaml@refs/tags/v2.1.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+cosign verify ghcr.io/muskats/charts/heraion:2.1.0 \
+  --certificate-identity https://github.com/muskats/heraion/.github/workflows/release.yaml@refs/tags/v2.1.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 Still to do: end-to-end tests on a `kind` cluster, and against real GitHub and Gitea servers.
 

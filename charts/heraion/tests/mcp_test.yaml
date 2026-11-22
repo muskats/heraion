@@ -15,6 +15,21 @@ tests:
       - equal:
           path: spec.ingress[0].from[0].podSelector.matchLabels["app.kubernetes.io/component"]
           value: worker
+  - it: third-party images are pinned by digest
+    set:
+      mcpServers.k8s.enabled: true
+      mcpServers.atlassian.enabled: true
+    documentSelector: { path: kind, value: Deployment, matchMany: true }
+    asserts:
+      - matchRegex: { path: "spec.template.spec.containers[0].image", pattern: "@sha256:[0-9a-f]{64}$" }
+  - it: a digest set to "" uses the tag
+    set:
+      mcpServers.k8s.enabled: true
+      mcpServers.k8s.deploy.image.tag: v9.9.9
+      mcpServers.k8s.deploy.image.digest: ""
+    documentSelector: { path: kind, value: Deployment }
+    asserts:
+      - equal: { path: "spec.template.spec.containers[0].image", value: "quay.io/containers/kubernetes_mcp_server:v9.9.9" }
   - it: k8s connector ClusterRole has no write verbs
     set:
       mcpServers.k8s.enabled: true
@@ -60,7 +75,7 @@ tests:
         JIRA_API_TOKEN: {}
     documentSelector: { path: kind, value: Deployment }
     asserts:
-      - equal: { path: "spec.template.spec.containers[0].image", value: "ghcr.io/sooperset/mcp-atlassian:0.24.7" }
+      - equal: { path: "spec.template.spec.containers[0].image", value: "ghcr.io/sooperset/mcp-atlassian@sha256:40e8470584820a32f7e385dadc38bf263536e0ec536f9915bd9036dae1807fb6" }
       - contains:
           path: spec.template.spec.containers[0].env
           content: { name: ENABLED_TOOLS, value: "jira_search,jira_get_issue,jira_create_issue,confluence_search,confluence_get_page" }

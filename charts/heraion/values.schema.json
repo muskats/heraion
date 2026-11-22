@@ -129,6 +129,15 @@
           "type": "integer",
           "minimum": 0
         },
+        "maxToolResultBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 262144
+        },
+        "maxContextBytes": {
+          "type": "integer",
+          "minimum": 1024
+        },
         "timeout": {
           "type": "string",
           "pattern": "^[0-9]+(s|m|h)$"

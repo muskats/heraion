@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/guardrails"
@@ -61,6 +62,9 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		log = slog.Default()
 	}
 	log = log.With("playbook", pb.Name)
+	if err := cfg.CheckCredentials(); err != nil {
+		return nil, err
+	}
 	red := o.Redactor
 	if red == nil {
 		red = guardrails.NewRedactor()
@@ -123,13 +127,14 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	if chat == nil {
 		chat = llm.NewClient(cfg.LLM.BaseURL, cfg.LLM.APIKey)
 	}
-	ctx, cancel := context.WithTimeout(ctx, cfg.LLM.Timeout.Duration)
+	runCtx, cancel := context.WithTimeout(ctx, cfg.LLM.Timeout.Duration)
 	defer cancel()
 	agent := &llm.Agent{
 		LLM: chat, Model: cfg.LLM.Model, Tools: tools, Redact: red.Redact, Log: log,
-		Limits: llm.Limits{MaxSteps: cfg.LLM.MaxSteps, MaxTokens: cfg.LLM.MaxTokens, Temperature: cfg.LLM.Temperature},
+		Limits: llm.Limits{MaxSteps: cfg.LLM.MaxSteps, MaxTokens: cfg.LLM.MaxTokens, Temperature: cfg.LLM.Temperature,
+			MaxToolResultBytes: cfg.LLM.MaxToolResultBytes, MaxContextBytes: cfg.LLM.MaxContextBytes},
 	}
-	res, err := agent.Run(ctx, systemPrompt(pb, s), userPrompt(pb, red.Redact(string(o.Event))))
+	res, err := agent.Run(runCtx, systemPrompt(pb, s), userPrompt(pb, red.Redact(string(o.Event))))
 	rep := &Report{Playbook: pb.Name, DryRun: s.dryRun, Mode: s.mode, PRs: tb.Opened}
 	if issues != nil {
 		rep.Issues = issues.Created
@@ -137,7 +142,48 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 	if res != nil {
 		rep.Final, rep.Steps, rep.Tokens = res.Final, res.Steps, res.Usage.TotalTokens
 	}
+	// The run's own deadline may be over; the comments get their own.
+	postReport(ctx, prs, rep, red.Redact, log)
 	return rep, err
+}
+
+// maxReportBytes caps the report posted on a PR.
+const maxReportBytes = 32 << 10
+
+// postReport comments the final report on each PR the run opened, e.g.
+// "Report from HeraIon playbook `trivy-remediate`:\n\nBumped alpine ...".
+// A failed comment is a warning, not a failed run.
+func postReport(ctx context.Context, prs scm.PRService, rep *Report, redact func(string) string, log *slog.Logger) {
+	final := strings.TrimSpace(rep.Final)
+	if final == "" {
+		return
+	}
+	var targets []scm.OpenedPR
+	for _, pr := range rep.PRs {
+		switch pr.Outcome {
+		case scm.OutcomeOpened, scm.OutcomeFellBack:
+			targets = append(targets, pr)
+		case scm.OutcomeDryRun:
+			log.Info("dry-run: would post report", "repo", pr.Repo, "branch", pr.Branch, "bytes", len(final))
+		}
+	}
+	if len(targets) == 0 || prs == nil {
+		return
+	}
+	body := redact(final)
+	if len(body) > maxReportBytes {
+		body = textutil.Truncate(body, maxReportBytes) + "\n\n...[truncated]"
+	}
+	body = "Report from HeraIon playbook `" + rep.Playbook + "`:\n\n" + body
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	for _, pr := range targets {
+		if err := prs.Comment(ctx, pr.Repo, pr.Number, body); err != nil {
+			log.Warn("could not post the report on the PR", "repo", pr.Repo, "url", pr.URL, "err", err)
+			continue
+		}
+		log.Info("posted report on PR", "repo", pr.Repo, "url", pr.URL)
+	}
 }
 
 // resolveScope narrows the playbook to the global config and warns about

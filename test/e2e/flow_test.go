@@ -193,7 +193,7 @@ func TestWebhookToPullRequest(t *testing.T) {
 	branch := "heraion/" + playbook + "/bump-alpine"
 
 	t.Run("worker refuses unsafe changes and opens a PR", func(t *testing.T) {
-		llm, _ := worker(t, eventFile,
+		llm, out := worker(t, eventFile,
 			llmtest.Turn{Calls: []llmtest.Call{{Name: "repo_list", Args: map[string]any{"repo": repo, "recursive": true}}}},
 			llmtest.Turn{Calls: []llmtest.Call{
 				write(".github/workflows/ci.yml", "on: pull_request\n"),
@@ -201,7 +201,7 @@ func TestWebhookToPullRequest(t *testing.T) {
 			}},
 			llmtest.Turn{Calls: []llmtest.Call{openPR("leak", "leak")}},
 			llmtest.Turn{Calls: bump},
-			llmtest.Turn{Final: "done"},
+			llmtest.Turn{Final: "Bumped alpine. ref " + gitToken},
 		)
 		user := llm.Requests[0].Messages[1].Text()
 		if !strings.Contains(user, "KubePodCrashLooping") || !strings.Contains(user, "[truncated]") || len(user) > 70<<10 {
@@ -228,6 +228,12 @@ func TestWebhookToPullRequest(t *testing.T) {
 		prs := gt.list(repo)
 		if len(prs) != 1 || strings.Contains(prs[0]["body"].(string), gitToken) || !strings.Contains(prs[0]["body"].(string), "[REDACTED]") {
 			t.Errorf("PR body not redacted: %+v", prs)
+		}
+		if c := gt.commentsOn(repo, 1); len(c) != 1 || !strings.Contains(c[0], "Bumped alpine.") || strings.Contains(c[0], gitToken) {
+			t.Errorf("report comment on PR #1: %q", c)
+		}
+		if !strings.Contains(out, `"tool":"repo_write_file","args":"{\"content\":\"<17 bytes>\"`) {
+			t.Errorf("no tool call line with the content length for repo_write_file:\n%s", out)
 		}
 		if gt.unauthed != 0 {
 			t.Errorf("%d Gitea API calls without a token", gt.unauthed)

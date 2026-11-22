@@ -1,9 +1,12 @@
-// Package secret resolves a credential from up to three env vars, first hit wins:
+// Package secret resolves a credential from up to three env vars, in order:
 //
 //	HERAION_GIT_TOKEN_FILE      a file, e.g. a projected ServiceAccount token or a
 //	                            Secrets Store CSI mount; re-read so rotation works
 //	HERAION_GIT_TOKEN           e.g. from an existing Secret (optional key)
 //	HERAION_GIT_TOKEN_FALLBACK  the literal value from the chart's Secret
+//
+// A set _FILE whose file is missing or empty is an error: the lower levels are
+// not tried, so a broken CSI mount never runs on the literal fallback.
 package secret
 
 import (
@@ -66,7 +69,8 @@ func FromMap(name string, m map[string]string) *Source {
 	return New(name, func(k string) string { return m[k] })
 }
 
-// Value returns the first non-empty value, or ErrMissing.
+// Value returns the value, an error naming a set but unreadable or empty
+// _FILE, or ErrMissing.
 func (s *Source) Value() (string, error) {
 	v, _, err := s.resolve()
 	return v, err
@@ -102,18 +106,13 @@ func (s *Source) resolve() (string, string, error) {
 	}
 	if path := s.getenv(s.Name + SuffixFile); path != "" {
 		v, err := s.readFile(path)
-		if err == nil && v != "" {
-			return v, OriginFile, nil
+		switch {
+		case err != nil:
+			return "", OriginNone, fmt.Errorf("%s: %w%s", s.Name+SuffixFile, err, s.notTried())
+		case v == "":
+			return "", OriginNone, fmt.Errorf("%s: file %s is empty%s", s.Name+SuffixFile, path, s.notTried())
 		}
-		// A configured but unreadable file is worth reporting, unless a
-		// lower level still provides a value.
-		if lower, o := s.lower(); lower != "" {
-			return lower, o, nil
-		}
-		if err != nil {
-			return "", OriginNone, fmt.Errorf("%s: %w", s.Name+SuffixFile, err)
-		}
-		return "", OriginNone, fmt.Errorf("%s: file %s is empty", s.Name+SuffixFile, path)
+		return v, OriginFile, nil
 	}
 	if v, o := s.lower(); v != "" {
 		return v, o, nil
@@ -121,6 +120,24 @@ func (s *Source) resolve() (string, string, error) {
 	return "", OriginNone, fmt.Errorf("%s: %w (also tried %s%s and %s%s)", s.Name, ErrMissing, s.Name, SuffixFile, s.Name, SuffixFallback)
 }
 
+// notTried names the lower levels a broken file did not fall back to, e.g.
+// " (not falling back to HERAION_GIT_TOKEN_FALLBACK: fix the file or unset HERAION_GIT_TOKEN_FILE)".
+func (s *Source) notTried() string {
+	var set []string
+	for _, n := range []string{s.Name, s.Name + SuffixFallback} {
+		if strings.TrimSpace(s.getenv(n)) != "" {
+			set = append(set, n)
+		}
+	}
+	if len(set) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (not falling back to %s: fix the file or unset %s)", strings.Join(set, " or "), s.Name+SuffixFile)
+}
+
+// lower reads <ENV>, then <ENV>_FALLBACK. An empty <ENV> means "not
+// configured", e.g. an optional secretKeyRef whose key is missing, so the
+// fallback is used.
 func (s *Source) lower() (string, string) {
 	if v := strings.TrimSpace(s.getenv(s.Name)); v != "" {
 		return v, OriginEnv
