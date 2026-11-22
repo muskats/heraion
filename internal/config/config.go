@@ -147,7 +147,20 @@ type LLM struct {
 	MaxTokens   int            `json:"maxTokens,omitempty"` // total token budget per run
 	Timeout     Duration       `json:"timeout,omitempty"`
 	Temperature *float64       `json:"temperature,omitempty"`
+	// MaxToolResultBytes cuts each tool result, e.g. 16384 (the default).
+	MaxToolResultBytes int `json:"maxToolResultBytes,omitempty"`
+	// MaxContextBytes caps the history sent per request, e.g. 200000 (the
+	// default): older tool results are replaced by a one-line stub.
+	MaxContextBytes int `json:"maxContextBytes,omitempty"`
 }
+
+// Bounds and defaults of llm.maxToolResultBytes and llm.maxContextBytes.
+const (
+	MinToolResultBytes     = 1 << 10
+	MaxToolResultLimit     = 256 << 10
+	DefaultToolResultBytes = 16 << 10
+	DefaultContextBytes    = 200_000
+)
 
 // Git configures the Git hosting provider.
 type Git struct {
@@ -246,6 +259,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LLM.Timeout.Duration == 0 {
 		c.LLM.Timeout.Duration = 20 * time.Minute
+	}
+	if c.LLM.MaxToolResultBytes == 0 {
+		c.LLM.MaxToolResultBytes = DefaultToolResultBytes
+	}
+	if c.LLM.MaxContextBytes == 0 {
+		c.LLM.MaxContextBytes = DefaultContextBytes
 	}
 	c.LLM.BaseURL = strings.TrimRight(c.LLM.BaseURL, "/")
 	if c.Git.Provider == "" {
@@ -381,6 +400,12 @@ func (l *LLM) validate() []error {
 	}
 	if l.Timeout.Duration <= 0 {
 		errs = append(errs, errors.New("llm.timeout must be positive"))
+	}
+	if l.MaxToolResultBytes < MinToolResultBytes || l.MaxToolResultBytes > MaxToolResultLimit {
+		errs = append(errs, fmt.Errorf("llm.maxToolResultBytes must be between %d and %d", MinToolResultBytes, MaxToolResultLimit))
+	}
+	if l.MaxContextBytes < l.MaxToolResultBytes {
+		errs = append(errs, fmt.Errorf("llm.maxContextBytes (%d) must be at least llm.maxToolResultBytes (%d)", l.MaxContextBytes, l.MaxToolResultBytes))
 	}
 	return errs
 }
@@ -522,6 +547,26 @@ func checkURLSchemes(s string, allowFile bool) error {
 		return errors.New("missing host")
 	}
 	return nil
+}
+
+// CheckCredentials reads the LLM API key and the Git token when they are
+// set, so a broken file source fails the run at its start, e.g.
+// "git token: HERAION_GIT_TOKEN_FILE: open /var/run/secrets/heraion/csi/git-token: no such file or directory".
+// Unset is fine: no key (e.g. Ollama), no token (public repos).
+func (c *Config) CheckCredentials() error {
+	var errs []error
+	for _, cr := range []struct {
+		label string
+		src   *secret.Source
+	}{{"llm api key", c.LLM.APIKey}, {"git token", c.Git.Token}} {
+		if !cr.src.Set() {
+			continue
+		}
+		if _, err := cr.src.Value(); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", cr.label, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Secrets returns the credentials to mask in prompts and logs.

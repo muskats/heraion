@@ -14,18 +14,19 @@ import (
 	"time"
 )
 
-// gitea serves the part of the Gitea v1 API go-scm uses for PRs. Like Gitea,
-// listing without ?state= returns only open PRs.
+// gitea serves the part of the Gitea v1 API go-scm uses for PRs and their
+// comments. Like Gitea, listing without ?state= returns only open PRs.
 type gitea struct {
 	*httptest.Server
 	mu         sync.Mutex
 	prs        map[string][]map[string]any // "owner/repo" -> PRs
+	comments   map[string][]string         // "owner/repo#1" -> comment bodies
 	listStates []string
 	unauthed   int // API calls without Authorization
 }
 
 func newGitea(t *testing.T) *gitea {
-	g := &gitea{prs: map[string][]map[string]any{}}
+	g := &gitea{prs: map[string][]map[string]any{}, comments: map[string][]string{}}
 	g.Server = httptest.NewServer(http.HandlerFunc(g.handle))
 	t.Cleanup(g.Close)
 	return g
@@ -67,6 +68,12 @@ func (g *gitea) close(repo string, n int) {
 	pr["state"], pr["updated_at"], pr["closed_at"] = "closed", ts(time.Now()), ts(time.Now())
 }
 
+func (g *gitea) commentsOn(repo string, n int) []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.comments[fmt.Sprintf("%s#%d", repo, n)]...)
+}
+
 func (g *gitea) list(repo string) []map[string]any {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -84,6 +91,19 @@ func (g *gitea) handle(w http.ResponseWriter, r *http.Request) {
 		g.unauthed++
 	}
 	p := strings.Split(r.URL.Path, "/") // "", api, v1, repos, owner, repo, pulls
+	// PR comments are issue comments: POST /api/v1/repos/owner/repo/issues/1/comments
+	if len(p) == 9 && p[3] == "repos" && p[6] == "issues" && p[8] == "comments" && r.Method == http.MethodPost {
+		var in struct{ Body string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			send(w, http.StatusUnprocessableEntity, map[string]string{"message": err.Error()})
+			return
+		}
+		key := p[4] + "/" + p[5] + "#" + p[7]
+		g.comments[key] = append(g.comments[key], in.Body)
+		send(w, http.StatusCreated, map[string]any{"id": len(g.comments[key]), "body": in.Body,
+			"user": map[string]any{"login": "heraion"}, "created_at": ts(time.Now()), "updated_at": ts(time.Now())})
+		return
+	}
 	if len(p) != 7 || p[3] != "repos" || p[6] != "pulls" {
 		send(w, http.StatusNotFound, map[string]string{"message": "not found"})
 		return

@@ -154,6 +154,23 @@ func TestCheckRoles(t *testing.T) {
 	}
 }
 
+func TestCheckFailsOnBrokenFileSource(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "git-token")
+	t.Setenv("HERAION_GIT_TOKEN_FILE", missing)
+	t.Setenv("HERAION_GIT_TOKEN_FALLBACK", "literal-fallback-token")
+	out, _ := capture(t)
+	if err := cmdCheck(context.Background(), []string{"--config", setup(t, "http://x", "")}); err == nil {
+		t.Fatalf("a broken token file must fail the check:\n%s", out)
+	}
+	if !strings.Contains(out.String(), "FAIL  secret     HERAION_GIT_TOKEN for git: HERAION_GIT_TOKEN_FILE: open "+missing) ||
+		!strings.Contains(out.String(), "not falling back to HERAION_GIT_TOKEN_FALLBACK") {
+		t.Errorf("secret line:\n%s", out)
+	}
+	if strings.Contains(out.String(), "literal-fallback-token") {
+		t.Error("check must never print secret values")
+	}
+}
+
 func TestCheckReportsBadConfig(t *testing.T) {
 	out, _ := capture(t)
 	// An empty hook used to crash `check --role gateway`.

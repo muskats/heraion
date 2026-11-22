@@ -101,8 +101,8 @@ These credentials can each use any of the sources below:
 For example, `mcpServers.datadog.secretHeaders.DD-API-KEY` becomes the env var
 `HERAION_MCP_DATADOG_DD_API_KEY` with the key `mcp-datadog-dd-api-key`.
 
-The chart renders every source you configure. When the value is needed, the binary uses the
-first one that has a value:
+The chart renders every source you configure. When the value is needed, the binary uses
+level 1 if it is configured, otherwise the first of levels 2 and 3 that has a value:
 
 | Order | Values | Pod env | Typical use |
 |---|---|---|---|
@@ -115,8 +115,12 @@ Rules:
 
 - Level 2 defaults to `secrets.existingSecret` with the default key from the first table. A
   credential's own `existingSecret` and `key` override that.
-- A missing key or file is skipped, not fatal. `optional: true` lets the pod start without
-  the key, and the next level is used.
+- A configured level 1 file that is missing or empty fails the run and `helm test`, e.g.
+  `HERAION_LLM_API_KEY_FILE: open /var/run/secrets/heraion/csi/llm-api-key: no such file or
+  directory (not falling back to HERAION_LLM_API_KEY_FALLBACK ...)`. Levels 2 and 3 are not
+  used, so a broken CSI mount never runs on a literal value.
+- A missing level 2 key is skipped. `optional: true` lets the pod start without the key, and
+  level 3 is used.
 - If no level has a value, the run fails. `helm test` reports it first.
 - The check happens at runtime, not render time, because Helm cannot see what an existing
   Secret contains without `lookup`. That would break `helm template`, Argo CD and Flux.
@@ -407,7 +411,14 @@ llm:
   maxSteps: 30                         # model turns per run
   maxTokens: 500000                    # tokens per run
   timeout: 20m
+  maxToolResultBytes: 16384            # each tool result is cut here
+  maxContextBytes: 200000              # history per request, see below
 ```
+
+Every request resends the history. Above `maxContextBytes` the oldest tool results, except
+the last 4, become `[earlier k8s__pods_log result of 16384 bytes removed ...]`, so the model
+calls the tool again if it needs it. The defaults need a model context of about 64k tokens;
+for a 32k model, use e.g. `maxContextBytes: 80000` and `maxToolResultBytes: 8192`.
 
 With `litellm.enabled: true` and `llm.baseURL` left empty, workers use
 `http://<release>-litellm-gateway:4000/v1`. Configure LiteLLM under `litellm:` as in its
@@ -517,6 +528,8 @@ rejected by [values.schema.json](values.schema.json).
 | `llm.model` | `""` | Required, e.g. `gpt-4.1` |
 | `llm.apiKey` | `{}` | Credential, see [Secrets](#secrets) |
 | `llm.maxSteps`, `llm.maxTokens`, `llm.timeout` | `30`, `500000`, `20m` | Limits per run |
+| `llm.maxToolResultBytes` | `16384` | Each tool result is cut here; 1024 to 262144 |
+| `llm.maxContextBytes` | `200000` | History per request; above it the oldest tool results (not the last 4) become a stub |
 | `llm.temperature` | unset | Sent only when set |
 | `git.provider` | `github` | `github`, `gitlab`, `gitea`, `bitbucket`, `stash`, `gogs`, `azure` |
 | `git.endpoint` | `""` | API URL of a self-hosted server |
@@ -610,6 +623,7 @@ rejected by [values.schema.json](values.schema.json).
 | `mcpServers.<name>.headers` | `{}` | Plain headers |
 | `mcpServers.<name>.secretHeaders.<header>` | | Credential |
 | `mcpServers.<name>.deploy.image` | | `registry`, `repository`, `tag`, `digest`, `pullPolicy` |
+| `mcpServers.{k8s,atlassian}.deploy.image.digest` | `sha256:...` of the default tag | Wins over `tag`: set `""` when you change `tag` |
 | `mcpServers.<name>.deploy.port`, `args`, `command`, `env`, `envFrom`, `replicas` | | Container settings |
 | `mcpServers.<name>.deploy.files` | `{}` | Files mounted at `filesMountPath` (default `/etc/mcp`) |
 | `mcpServers.<name>.deploy.secretEnv.<VAR>` | | `existingSecret` + `key`, or `value` |
@@ -679,6 +693,16 @@ helm upgrade heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f my-value
 - With `rbac.create: false`, keep your RBAC in line with the chart's: see
   [Security defaults](#security-defaults).
 - Breaking changes are listed in the release notes of each chart version.
+
+Behavior changes in 2.1.0 (no values need to change):
+
+| 2.0.0 | 2.1.0 |
+|---|---|
+| Tool results cut at 64 KiB | Cut at `llm.maxToolResultBytes`, default 16 KiB; set `65536` for the old size |
+| Full history sent on every request | Above `llm.maxContextBytes` (default 200000) the oldest tool results become a stub |
+| `tool call` log line has only `tool` | Also `args` (shortened, masked), `resultBytes`, `durationMs`, `error` |
+| The final report is only in the `run finished` log line | It is also posted as a comment on each PR the run opened |
+| A missing or empty `serviceAccountToken` or `csiKey` file falls back to `existingSecret`, then `value` | It fails the run and `helm test` with the file's env var and path |
 
 Breaking changes in 2.0.0:
 

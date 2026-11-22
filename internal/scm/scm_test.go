@@ -17,6 +17,7 @@ import (
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/scm"
 	"github.com/muskats/heraion/internal/scm/scmtest"
+	"github.com/muskats/heraion/internal/secret"
 )
 
 const repo = "acme/app"
@@ -494,5 +495,16 @@ func TestPushToBase(t *testing.T) {
 	}
 	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); got != "FROM alpine:3.20\n" {
 		t.Errorf("main: %q", got)
+	}
+}
+
+func TestBrokenTokenFileIsNotAnonymous(t *testing.T) {
+	base := t.TempDir()
+	url := scmtest.NewRemote(t, base, repo, map[string]string{"a": "b"})
+	tok := secret.FromMap("HERAION_GIT_TOKEN", map[string]string{"HERAION_GIT_TOKEN_FILE": "/nonexistent/token"})
+	ws := scm.NewWorkspaces(config.Git{CloneBaseURL: url, Token: tok}, t.TempDir(), nil)
+	t.Cleanup(ws.Close)
+	if _, err := ws.Get(context.Background(), repo); err == nil || !strings.Contains(err.Error(), "git token: HERAION_GIT_TOKEN_FILE") {
+		t.Fatalf("a set but unreadable token must fail the clone, got %v", err)
 	}
 }

@@ -9,6 +9,8 @@ llm:
   maxSteps: 30        # model turns per run
   maxTokens: 500000   # tokens per run
   timeout: 20m
+  maxToolResultBytes: 16384   # each tool result is cut here
+  maxContextBytes: 200000     # older tool results become a stub above this
 
 git:
   provider: gitea                          # github, gitlab, gitea, bitbucket, stash, gogs, azure

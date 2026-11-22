@@ -6,6 +6,8 @@ llm:
     existingSecret: llm-creds              # 2. optional key
     key: api-key
     value: sk-literal-fallback             # 3. literal
+  maxToolResultBytes: 32768
+  maxContextBytes: 120000
 git:
   provider: gitea
   endpoint: https://git.example.internal

@@ -1,6 +1,8 @@
 module github.com/muskats/heraion
 
-go 1.26.11
+go 1.26.3
+
+toolchain go1.26.11
 
 require (
 	github.com/bmatcuk/doublestar/v4 v4.10.4

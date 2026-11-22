@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Static checks: formatting, Chart.yaml version, go vet, module tidiness,
+# Static checks: formatting, release and Go versions, go vet, module tidiness,
 # golangci-lint, govulncheck, GitHub workflow lint and shellcheck.
 #
 #   scripts/lint.sh            all checks
@@ -15,7 +15,7 @@ unformatted=$(gofmt -l "${gofiles[@]}")
 [[ -z "$unformatted" ]] || die "not gofmt'ed (run gofmt -w):"$'\n'"$unformatted"
 ok "gofmt"
 
-log "chart version"
+log "versions"
 scripts/check-version.sh
 
 log "go vet"

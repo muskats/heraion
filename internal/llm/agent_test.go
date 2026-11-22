@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -201,5 +202,109 @@ func TestMissingAPIKeyIsNotRetried(t *testing.T) {
 	}
 	if len(srv.Requests) != 0 {
 		t.Errorf("no request may be sent without a key, got %d", len(srv.Requests))
+	}
+}
+
+func TestToolResultCap(t *testing.T) {
+	srv := llmtest.New(t,
+		llmtest.Turn{Calls: []llmtest.Call{{Name: "t", Args: map[string]int{}}}},
+		llmtest.Turn{Final: "done"},
+	)
+	n := 0
+	a := newAgent(t, srv, counter{name: "t", calls: &n, out: strings.Repeat("x", 5000)})
+	a.Limits.MaxToolResultBytes = 1024
+	if _, err := a.Run(context.Background(), "s", "u"); err != nil {
+		t.Fatal(err)
+	}
+	got := srv.Requests[1].Messages[3].Text()
+	if !strings.HasPrefix(got, strings.Repeat("x", 1024)+"\n...[truncated, 5000 bytes total]") {
+		t.Fatalf("result not cut at 1024 bytes: %d bytes", len(got))
+	}
+}
+
+func TestContextTrimsOldestToolResults(t *testing.T) {
+	call := llmtest.Turn{Calls: []llmtest.Call{{Name: "t", Args: map[string]int{}}}}
+	srv := llmtest.New(t, call, call, call, call, call, call, call, llmtest.Turn{Final: "done"})
+	n := 0
+	system, user := strings.Repeat("s", 3000), strings.Repeat("u", 3000)
+	a := newAgent(t, srv, counter{name: "t", calls: &n, out: strings.Repeat("r", 1000)})
+	a.Limits.MaxSteps = 10
+	a.Limits.MaxContextBytes = 9000 // prompts 6000 + 3 results; 7 results do not fit
+	var logs strings.Builder
+	a.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	if _, err := a.Run(context.Background(), system, user); err != nil {
+		t.Fatal(err)
+	}
+	last := srv.Requests[len(srv.Requests)-1].Messages
+	if last[0].Text() != system || last[1].Text() != user {
+		t.Fatal("system and user messages must never be trimmed")
+	}
+	var results []string
+	for _, m := range last {
+		if m.Role == "tool" {
+			results = append(results, m.Text())
+		}
+	}
+	if len(results) != 7 {
+		t.Fatalf("got %d tool messages", len(results))
+	}
+	for i, r := range results {
+		stub := strings.HasPrefix(r, "[earlier t result of 1000 bytes removed")
+		if i < 3 && !stub {
+			t.Errorf("result %d should be a stub: %.40q", i, r)
+		}
+		if i >= 3 && stub {
+			t.Errorf("result %d (one of the last 4) was trimmed", i)
+		}
+	}
+	if c := strings.Count(logs.String(), `"msg":"context trimmed"`); c != 1 {
+		t.Errorf("context trimmed logged %d times, want once", c)
+	}
+}
+
+func TestToolCallLog(t *testing.T) {
+	const tok = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	srv := llmtest.New(t,
+		llmtest.Turn{Calls: []llmtest.Call{
+			{Name: "repo_write_file", Args: map[string]string{"repo": "a/b", "path": "Dockerfile", "content": "FROM x"}},
+			{Name: "k8s__get", Args: map[string]any{"q": tok, "long": strings.Repeat("l", 300)}},
+			{Name: "k8s__get", Args: map[string]string{"q": "fail"}},
+		}},
+		llmtest.Turn{Final: "done"},
+	)
+	a := newAgent(t, srv, echo{"repo_write_file"}, echo{"k8s.get"})
+	a.Redact = func(s string) string { return strings.ReplaceAll(s, tok, "[REDACTED]") }
+	var logs strings.Builder
+	a.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	if _, err := a.Run(context.Background(), "s", "u"); err != nil {
+		t.Fatal(err)
+	}
+	var lines []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m["msg"] == "tool call" {
+			lines = append(lines, m)
+		}
+	}
+	if len(lines) != 3 {
+		t.Fatalf("want 3 tool call lines, got %d:\n%s", len(lines), logs.String())
+	}
+	if got := lines[0]["args"]; got != `{"content":"<6 bytes>","path":"Dockerfile","repo":"a/b"}` {
+		t.Errorf("repo_write_file args %v", got)
+	}
+	if got := lines[1]["args"].(string); strings.Contains(got, tok) || !strings.Contains(got, "[REDACTED]") || !strings.Contains(got, `"long":"<300 bytes>"`) {
+		t.Errorf("k8s.get args %v", got)
+	}
+	if lines[1]["tool"] != "k8s.get" || lines[1]["error"] != false || lines[1]["resultBytes"] == nil || lines[1]["durationMs"] == nil {
+		t.Errorf("fields %v", lines[1])
+	}
+	if lines[2]["error"] != true || lines[2]["err"] != "boom" {
+		t.Errorf("failed call %v", lines[2])
+	}
+	if strings.Contains(logs.String(), "FROM x") {
+		t.Error("file content was logged")
 	}
 }

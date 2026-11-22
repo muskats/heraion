@@ -46,13 +46,17 @@ func NewWorkspaces(g config.Git, dir string, resolve CloneURLFunc) *Workspaces {
 }
 
 // auth reads the token on every call, so a push long after the clone still
-// uses a fresh token. No token means anonymous access (e.g. public repos).
-func (w *Workspaces) auth() *githttp.BasicAuth {
-	tok := w.git.Token.String()
-	if tok == "" {
-		return nil
+// uses a fresh token. No token set means anonymous access (e.g. public
+// repos); a set token that cannot be read is an error, not anonymous access.
+func (w *Workspaces) auth() (*githttp.BasicAuth, error) {
+	if !w.git.Token.Set() {
+		return nil, nil
 	}
-	return &githttp.BasicAuth{Username: w.git.Username, Password: tok}
+	tok, err := w.git.Token.Value()
+	if err != nil {
+		return nil, fmt.Errorf("git token: %w", err)
+	}
+	return &githttp.BasicAuth{Username: w.git.Username, Password: tok}, nil
 }
 
 // CloneURL returns the clone URL for owner/name.
@@ -81,9 +85,13 @@ func (w *Workspaces) Get(ctx context.Context, repo string) (*Repo, error) {
 		}
 		cloneURL = u
 	}
+	auth, err := w.auth()
+	if err != nil {
+		return nil, fmt.Errorf("clone %s: %w", repo, err)
+	}
 	g, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{
 		URL:          cloneURL,
-		Auth:         w.auth(),
+		Auth:         auth,
 		Depth:        1,
 		SingleBranch: true,
 		Tags:         git.NoTags,
@@ -126,7 +134,7 @@ type Repo struct {
 	baseHash plumbing.Hash
 	g        *git.Repository
 	root     *os.Root // confines all file access to the clone, symlinks included
-	auth     func() *githttp.BasicAuth
+	auth     func() (*githttp.BasicAuth, error)
 	author   config.Git
 }
 
@@ -365,7 +373,11 @@ func (r *Repo) PushToBase(ctx context.Context, branch string) error {
 
 // push pushes one refspec to origin, e.g. "+refs/heads/a:refs/heads/a".
 func (r *Repo) push(ctx context.Context, spec gitcfg.RefSpec) error {
-	err := r.g.PushContext(ctx, &git.PushOptions{RemoteName: "origin", RefSpecs: []gitcfg.RefSpec{spec}, Auth: r.auth()})
+	auth, err := r.auth()
+	if err != nil {
+		return err
+	}
+	err = r.g.PushContext(ctx, &git.PushOptions{RemoteName: "origin", RefSpecs: []gitcfg.RefSpec{spec}, Auth: auth})
 	if errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return nil
 	}
