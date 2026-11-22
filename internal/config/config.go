@@ -487,10 +487,10 @@ func (gw *Gateway) validate() []error {
 	if gw.MetricsListen != "" && gw.MetricsListen == gw.Listen {
 		errs = append(errs, fmt.Errorf("gateway.metricsListen %q must differ from gateway.listen", gw.MetricsListen))
 	}
-	// The body is stored in a Secret, whose data is capped at 1 MiB.
 	if gw.MaxConcurrentJobs < 0 {
 		errs = append(errs, errors.New("gateway.maxConcurrentJobs must be >= 0 (0: no limit)"))
 	}
+	// The body is stored in a Secret, whose data is capped at 1 MiB.
 	if gw.MaxBodyBytes < 0 || gw.MaxBodyBytes > MaxBodyBytesLimit {
 		errs = append(errs, fmt.Errorf("gateway.maxBodyBytes must be between 1 and %d", MaxBodyBytesLimit))
 	}

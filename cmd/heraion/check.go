@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -61,19 +63,24 @@ func cmdCheck(ctx context.Context, args []string) error {
 		c.ok("playbooks", strings.Join(names, ", "))
 	}
 
+	// Map keys are sorted, so the output has the same order on every run.
 	switch *role {
 	case "gateway":
-		for name, h := range cfg.Gateway.Hooks {
-			if !h.Insecure {
+		for _, name := range slices.Sorted(maps.Keys(cfg.Gateway.Hooks)) {
+			if h := cfg.Gateway.Hooks[name]; !h.Insecure {
 				c.secret(h.Secret, true, "hook "+name)
 			}
+		}
+		if *connect {
+			c.warn("connect", "--connect checks the worker's MCP servers and LLM; use it without --role gateway")
 		}
 	default:
 		c.secret(cfg.LLM.APIKey, false, "llm")
 		c.secret(cfg.Git.Token, false, "git")
-		for name, m := range cfg.MCPServers {
-			for h, src := range m.SecretHeaders {
-				c.secret(src, true, "mcp "+name+" "+h)
+		for _, name := range slices.Sorted(maps.Keys(cfg.MCPServers)) {
+			m := cfg.MCPServers[name]
+			for _, h := range slices.Sorted(maps.Keys(m.SecretHeaders)) {
+				c.secret(m.SecretHeaders[h], true, "mcp "+name+" "+h)
 			}
 		}
 	}
@@ -82,7 +89,8 @@ func cmdCheck(ctx context.Context, args []string) error {
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		jiraChecked := false
-		for name, srv := range cfg.MCPServers {
+		for _, name := range slices.Sorted(maps.Keys(cfg.MCPServers)) {
+			srv := cfg.MCPServers[name]
 			sess, tools, err := mcp.Dial(ctx, name, srv, version)
 			switch {
 			case err != nil && srv.Required:

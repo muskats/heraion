@@ -128,6 +128,10 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 		}
 	}
 	if t.Guard.DryRun() {
+		// The same budget as a real run, so a dry run logs what it would create.
+		if err := t.Guard.ReserveIssue(); err != nil {
+			return "", err
+		}
 		log.Info("dry-run: would create issue", "summary", in.Summary, "type", in.Type, "labels", in.Labels, "description", in.Description)
 		t.Created = append(t.Created, Created{Project: a.Project, Summary: in.Summary, Fingerprint: fp, Outcome: OutcomeDryRun})
 		return fmt.Sprintf("dry-run: issue %q in %s was logged, not created", in.Summary, a.Project), nil

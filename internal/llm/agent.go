@@ -58,17 +58,6 @@ func NewRegistry(tools ...Tool) (*Registry, error) {
 	return r, nil
 }
 
-// Filter returns a registry holding only tools for which allow is true.
-func (r *Registry) Filter(allow func(name string) bool) *Registry {
-	out := &Registry{byWire: map[string]Tool{}}
-	for w, t := range r.byWire {
-		if allow(t.Name()) {
-			out.byWire[w] = t
-		}
-	}
-	return out
-}
-
 // Names returns the canonical names, sorted.
 func (r *Registry) Names() []string {
 	names := make([]string, 0, len(r.byWire))

@@ -272,3 +272,28 @@ func TestSecretHeaderNotSentAcrossRedirect(t *testing.T) {
 		}
 	}
 }
+
+// A server that sends the headers of a tool call only with its result must
+// get the tool timeout, not the connect timeout, e.g. 300ms of work with a
+// 100ms connect timeout and timeout: 5s.
+func TestSlowToolGetsToolTimeout(t *testing.T) {
+	defer mcp.SetConnectTimeout(100 * time.Millisecond)()
+	s := sdk.NewServer(&sdk.Implementation{Name: "slow", Version: "1"}, nil)
+	sdk.AddTool(s, &sdk.Tool{Name: "slow"}, func(context.Context, *sdk.CallToolRequest, struct{}) (*sdk.CallToolResult, any, error) {
+		time.Sleep(300 * time.Millisecond)
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "done"}}}, nil, nil
+	})
+	ts := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return s },
+		&sdk.StreamableHTTPOptions{JSONResponse: true}))
+	defer ts.Close()
+
+	srv := &config.MCPServer{URL: ts.URL, Transport: "streamable", Timeout: config.Duration{Duration: 5 * time.Second}}
+	sess, tools, err := mcp.Dial(context.Background(), "s", srv, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	if out, err := tools[0].Call(context.Background(), json.RawMessage(`{}`)); err != nil || out != "done" {
+		t.Fatalf("got %q, %v", out, err)
+	}
+}

@@ -2,8 +2,8 @@ apiVersion: v2
 name: heraion
 description: Finds cluster problems with an LLM and proposes fixes as pull requests.
 type: application
-version: 2.1.0
-appVersion: "2.1.0"
+version: 2.1.1
+appVersion: "2.1.1"
 kubeVersion: ">=1.27.0-0"
 keywords: [ai, llm, agent, mcp, sre, remediation, trivy, alertmanager]
 annotations:
