@@ -144,7 +144,7 @@ playbooks:
 
 | Sender | `auth` | `header` | Notes |
 |---|---|---|---|
-| Alertmanager | `token` | `Authorization` (default) | `http_config.authorization.credentials` |
+| Alertmanager | `token` | `Authorization` (default) | `http_config.authorization.credentials`; `send_resolved: false`, or each resolved alert starts a run |
 | GitHub | `hmac-sha256` | `X-Hub-Signature-256` (default) | |
 | Gitea / Forgejo | `hmac-sha256` | `X-Gitea-Signature` | Hex digest, no prefix |
 | GitLab | `token` | `X-Gitlab-Token` | |

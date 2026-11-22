@@ -134,7 +134,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		Limits: llm.Limits{MaxSteps: cfg.LLM.MaxSteps, MaxTokens: cfg.LLM.MaxTokens, Temperature: cfg.LLM.Temperature,
 			MaxToolResultBytes: cfg.LLM.MaxToolResultBytes, MaxContextBytes: cfg.LLM.MaxContextBytes},
 	}
-	res, err := agent.Run(runCtx, systemPrompt(pb, s), userPrompt(pb, red.Redact(string(o.Event))))
+	res, err := agent.Run(runCtx, systemPrompt(pb, s, tools.Names()), userPrompt(pb, red.Redact(string(o.Event))))
 	rep := &Report{Playbook: pb.Name, DryRun: s.dryRun, Mode: s.mode, PRs: tb.Opened}
 	if issues != nil {
 		rep.Issues = issues.Created
@@ -240,24 +240,29 @@ func issueGuard(j *config.Jira, tools []llm.Tool, projects []string, playbookNam
 
 // allowedTools keeps the tools the playbook allows that can do something:
 // no Git tools without repos, no open_pr or create_issue with a budget of 0.
+// Only the kept tools must have distinct wire names.
 func allowedTools(pb *playbook.Playbook, repos []string, all []llm.Tool) (*llm.Registry, error) {
-	reg, err := llm.NewRegistry(all...)
-	if err != nil {
-		return nil, err
-	}
-	return reg.Filter(func(n string) bool {
-		switch {
-		case !pb.AllowsTool(n):
-			return false
-		case isGitTool(n) && len(repos) == 0:
-			return false
-		case n == "open_pr" && pb.Guardrails.MaxPRs == 0:
-			return false
-		case n == "create_issue" && pb.Guardrails.MaxIssues == 0:
-			return false
+	var keep []llm.Tool
+	for _, t := range all {
+		if usable(pb, repos, t.Name()) {
+			keep = append(keep, t)
 		}
-		return true
-	}), nil
+	}
+	return llm.NewRegistry(keep...)
+}
+
+func usable(pb *playbook.Playbook, repos []string, n string) bool {
+	switch {
+	case !pb.AllowsTool(n):
+		return false
+	case isGitTool(n) && len(repos) == 0:
+		return false
+	case n == "open_pr" && pb.Guardrails.MaxPRs == 0:
+		return false
+	case n == "create_issue" && pb.Guardrails.MaxIssues == 0:
+		return false
+	}
+	return true
 }
 
 // warnNarrowed logs playbook entries that the global config does not allow,
@@ -276,7 +281,9 @@ func warnNarrowed(log *slog.Logger, key string, asked, effective []string) {
 
 func isGitTool(n string) bool { return strings.HasPrefix(n, "repo_") || n == "open_pr" }
 
-func systemPrompt(pb *playbook.Playbook, s scope) string {
+// systemPrompt describes the run. tools are the names the model gets, so
+// open_pr and create_issue are only offered when they are there.
+func systemPrompt(pb *playbook.Playbook, s scope, tools []string) string {
 	var b strings.Builder
 	b.WriteString(`You are HeraIon, an automated investigation agent running inside a Kubernetes cluster.
 You investigate operational problems using only the tools provided, and you deliver fixes
@@ -299,13 +306,13 @@ Rules:
 		fmt.Fprintf(&b, "Kubernetes namespaces you may read: %s. Pass one as 'namespace' in each Kubernetes tool call; "+
 			"other namespaces and cluster-wide queries are refused.\n", strings.Join(s.namespaces, ", "))
 	}
-	if pb.Output == playbook.OutputReport || pb.Guardrails.MaxPRs == 0 {
-		b.WriteString("This playbook produces a report only: do not attempt to open pull requests.\n")
-	} else {
+	if slices.Contains(tools, "open_pr") {
 		fmt.Fprintf(&b, "You may open at most %d pull request(s) in this run. Use a stable 'branch' key per change so reruns de-duplicate.\n", pb.Guardrails.MaxPRs)
 		b.WriteString(modePrompt[s.mode])
+	} else {
+		b.WriteString("This playbook produces a report only: do not attempt to open pull requests.\n")
 	}
-	if len(s.projects) > 0 && pb.AllowsTool("create_issue") && pb.Guardrails.MaxIssues > 0 {
+	if slices.Contains(tools, "create_issue") {
 		fmt.Fprintf(&b, "You may create at most %d Jira issue(s) with create_issue, in: %s. Create one only for a finding that needs a human, and use a stable 'key' so reruns de-duplicate.\n",
 			pb.Guardrails.MaxIssues, strings.Join(s.projects, ", "))
 	}

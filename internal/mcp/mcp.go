@@ -23,6 +23,9 @@ import (
 	"github.com/muskats/heraion/internal/secret"
 )
 
+// connectTimeout bounds connecting and listing tools. Tests shorten it.
+var connectTimeout = 30 * time.Second
+
 // Manager holds open MCP sessions for one run.
 type Manager struct {
 	sessions map[string]*sdk.ClientSession
@@ -100,9 +103,11 @@ func dial(ctx context.Context, name string, srv *config.MCPServer, version strin
 		}
 	}
 	// Time out in the transport, not with a context: SSE ties its stream to
-	// the Connect context, so cancelling it would close the session.
+	// the Connect context, so cancelling it would close the session. A
+	// server may send the headers of a tool call only with its result, so
+	// the wait covers the tool timeout too, e.g. 60s for timeout: 60s.
 	base := http.DefaultTransport.(*http.Transport).Clone()
-	base.ResponseHeaderTimeout = 30 * time.Second
+	base.ResponseHeaderTimeout = max(connectTimeout, srv.Timeout.Duration)
 	u, err := url.Parse(srv.URL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("url: %w", err)
@@ -137,7 +142,7 @@ func dial(ctx context.Context, name string, srv *config.MCPServer, version strin
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect %s: %w", srv.URL, err)
 	}
-	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	var out []llm.Tool
 	for tl, err := range sess.Tools(cctx, nil) {

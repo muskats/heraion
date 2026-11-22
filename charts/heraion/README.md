@@ -317,6 +317,7 @@ receivers:
   - name: heraion
     webhook_configs:
       - url: http://heraion-gateway.heraion.svc:8080/hooks/alertmanager
+        send_resolved: false   # each notification is one run; resolved alerts need none
         http_config:
           authorization: { credentials_file: /etc/alertmanager/secrets/heraion/hook-alertmanager }
 ```
@@ -569,7 +570,7 @@ rejected by [values.schema.json](values.schema.json).
 | `worker.serviceAccount.create`, `.name`, `.annotations` | `true`, `""`, `{}` | Put cloud identity annotations here |
 | `worker.automountServiceAccountToken` | `false` | Workers do not need the Kubernetes API |
 | `worker.backoffLimit` | `0` | Retries of a failed run |
-| `worker.activeDeadlineSeconds` | `1800` | Kill a run after this |
+| `worker.activeDeadlineSeconds` | `1800` | Kill a run after this; keep above `llm.timeout`, or the report is lost |
 | `worker.ttlSecondsAfterFinished` | `86400` | Delete finished Jobs after this |
 | `worker.workspaceSizeLimit` | `2Gi` | `emptyDir` for clones |
 | `worker.cronJob.concurrencyPolicy` | `Forbid` | Skip a schedule while the last run is active |
@@ -693,6 +694,14 @@ helm upgrade heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f my-value
 - With `rbac.create: false`, keep your RBAC in line with the chart's: see
   [Security defaults](#security-defaults).
 - Breaking changes are listed in the release notes of each chart version.
+
+Behavior changes in 2.1.1 (no values need to change):
+
+| 2.1.0 | 2.1.1 |
+|---|---|
+| An MCP tool call fails after 30s, whatever `mcpServers.<name>.timeout` says | It runs up to that timeout, e.g. 60s |
+| Dry-run `create_issue` logs any number of issues | It stops at `guardrails.maxIssues`, like a real run |
+| A slow Kubernetes API keeps the webhook request open | The gateway answers 500 after 15s; the sender retries |
 
 Behavior changes in 2.1.0 (no values need to change):
 

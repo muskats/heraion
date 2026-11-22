@@ -96,11 +96,13 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           REPO: ghcr.io/${{ github.repository_owner }}/charts
+          ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           v="${TAG#v}"
           helm dependency build charts/heraion
           helm package charts/heraion
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
           out=$(helm push "heraion-$v.tgz" "oci://$REPO" 2>&1)
           echo "$out"
           digest=$(awk '$1 == "Digest:" { print $2 }' <<<"$out")

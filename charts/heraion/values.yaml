@@ -182,6 +182,8 @@ worker:
   # Workers do not call the Kubernetes API; the k8s MCP server does.
   automountServiceAccountToken: false
   backoffLimit: 0
+  # Keep above llm.timeout (20m) plus clone time, e.g. 1800 for 20m: a killed
+  # run logs no "run finished" line and posts no report on its PRs.
   activeDeadlineSeconds: 1800
   ttlSecondsAfterFinished: 86400
   workspaceSizeLimit: 2Gi

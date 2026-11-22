@@ -109,6 +109,9 @@ func kubeClient(namespace string) (kubernetes.Interface, string, error) {
 		}
 	}
 	rc.UserAgent = "heraion-gateway/" + version
+	// A slow API server fails the webhook with a 500, which the sender
+	// retries, instead of holding the request open.
+	rc.Timeout = 15 * time.Second
 	kc, err := kubernetes.NewForConfig(rc)
 	return kc, namespace, err
 }

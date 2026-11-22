@@ -144,6 +144,15 @@ func TestCheckRoles(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 
+	// --connect has nothing to reach for the gateway: one warn line, no failure.
+	out.Reset()
+	if err := cmdCheck(context.Background(), []string{"--config", setup(t, "http://x", hooks), "--role", "gateway", "--connect"}); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "warn  connect") {
+		t.Errorf("no connect warning:\n%s", out)
+	}
+
 	// Worker role: an unset optional token only warns.
 	out.Reset()
 	if err := cmdCheck(context.Background(), []string{"--config", setup(t, "http://x", "")}); err != nil {

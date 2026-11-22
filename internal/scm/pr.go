@@ -3,6 +3,7 @@ package scm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -41,7 +42,8 @@ type PRInput struct {
 // PRService is the Git hosting API HeraIon uses. It has no merge method.
 type PRService interface {
 	// FindByBranch returns the PRs whose head is branch in repo itself (a
-	// fork's branch of the same name does not count): open ones first.
+	// fork's branch of the same name does not count): the open ones, or the
+	// closed and merged ones when none is open.
 	FindByBranch(ctx context.Context, repo, branch string) ([]PR, error)
 	Create(ctx context.Context, repo string, in PRInput) (*PR, error)
 	// Comment adds a comment to PR number, e.g. the run's report. Azure
@@ -101,16 +103,17 @@ type goscmService struct{ c *goscm.Client }
 
 func (s *goscmService) FindByBranch(ctx context.Context, repo, branch string) ([]PR, error) {
 	// Two passes: some drivers (e.g. Gitea) ignore Open and Closed together
-	// and list only open PRs.
-	var out []PR
-	for _, opts := range []goscm.PullRequestListOptions{{Open: true}, {Closed: true}} {
-		found, err := s.list(ctx, repo, branch, opts)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, found...)
+	// and list only open PRs. An open PR decides alone, so the closed pass,
+	// often the longer one, only runs without one.
+	found, err := s.list(ctx, repo, branch, goscm.PullRequestListOptions{Open: true})
+	if err != nil || openPR(found) != nil {
+		return found, err
 	}
-	return out, nil
+	closed, err := s.list(ctx, repo, branch, goscm.PullRequestListOptions{Closed: true})
+	if err != nil {
+		return nil, err
+	}
+	return append(found, closed...), nil
 }
 
 func (s *goscmService) list(ctx context.Context, repo, branch string, opts goscm.PullRequestListOptions) ([]PR, error) {
@@ -137,9 +140,11 @@ func (s *goscmService) list(ctx context.Context, repo, branch string, opts goscm
 		// Stop on an empty page, not a short one: servers cap the page size,
 		// e.g. Gitea returns at most 50 even when asked for 100.
 		if len(prs) == 0 {
-			break
+			return out, nil
 		}
 	}
+	slog.Warn("PR list cut at the page limit: older PRs on this branch are not seen",
+		"repo", repo, "branch", branch, "pages", maxPages, "pageSize", size)
 	return out, nil
 }
 

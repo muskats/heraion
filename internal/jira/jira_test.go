@@ -191,6 +191,18 @@ func TestCreateDryRunCallsNothing(t *testing.T) {
 	}
 }
 
+// maxIssues: 1 allows one dry-run issue, as in a real run.
+func TestCreateDryRunUsesBudget(t *testing.T) {
+	tl, _ := newTool(t, true, 1)
+	if _, err := call(t, tl, map[string]any{"project": "OPS", "summary": "a", "description": "d", "key": "a"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := call(t, tl, map[string]any{"project": "OPS", "summary": "b", "description": "d", "key": "b"})
+	if err == nil || !strings.Contains(err.Error(), "budget") || len(tl.Created) != 1 {
+		t.Fatalf("second dry-run issue: %v, created %d", err, len(tl.Created))
+	}
+}
+
 func TestSchemaListsAllowedProjects(t *testing.T) {
 	tl, _ := newTool(t, true, 1)
 	var s struct {
