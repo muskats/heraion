@@ -19,7 +19,7 @@ jira:
   server: atlassian
   projects: [OPS, SEC]
 dryRun: true
-mode: yolo
+mode: safe
 playbooks:
   trivy-remediate: { enabled: true, mode: safe }
   alertmanager-triage: { enabled: true }

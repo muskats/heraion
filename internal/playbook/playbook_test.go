@@ -137,11 +137,11 @@ func TestGuardrailDefaultsAndExplicitZero(t *testing.T) {
 
 func TestEffectiveMode(t *testing.T) {
 	for _, c := range []struct{ pb, global, want config.Mode }{
-		{"", config.ModeYolo, config.ModeYolo},
+		{"", config.ModeSafe, config.ModeSafe},
 		{"", "", config.ModeFull},
 		{config.ModeSafe, config.ModeFull, config.ModeSafe},
-		{config.ModeYolo, config.ModeFull, config.ModeFull},
-		{config.ModeYolo, config.ModeYolo, config.ModeYolo},
+		{config.ModeFull, config.ModeSafe, config.ModeSafe},
+		{config.ModeFull, config.ModeFull, config.ModeFull},
 	} {
 		p := &Playbook{Mode: c.pb}
 		if got := p.EffectiveMode(c.global); got != c.want {
@@ -150,6 +150,10 @@ func TestEffectiveMode(t *testing.T) {
 	}
 	if _, err := Parse([]byte("name: a\ntrigger: {manual: true}\ntools: [x]\nprompt: p\nmode: reckless\n")); err == nil {
 		t.Error("invalid mode must be rejected")
+	}
+	if _, err := Parse([]byte("name: a\ntrigger: {manual: true}\ntools: [x]\nprompt: p\nmode: yolo\n")); err == nil ||
+		!strings.Contains(err.Error(), config.ErrYoloRemoved) {
+		t.Errorf("mode yolo: %v", err)
 	}
 	if p, err := Parse([]byte("name: a\ntrigger: {manual: true}\ntools: [x]\nprompt: p\nmode: safe\n")); err != nil || p.Mode != config.ModeSafe {
 		t.Errorf("mode: %v %v", p, err)

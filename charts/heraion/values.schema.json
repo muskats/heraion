@@ -235,8 +235,7 @@
     "mode": {
       "enum": [
         "safe",
-        "full",
-        "yolo"
+        "full"
       ]
     },
     "playbooks": {
@@ -305,8 +304,7 @@
           "mode": {
             "enum": [
               "safe",
-              "full",
-              "yolo"
+              "full"
             ]
           },
           "guardrails": {

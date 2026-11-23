@@ -216,8 +216,12 @@ func TestMode(t *testing.T) {
 		!strings.Contains(err.Error(), "mode") {
 		t.Errorf("invalid mode: %v", err)
 	}
+	_, err = Load(write(t, "llm: {baseURL: https://api.openai.com/v1, model: m}\nmode: yolo\n"))
+	if err == nil || !strings.Contains(err.Error(), ErrYoloRemoved) {
+		t.Errorf("mode yolo: %v", err)
+	}
 	for _, c := range []struct{ a, b, want Mode }{
-		{ModeYolo, ModeFull, ModeFull}, {ModeSafe, ModeYolo, ModeSafe}, {ModeFull, ModeSafe, ModeSafe}, {ModeYolo, ModeYolo, ModeYolo},
+		{ModeFull, ModeSafe, ModeSafe}, {ModeSafe, ModeFull, ModeSafe}, {ModeFull, ModeFull, ModeFull},
 	} {
 		if got := Safer(c.a, c.b); got != c.want {
 			t.Errorf("Safer(%q, %q) = %q, want %q", c.a, c.b, got, c.want)

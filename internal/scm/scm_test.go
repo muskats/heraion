@@ -307,75 +307,6 @@ func TestSameBranchKeyTwiceInOneRun(t *testing.T) {
 	}
 }
 
-func TestYoloPushesToBase(t *testing.T) {
-	tb, tools, prs, base := setupMode(t, false, 1, config.ModeYolo)
-	if !strings.Contains(tools["open_pr"].Description(), "default branch") {
-		t.Errorf("open_pr description: %q", tools["open_pr"].Description())
-	}
-	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
-	out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Bump alpine", "body": "b", "branch": "bump"})
-	if err != nil || !strings.Contains(out, "pushed commit") {
-		t.Fatalf("%q %v", out, err)
-	}
-	if got, err := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); err != nil || got != "FROM alpine:3.20\n" {
-		t.Fatalf("main: %q %v", got, err)
-	}
-	if _, err := scmtest.RemoteBranchFile(t, base, repo, "heraion/trivy-remediate/bump", "Dockerfile"); err == nil {
-		t.Error("yolo must not push a feature branch")
-	}
-	if len(prs.Created) != 0 || tb.Opened[0].Outcome != scm.OutcomePushed || tb.Opened[0].Branch != "main" {
-		t.Fatalf("created=%d opened=%+v", len(prs.Created), tb.Opened)
-	}
-}
-
-func TestYoloPushesTwiceInOneRun(t *testing.T) {
-	tb, tools, prs, base := setupMode(t, false, 2, config.ModeYolo)
-	for i, f := range []string{"Dockerfile", "deploy/values.yaml"} {
-		_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": f, "content": "changed\n"})
-		out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": f, "body": "b", "branch": f})
-		if err != nil || !strings.Contains(out, "pushed commit") {
-			t.Fatalf("change %d: %q %v", i, out, err)
-		}
-	}
-	for _, f := range []string{"Dockerfile", "deploy/values.yaml"} {
-		if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", f); got != "changed\n" {
-			t.Errorf("main %s: %q", f, got)
-		}
-	}
-	if len(prs.Created) != 0 || len(tb.Opened) != 2 {
-		t.Fatalf("created=%d opened=%+v", len(prs.Created), tb.Opened)
-	}
-}
-
-func TestYoloFallsBackToPR(t *testing.T) {
-	tb, tools, prs, base := setupMode(t, false, 1, config.ModeYolo)
-	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
-	// main moves after the clone, so the push is not a fast-forward.
-	scmtest.AdvanceRemote(t, base, repo, map[string]string{"README.md": "hi\n"})
-	out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Bump alpine", "body": "b", "branch": "bump"})
-	if err != nil || !strings.Contains(out, "PR #1 was opened instead") {
-		t.Fatalf("%q %v", out, err)
-	}
-	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); got != "FROM alpine:3.18\n" {
-		t.Errorf("main must be unchanged: %q", got)
-	}
-	if len(prs.Created) != 1 || prs.Created[0].Head != "heraion/trivy-remediate/bump" || tb.Opened[0].Outcome != scm.OutcomeFellBack {
-		t.Fatalf("created=%+v opened=%+v", prs.Created, tb.Opened)
-	}
-}
-
-func TestYoloDryRun(t *testing.T) {
-	tb, tools, _, base := setupMode(t, true, 1, config.ModeYolo)
-	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
-	out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Bump", "body": "b"})
-	if err != nil || !strings.Contains(out, "not pushed to main") {
-		t.Fatalf("%q %v", out, err)
-	}
-	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); got != "FROM alpine:3.18\n" || tb.Opened[0].Outcome != scm.OutcomeDryRun {
-		t.Fatalf("dry-run must not push: %q", got)
-	}
-}
-
 func TestSafeModeRefusesBreakingChange(t *testing.T) {
 	tb, tools, prs, _ := setupMode(t, false, 1, config.ModeSafe)
 	if !strings.Contains(tools["open_pr"].Description(), "non-breaking") {
@@ -403,29 +334,9 @@ func TestSafeModeRefusesBreakingChange(t *testing.T) {
 	}
 }
 
-func TestYoloFallbackReusesOpenPR(t *testing.T) {
-	tb, tools, prs, base := setupMode(t, false, 1, config.ModeYolo)
-	branch := "heraion/trivy-remediate/bump"
-	prs.Open = map[string]*scm.PR{repo + " " + branch: {Number: 7, URL: "https://git.example/pr/7"}}
-	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
-	scmtest.AdvanceRemote(t, base, repo, map[string]string{"README.md": "hi\n"})
-	out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Bump alpine", "body": "b", "branch": "bump"})
-	if err != nil || !strings.Contains(out, "already exists") {
-		t.Fatalf("%q %v", out, err)
-	}
-	if len(prs.Created) != 0 || len(tb.Opened) != 1 || tb.Opened[0].Outcome != scm.OutcomeDuplicate {
-		t.Fatalf("created=%+v opened=%+v", prs.Created, tb.Opened)
-	}
-	if _, err := scmtest.RemoteBranchFile(t, base, repo, branch, "Dockerfile"); err == nil {
-		t.Error("the branch of the open PR must not be pushed again")
-	}
-	if err := tb.Guard.ReservePR(); err != nil {
-		t.Errorf("budget must be released: %v", err)
-	}
-}
-
-func TestYoloCancelledPushDoesNotFallBack(t *testing.T) {
-	tb, tools, prs, base := setupMode(t, false, 1, config.ModeYolo)
+// A push that fails opens no PR, records nothing and returns the budget.
+func TestFailedPushReleasesBudget(t *testing.T) {
+	tb, tools, prs, base := setup(t, false, 1)
 	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -434,10 +345,10 @@ func TestYoloCancelledPushDoesNotFallBack(t *testing.T) {
 		t.Fatal("a cancelled push must fail")
 	}
 	if len(prs.Created) != 0 || len(tb.Opened) != 0 {
-		t.Fatalf("no PR on cancel: created=%+v opened=%+v", prs.Created, tb.Opened)
+		t.Fatalf("created=%+v opened=%+v", prs.Created, tb.Opened)
 	}
-	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); got != "FROM alpine:3.18\n" {
-		t.Errorf("main must be unchanged: %q", got)
+	if _, err := scmtest.RemoteBranchFile(t, base, repo, "heraion/trivy-remediate/bump", "Dockerfile"); err == nil {
+		t.Error("nothing may be pushed")
 	}
 	if err := tb.Guard.ReservePR(); err != nil {
 		t.Errorf("budget must be released: %v", err)
@@ -470,7 +381,18 @@ func TestOpenPRLookupErrorStopsPR(t *testing.T) {
 	}
 }
 
-func TestPushToBase(t *testing.T) {
+func TestBrokenTokenFileIsNotAnonymous(t *testing.T) {
+	base := t.TempDir()
+	url := scmtest.NewRemote(t, base, repo, map[string]string{"a": "b"})
+	tok := secret.FromMap("HERAION_GIT_TOKEN", map[string]string{"HERAION_GIT_TOKEN_FILE": "/nonexistent/token"})
+	ws := scm.NewWorkspaces(config.Git{CloneBaseURL: url, Token: tok}, t.TempDir(), nil)
+	t.Cleanup(ws.Close)
+	if _, err := ws.Get(context.Background(), repo); err == nil || !strings.Contains(err.Error(), "git token: HERAION_GIT_TOKEN_FILE") {
+		t.Fatalf("a set but unreadable token must fail the clone, got %v", err)
+	}
+}
+
+func TestPushOnlyHeraionBranches(t *testing.T) {
 	base := t.TempDir()
 	url := scmtest.NewRemote(t, base, repo, map[string]string{"Dockerfile": "FROM alpine:3.18\n"})
 	ws := scm.NewWorkspaces(config.Git{CloneBaseURL: url, AuthorName: "HeraIon", AuthorEmail: "h@x"}, t.TempDir(), nil)
@@ -479,7 +401,7 @@ func TestPushToBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.PushToBase(context.Background(), "main"); err == nil {
+	if err := r.Push(context.Background(), "main"); err == nil {
 		t.Error("only heraion/ branches may be pushed")
 	}
 	if err := r.WriteFile("Dockerfile", []byte("FROM alpine:3.20\n")); err != nil {
@@ -489,22 +411,14 @@ func TestPushToBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range 2 { // the second push has nothing new and succeeds
-		if err := r.PushToBase(context.Background(), "heraion/x/bump"); err != nil {
+		if err := r.Push(context.Background(), "heraion/x/bump"); err != nil {
 			t.Fatalf("push %d: %v", i, err)
 		}
 	}
-	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); got != "FROM alpine:3.20\n" {
-		t.Errorf("main: %q", got)
+	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "heraion/x/bump", "Dockerfile"); got != "FROM alpine:3.20\n" {
+		t.Errorf("pushed branch: %q", got)
 	}
-}
-
-func TestBrokenTokenFileIsNotAnonymous(t *testing.T) {
-	base := t.TempDir()
-	url := scmtest.NewRemote(t, base, repo, map[string]string{"a": "b"})
-	tok := secret.FromMap("HERAION_GIT_TOKEN", map[string]string{"HERAION_GIT_TOKEN_FILE": "/nonexistent/token"})
-	ws := scm.NewWorkspaces(config.Git{CloneBaseURL: url, Token: tok}, t.TempDir(), nil)
-	t.Cleanup(ws.Close)
-	if _, err := ws.Get(context.Background(), repo); err == nil || !strings.Contains(err.Error(), "git token: HERAION_GIT_TOKEN_FILE") {
-		t.Fatalf("a set but unreadable token must fail the clone, got %v", err)
+	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); got != "FROM alpine:3.18\n" {
+		t.Errorf("main must be unchanged: %q", got)
 	}
 }

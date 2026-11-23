@@ -30,7 +30,7 @@ repos:
 
 playbooksDir: ./examples/playbooks
 dryRun: true   # log PRs instead of pushing; same as --dry-run or HERAION_DRY_RUN=true
-mode: full     # safe, full or yolo; playbooks may only pick this or a safer mode
+mode: full     # safe or full; playbooks may only pick this or a safer mode
 
 # create_issue: Jira issues through the mcp-atlassian server "atlassian" below.
 # Jira URL, token and project filter are that server's env, e.g.
