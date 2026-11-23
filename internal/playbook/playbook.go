@@ -112,8 +112,9 @@ func (p *Playbook) Validate() error {
 	}
 	if p.Trigger.Webhook != "" {
 		n++
-		if !config.DNSLabel(p.Trigger.Webhook, 52) {
-			errs = append(errs, fmt.Errorf("trigger.webhook %q must be a lowercase DNS label", p.Trigger.Webhook))
+		// The same limit as gateway.hooks names, which it must match.
+		if !config.DNSLabel(p.Trigger.Webhook, 32) {
+			errs = append(errs, fmt.Errorf("trigger.webhook %q must be a lowercase DNS label (max 32 chars)", p.Trigger.Webhook))
 		}
 	}
 	if p.Trigger.Manual {
@@ -161,7 +162,7 @@ func (p *Playbook) Validate() error {
 		}
 	}
 	for _, pat := range p.Guardrails.WritePaths {
-		if catchAll[strings.TrimSpace(pat)] {
+		if isCatchAll(pat) {
 			errs = append(errs, fmt.Errorf("guardrails.writePaths %q: %s", pat, errWritePaths))
 		}
 	}
@@ -173,6 +174,24 @@ func (p *Playbook) Validate() error {
 
 // catchAll are writePaths entries that would allow every file.
 var catchAll = map[string]bool{"**": true, "**/*": true, "*": true, "/**": true, "./**": true}
+
+// anyFile are paths no real writePaths entry names, e.g. [Dockerfile,
+// "deploy/**"] matches neither. A pattern that matches one allows nearly
+// every file, e.g. "**/**", "**/*.*" or "{**,x}".
+var anyFile = []string{"zq9x", "zq9x/zq9x/zq9x.zq9x"}
+
+// isCatchAll reports a writePaths entry that names no particular files.
+func isCatchAll(pat string) bool {
+	if catchAll[strings.TrimSpace(pat)] {
+		return true
+	}
+	for _, p := range anyFile {
+		if guardrails.MatchPath(pat, p) {
+			return true
+		}
+	}
+	return false
+}
 
 const errWritePaths = `writePaths must name what the playbook may change, e.g. [Dockerfile, "deploy/**"]`
 

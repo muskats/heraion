@@ -132,8 +132,9 @@ Built-in tools:
 MCP tools are named `<server>.<tool>`, so `k8s.*` matches every tool of the `k8s` server.
 
 A full-mode playbook that can open PRs must list `writePaths`; `run`, `serve` and
-`heraion check` refuse it otherwise. Catch-alls (`**`, `**/*`, `*`) are refused. Safe mode
-and playbooks without `open_pr` (report output, `maxPRs: 0`, no repos) need none.
+`heraion check` refuse it otherwise. Catch-alls such as `**`, `**/*`, `*` or `**/*.*` are
+refused. Safe mode and playbooks without `open_pr` (report output, `maxPRs: 0`, no repos)
+need none.
 
 More examples: [trivy-remediate.yaml](examples/playbooks/trivy-remediate.yaml),
 [alertmanager-triage.yaml](examples/playbooks/alertmanager-triage.yaml).
@@ -229,7 +230,8 @@ through HeraIon's `create_issue`, which wraps the server's `jira_search` and
    from `jira.labels` (chart default `heraion`), `heraion-<playbook>` and a fingerprint such
    as `heraion-1b2c3d4e5f60`: a hash of the playbook, the project and the key. In a webhook
    run the event identity (`HERAION_EVENT_ID`) replaces the key, so the model's wording has
-   no influence and one event gets one issue.
+   no influence and one event gets one issue. A label from the model that starts with
+   `heraion-` is refused, so it cannot carry another finding's fingerprint.
 3. A fingerprint already used in the same run returns that earlier result. Otherwise HeraIon searches
    `project = "OPS" AND labels = "heraion-1b2c3d4e5f60" AND statusCategory != Done`.
    A match is returned instead of a new issue. Once the issue is done, the next occurrence
@@ -363,7 +365,7 @@ for each repo's clone URL. The token needs to read the repos, push branches and 
 |---|---|
 | Repo allowlist | With `repos: [acme/web]`, a tool call for `acme/billing` fails |
 | Namespaces | With `namespaces: [shop]`, `k8s.resources_list` in `kube-system`, without a namespace or with `all_namespaces` fails; the chart binds the k8s server's RBAC to `shop` only. Empty: all namespaces |
-| File access | `../../etc/passwd`, `.git/config` and symlinks out of the clone are refused, and nothing is written through a symlink |
+| File access | `../../etc/passwd` and `.git/config` are refused, and nothing is read or written through a symlink: reading `notes.txt -> .git/config` returns "notes.txt is a symlink to .git/config" |
 | PR budget | With `maxPRs: 1`, a second `open_pr` call fails. `maxPRs: 0` removes `open_pr` |
 | Write paths | Never written, whatever `writePaths` say, also not through a symlink: CI, hook and ownership files (`.github/workflows/**`, `.gitlab-ci.yml`, `Jenkinsfile`, `CODEOWNERS`, `.pre-commit-config.yaml`, ...) and package-manager and registry configs (`.npmrc`, `.yarnrc.yml`, `pip.conf`, `.pypirc`, `settings.xml`, `.mvn/**`, `nuget.config`, `.cargo/config.toml`, `gradle.properties`, ...). Full mode needs `writePaths: [Dockerfile, "deploy/**"]`; `denyPaths` adds patterns. Scanner ignore files (`.trivyignore`, `.grype.yaml`, ...) are written only when a pattern names them, e.g. `**/.trivyignore`; `**` or `deploy/**` do not |
 | Rejected PRs | A PR closed without merging blocks exactly that change (the `heraion:change` marker in its body) for `reopenAfter`; default `0s`, forever. Another change on the same files may open a new PR |
@@ -372,7 +374,7 @@ for each repo's clone URL. The token needs to read the repos, push branches and 
 | Issue budget | With `maxIssues: 1`, a second new issue is refused. `maxIssues: 0` removes `create_issue` |
 | Branches | Only `heraion/<playbook>/...` branches are pushed, never the default branch |
 | Mode | A playbook's `mode` can only be equal to or safer than the global one; in `safe` mode `open_pr` refuses changes other than versions within the major version (distro images: patch only) and image digests, and every lockfile or ignore-file change |
-| Duplicates | The branch is `heraion/<playbook>/<first path>-<hash of repo and paths>`, so one PR per playbook, repo and set of changed files (a fork's branch does not count). Its open PR is left alone for the same change, force-pushed and refreshed for a new one, and never touched when its head commit is not HeraIon's. An open issue with the same fingerprint label is reused |
+| Duplicates | The branch is `heraion/<playbook>/<first path>-<hash of repo and paths>`, so one PR per playbook, repo and set of changed files (a fork's branch does not count). Its open PR is left alone for the same change (the `Heraion-Change: <hash>` line that ends each HeraIon commit), force-pushed and refreshed for a new one, and never touched when its head commit is not HeraIon's. An open issue with the same fingerprint label is reused |
 | Masking | `ghp_...`, `glpat-...`, `sk-...`, `ATATT3...`, JWTs, `Bearer ...`, `user:password@` in URLs, PEM keys and configured secrets become `[REDACTED]` in prompts, PRs, issues and logs. `open_pr` refuses a change that adds such a value to a file |
 | Run size | `llm.maxSteps`, `llm.maxTokens` (checked before each round of tool calls), `llm.timeout`; each tool result is cut at `llm.maxToolResultBytes` (16 KiB), and above `llm.maxContextBytes` (200000) the oldest results become a stub. The defaults need a model context of about 64k tokens |
 | Webhook body | `gateway.maxBodyBytes`, default 256 KiB, at most 1032192 (it is stored in a Secret) |

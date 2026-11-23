@@ -710,6 +710,17 @@ helm upgrade heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f my-value
 - Breaking changes are listed in the release notes of each chart version. From 2.x to 3.0.0:
   [docs/upgrading-3.md](../../docs/upgrading-3.md), one row per change with what to do.
 
+Behavior changes in 3.0.1 (only the first two rows can need a values change):
+
+| 3.0.0 | 3.0.1 |
+|---|---|
+| `writePaths` such as `**/**`, `**/*.*` or `{**,x}` load | They are refused as catch-alls, like `**`; list what the playbook may change, e.g. `[Dockerfile, "deploy/**"]` |
+| `trigger.webhook` names have up to 52 characters | Up to 32, the limit of the `gateway.hooks` name they must match |
+| `repo_read_file` follows symlinks inside the clone | It refuses them and names the target, e.g. "notes.txt is a symlink to .git/config" |
+| `create_issue` accepts any label from the model | Labels starting with `heraion-` are refused |
+| A HeraIon commit message is the PR title and body | It also ends with `Heraion-Change: <hash>`, which reruns compare |
+| `heraion run --event -` cuts stdin at 1 MiB | An event over 1 MiB fails the run, from a file or stdin |
+
 Behavior changes in 2.1.1 (no values need to change):
 
 | 2.1.0 | 2.1.1 |

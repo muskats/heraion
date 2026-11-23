@@ -280,3 +280,27 @@ func TestIdentityNamesTheJob(t *testing.T) {
 		t.Fatalf("same identity must be a duplicate: %s %s %v %v", a, b, created, err)
 	}
 }
+
+// A gateway that stopped between the Job and its Secret left a Job without
+// its payload: the redelivery creates the Secret, owned by that Job.
+func TestRedeliveryRestoresMissingSecret(t *testing.T) {
+	d, c := newDispatcher(t, 0)
+	ctx := context.Background()
+	name, _, err := d.Dispatch(ctx, "triage", "alertmanager", []byte(`{"a":1}`), []byte(`{"a":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CoreV1().Secrets("heraion").Delete(ctx, EventSecretName(name), metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := d.Dispatch(ctx, "triage", "alertmanager", []byte(`{"a":1}`), []byte(`{"a":1}`)); err != nil || created {
+		t.Fatalf("redelivery: created=%v err=%v", created, err)
+	}
+	sec, err := c.CoreV1().Secrets("heraion").Get(ctx, EventSecretName(name), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(sec.Data[EventKey]) != `{"a":1}` || len(sec.OwnerReferences) != 1 || sec.OwnerReferences[0].Name != name {
+		t.Errorf("secret %+v", sec)
+	}
+}

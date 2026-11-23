@@ -91,20 +91,26 @@ func (s *Source) Origin() string {
 	return o
 }
 
-// Set reports whether any of the env vars has a value. It does not read the
-// file, so Set can be true while Value fails, e.g. for a missing file.
+// Set reports whether any of the env vars has a value; whitespace alone is
+// no value, as in Value. It does not read the file, so Set can be true while
+// Value fails, e.g. for a missing file.
 func (s *Source) Set() bool {
 	if s == nil || s.getenv == nil {
 		return false
 	}
-	return s.getenv(s.Name+SuffixFile) != "" || s.getenv(s.Name) != "" || s.getenv(s.Name+SuffixFallback) != ""
+	for _, n := range []string{s.Name + SuffixFile, s.Name, s.Name + SuffixFallback} {
+		if strings.TrimSpace(s.getenv(n)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Source) resolve() (string, string, error) {
 	if s == nil || s.getenv == nil {
 		return "", OriginNone, ErrMissing
 	}
-	if path := s.getenv(s.Name + SuffixFile); path != "" {
+	if path := strings.TrimSpace(s.getenv(s.Name + SuffixFile)); path != "" {
 		v, err := s.readFile(path)
 		switch {
 		case err != nil:

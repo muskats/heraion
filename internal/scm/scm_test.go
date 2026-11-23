@@ -3,6 +3,7 @@ package scm_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -216,7 +217,7 @@ func TestCIFilesAreNeverWritten(t *testing.T) {
 	}
 }
 
-func TestWritesThroughSymlinksAreRefused(t *testing.T) {
+func TestSymlinksAreRefused(t *testing.T) {
 	tb, tools, _, _ := setup(t, false, 1)
 	// Clone, then plant symlinks as if the repo contained them.
 	if _, err := call(t, tools["repo_list"], map[string]any{"repo": repo}); err != nil {
@@ -239,6 +240,11 @@ func TestWritesThroughSymlinksAreRefused(t *testing.T) {
 	}
 	if cfg, _ := os.ReadFile(filepath.Join(r.Dir, ".git", "config")); string(cfg) == "x" {
 		t.Fatal(".git/config was overwritten")
+	}
+	// Reads refuse links too, and name the target.
+	_, err := call(t, tools["repo_read_file"], map[string]any{"repo": repo, "path": "notes.txt"})
+	if err == nil || !strings.Contains(err.Error(), "notes.txt is a symlink to .git/config") {
+		t.Errorf("read through a symlink: got %v", err)
 	}
 }
 
@@ -328,6 +334,41 @@ func TestOpenPRUpdatesOpenPR(t *testing.T) {
 	}
 	if u := prs.Updated[0]; u.Title != "Bump alpine to 3.21" || scm.ChangeOf(u.Body) == scm.ChangeOf(prs.Created[0].Body) {
 		t.Errorf("update %+v", u)
+	}
+}
+
+// When the PR body cannot be updated (e.g. Gogs), the branch's commit
+// trailer still names the change, so a rerun with the same change pushes
+// nothing.
+func TestOpenPRUnchangedWhenBodyUpdateFailed(t *testing.T) {
+	tb, tools, prs, base := setup(t, false, 3)
+	open := func(v string) string {
+		t.Helper()
+		_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:" + v + "\n"})
+		out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Bump alpine to " + v, "body": "b"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	open("3.20")
+	prs.UpdateErr = errors.New("not supported")
+	if out := open("3.21"); !strings.Contains(out, "could not be refreshed") {
+		t.Fatalf("second call: %q", out)
+	}
+	if out := open("3.21"); !strings.Contains(out, "already has exactly this change") {
+		t.Fatalf("third call: %q", out)
+	}
+	if got := tb.Opened[2].Outcome; got != scm.OutcomeUnchanged {
+		t.Errorf("outcome %s, want unchanged", got)
+	}
+	// The body still names 3.20, but the branch holds 3.21: going back to
+	// 3.20 is a new change and is pushed.
+	if out := open("3.20"); !strings.Contains(out, "updated PR") {
+		t.Fatalf("fourth call: %q", out)
+	}
+	if got, _ := scmtest.RemoteBranchFile(t, base, repo, dockerfileBranch, "Dockerfile"); got != "FROM alpine:3.20\n" {
+		t.Errorf("branch: %q", got)
 	}
 }
 
@@ -501,7 +542,7 @@ func TestPushOnlyHeraionBranches(t *testing.T) {
 	if err := r.WriteFile("Dockerfile", []byte("FROM alpine:3.20\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Commit("heraion/x/bump", "bump"); err != nil {
+	if _, _, err := r.Commit("heraion/x/bump", "bump"); err != nil {
 		t.Fatal(err)
 	}
 	for i := range 2 { // the second push has nothing new and succeeds

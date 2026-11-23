@@ -511,7 +511,7 @@ func (gw *Gateway) validate() []error {
 	}
 	for name, h := range gw.Hooks {
 		if !DNSLabel(name, 32) {
-			errs = append(errs, fmt.Errorf("gateway.hooks: name %q must be a lowercase DNS label", name))
+			errs = append(errs, fmt.Errorf("gateway.hooks: name %q must be a lowercase DNS label (max 32 chars)", name))
 		}
 		if h == nil {
 			errs = append(errs, fmt.Errorf("gateway.hooks.%s: empty", name))

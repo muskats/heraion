@@ -81,3 +81,18 @@ func ChangeOf(body string) string {
 	}
 	return ""
 }
+
+var trailerRE = regexp.MustCompile(`(?m)^Heraion-Change: ([0-9a-f]{64})$`)
+
+// changeTrailer ends the commit message, e.g. "Heraion-Change: 3f9a...". It
+// records the change on the branch itself, so a PR whose body could not be
+// updated still shows what its branch holds.
+func changeTrailer(change string) string { return "Heraion-Change: " + change }
+
+// changeOfCommit returns the change ID in a commit message, or "".
+func changeOfCommit(msg string) string {
+	if m := trailerRE.FindAllStringSubmatch(msg, -1); len(m) > 0 {
+		return m[len(m)-1][1]
+	}
+	return ""
+}

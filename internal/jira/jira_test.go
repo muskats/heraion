@@ -170,6 +170,8 @@ func TestCreateGuards(t *testing.T) {
 		{"project": "SEC", "summary": "s", "description": "d"},
 		{"project": "OPS", "summary": " ", "description": "d"},
 		{"project": "OPS", "summary": "s", "description": "d", "labels": []string{"has space"}},
+		// Another finding's fingerprint would hide that finding's issue.
+		{"project": "OPS", "summary": "s", "description": "d", "key": "key-k", "labels": []string{"Heraion-1b2c3d4e5f60"}},
 	} {
 		if _, err := call(t, tl, a); err == nil {
 			t.Errorf("expected error for %v", a)

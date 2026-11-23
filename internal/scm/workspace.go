@@ -185,6 +185,11 @@ func (r *Repo) ReadFile(p string, limit int) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// A link can point into .git, e.g. "notes.txt -> .git/config", which
+	// cleanPath refuses by name. The model reads the target path instead.
+	if err := r.noSymlink(p); err != nil {
+		return "", fmt.Errorf("reading %s is not allowed: %w; read the path it points to instead", p, err)
+	}
 	f, err := r.root.Open(filepath.FromSlash(p))
 	if err != nil {
 		return "", err
@@ -220,7 +225,7 @@ func (r *Repo) WriteFile(p string, data []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.noSymlink(p); err != nil {
-		return err
+		return fmt.Errorf("writing %s is not allowed: %w", p, err)
 	}
 	native := filepath.FromSlash(p)
 	if dir := filepath.Dir(native); dir != "." {
@@ -231,9 +236,10 @@ func (r *Repo) WriteFile(p string, data []byte) error {
 	return r.root.WriteFile(native, data, 0o644)
 }
 
-// noSymlink fails if p or one of its parent directories is a symlink. The
-// clone confines symlinks to itself, but .git is inside it too: a committed
-// link "notes.txt -> .git/config" would let a write change the push URL.
+// noSymlink fails if p or one of its parent directories is a symlink, e.g.
+// "notes.txt is a symlink to .git/config". The clone confines symlinks to
+// itself, but .git is inside it too: such a link would let a write change
+// the push URL.
 func (r *Repo) noSymlink(p string) error {
 	cur := ""
 	for _, seg := range strings.Split(p, "/") {
@@ -246,7 +252,8 @@ func (r *Repo) noSymlink(p string) error {
 			return err
 		}
 		if st.Mode()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("writing %s is not allowed: %s is a symlink", p, cur)
+			target, _ := r.root.Readlink(filepath.FromSlash(cur))
+			return fmt.Errorf("%s is a symlink to %s", cur, filepath.ToSlash(target))
 		}
 	}
 	return nil
@@ -290,47 +297,59 @@ func (r *Repo) List(p string, recursive bool, max int) ([]string, bool, error) {
 }
 
 // Commit commits all changes to a new branch and returns the diff from the
-// base commit. The patch is nil if there was nothing to commit.
-func (r *Repo) Commit(branch, message string) (*object.Patch, error) {
+// base commit and its ChangeID. The message ends with the trailer
+// "Heraion-Change: <change>", which RemoteHead reads back. The patch is nil
+// if there was nothing to commit.
+func (r *Repo) Commit(branch, message string) (*object.Patch, string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	wt, err := r.g.Worktree()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	st, err := wt.Status()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if st.IsClean() {
-		return nil, nil
+		return nil, "", nil
 	}
 	ref := plumbing.NewBranchReferenceName(branch)
 	// An earlier open_pr in this run may have left the local branch; we are
 	// on the base branch again (Reset), so start it over.
 	if err := r.g.Storer.RemoveReference(ref); err != nil {
-		return nil, fmt.Errorf("reset branch %s: %w", branch, err)
+		return nil, "", fmt.Errorf("reset branch %s: %w", branch, err)
 	}
 	if err := wt.Checkout(&git.CheckoutOptions{Branch: ref, Create: true, Keep: true}); err != nil {
-		return nil, fmt.Errorf("create branch %s: %w", branch, err)
+		return nil, "", fmt.Errorf("create branch %s: %w", branch, err)
 	}
 	if err := wt.AddWithOptions(&git.AddOptions{All: true}); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	sig := &object.Signature{Name: r.author.AuthorName, Email: r.author.AuthorEmail, When: time.Now()}
 	h, err := wt.Commit(message, &git.CommitOptions{Author: sig, Committer: sig})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	head, err := r.g.CommitObject(h)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	base, err := r.g.CommitObject(r.baseHash)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return base.Patch(head)
+	patch, err := base.Patch(head)
+	if err != nil {
+		return nil, "", err
+	}
+	// The change ID comes from the diff, so it is known only after the
+	// commit; amending keeps the tree and replaces the message.
+	change := ChangeID(patch)
+	if _, err := wt.Commit(message+"\n\n"+changeTrailer(change), &git.CommitOptions{Amend: true, Author: sig, Committer: sig}); err != nil {
+		return nil, "", fmt.Errorf("add change trailer: %w", err)
+	}
+	return patch, change, nil
 }
 
 // Push force-pushes branch. Only heraion/... branches are allowed, so force
@@ -343,22 +362,23 @@ func (r *Repo) Push(ctx context.Context, branch string) error {
 	return r.push(ctx, gitcfg.RefSpec("+"+ref+":"+ref))
 }
 
-// HeadByHeraIon reports whether the head commit of branch on the remote
-// was made by HeraIon (author git.authorEmail), so a force-push never
-// overwrites a person's commits on an open PR. A missing branch counts as
-// HeraIon's.
-func (r *Repo) HeadByHeraIon(ctx context.Context, branch string) (bool, error) {
+// RemoteHead describes the head commit of branch on the remote: ours is
+// true when HeraIon made it (author git.authorEmail), so a force-push never
+// overwrites a person's commits on an open PR, and change is its
+// "Heraion-Change" trailer, or "". A missing branch counts as HeraIon's,
+// with no change.
+func (r *Repo) RemoteHead(ctx context.Context, branch string) (ours bool, change string, err error) {
 	auth, err := r.auth()
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	rem, err := r.g.Remote("origin")
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	refs, err := rem.ListContext(ctx, &git.ListOptions{Auth: auth})
 	if err != nil {
-		return false, fmt.Errorf("list remote branches: %w", err)
+		return false, "", fmt.Errorf("list remote branches: %w", err)
 	}
 	ref := plumbing.NewBranchReferenceName(branch)
 	var head plumbing.Hash
@@ -368,20 +388,20 @@ func (r *Repo) HeadByHeraIon(ctx context.Context, branch string) (bool, error) {
 		}
 	}
 	if head.IsZero() {
-		return true, nil
+		return true, "", nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	spec := gitcfg.RefSpec("+" + ref.String() + ":refs/remotes/origin/" + branch)
 	err = r.g.FetchContext(ctx, &git.FetchOptions{RemoteName: "origin", RefSpecs: []gitcfg.RefSpec{spec}, Depth: 1, Auth: auth, Tags: git.NoTags})
 	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return false, fmt.Errorf("fetch %s: %w", branch, err)
+		return false, "", fmt.Errorf("fetch %s: %w", branch, err)
 	}
 	c, err := r.g.CommitObject(head)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	return strings.EqualFold(c.Author.Email, r.author.AuthorEmail), nil
+	return strings.EqualFold(c.Author.Email, r.author.AuthorEmail), changeOfCommit(c.Message), nil
 }
 
 // push pushes one refspec to origin, e.g. "+refs/heads/a:refs/heads/a".

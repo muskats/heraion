@@ -3,8 +3,10 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/muskats/heraion/internal/llm"
 )
@@ -49,21 +51,41 @@ type nsTool struct {
 	allowed []string
 }
 
+// Call checks the exact keys "namespace" and "all_namespaces", refuses keys
+// that differ from them only in case (Go's JSON decoding matches those, a
+// map lookup does not), and passes the checked arguments on re-encoded, so
+// the server sees what was checked, e.g. no second "namespace" key.
 func (t *nsTool) Call(ctx context.Context, args json.RawMessage) (string, error) {
-	var a struct {
-		Namespace     string `json:"namespace"`
-		AllNamespaces bool   `json:"all_namespaces"`
-	}
-	if err := llm.DecodeArgs(args, &a); err != nil {
+	var m map[string]json.RawMessage
+	if err := llm.DecodeArgs(args, &m); err != nil {
 		return "", err
 	}
-	switch {
-	case a.AllNamespaces:
-		return "", fmt.Errorf("all_namespaces is not allowed; call once per namespace in %v", t.allowed)
-	case a.Namespace == "":
-		return "", fmt.Errorf("namespace is required; allowed: %v", t.allowed)
-	case !slices.Contains(t.allowed, a.Namespace):
-		return "", fmt.Errorf("namespace %q is not allowed; allowed: %v", a.Namespace, t.allowed)
+	for k := range m {
+		for _, want := range []string{"namespace", "all_namespaces"} {
+			if k != want && strings.EqualFold(k, want) {
+				return "", fmt.Errorf("argument %q is not allowed; use %q", k, want)
+			}
+		}
 	}
-	return t.Tool.Call(ctx, args)
+	var ns string
+	var all bool
+	if raw, ok := m["namespace"]; ok && json.Unmarshal(raw, &ns) != nil {
+		return "", errors.New("namespace must be a string")
+	}
+	if raw, ok := m["all_namespaces"]; ok && json.Unmarshal(raw, &all) != nil {
+		return "", errors.New("all_namespaces must be a boolean")
+	}
+	switch {
+	case all:
+		return "", fmt.Errorf("all_namespaces is not allowed; call once per namespace in %v", t.allowed)
+	case ns == "":
+		return "", fmt.Errorf("namespace is required; allowed: %v", t.allowed)
+	case !slices.Contains(t.allowed, ns):
+		return "", fmt.Errorf("namespace %q is not allowed; allowed: %v", ns, t.allowed)
+	}
+	checked, err := json.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	return t.Tool.Call(ctx, checked)
 }
