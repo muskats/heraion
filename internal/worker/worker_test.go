@@ -19,7 +19,6 @@ import (
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/llm/llmtest"
 	"github.com/muskats/heraion/internal/playbook"
-	"github.com/muskats/heraion/internal/scm"
 	"github.com/muskats/heraion/internal/scm/scmtest"
 	"github.com/muskats/heraion/internal/secret"
 	"github.com/muskats/heraion/internal/worker"
