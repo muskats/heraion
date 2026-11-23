@@ -642,7 +642,7 @@ rejected by [values.schema.json](values.schema.json).
 | `mcpServers.<name>.deploy.files` | `{}` | Files mounted at `filesMountPath` (default `/etc/mcp`) |
 | `mcpServers.<name>.deploy.secretEnv.<VAR>` | | `existingSecret` + `key`, or `value` |
 | `mcpServers.<name>.deploy.rbac.clusterRules`, `rules` | read-only for `k8s` | ClusterRole and Role rules |
-| `mcpServers.<name>.deploy.resources`, `startupProbe`, `securityContext`, `extraVolumes`, `extraVolumeMounts` | 50m / 64Mi requests, 256Mi limit; tcpSocket on `port` | The worker starts once the startupProbe passes |
+| `mcpServers.<name>.deploy.resources`, `startupProbe`, `securityContext`, `extraVolumes`, `extraVolumeMounts` | 50m / 64Mi requests, 256Mi limit; no startupProbe | The worker retries a refused connection for 30s while the sidecar starts. A `startupProbe` only works for a server listening on all interfaces: the kubelet probes the pod IP |
 | `grafana-mcp.*` | `disableWrite: true`, streamable HTTP | Values for the grafana-mcp subchart |
 | `litellm.*` | `enabled: false` | Values for the LiteLLM subchart |
 

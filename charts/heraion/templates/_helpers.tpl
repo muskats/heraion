@@ -438,8 +438,9 @@ volumes:
 
 {{/*
 Native sidecars (restartPolicy: Always) for mode: deploy servers, e.g. container
-mcp-k8s on 127.0.0.1:8080. The worker starts after each startupProbe passes.
-They share the pod's network, so ports must differ.
+mcp-k8s on 127.0.0.1:8080. They share the pod's network, so ports must differ.
+No default startupProbe: the kubelet probes the pod IP and cannot reach a server
+on 127.0.0.1. The worker retries a refused connection instead (internal/mcp).
 */}}
 {{- define "heraion.mcpSidecars" -}}
 {{- $root := . -}}
@@ -488,8 +489,10 @@ They share the pod's network, so ports must differ.
   envFrom:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- with $d.startupProbe }}
   startupProbe:
-    {{- toYaml ($d.startupProbe | default (dict "tcpSocket" (dict "port" $d.port) "periodSeconds" 1 "failureThreshold" 120)) | nindent 4 }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   resources:
     {{- toYaml ($d.resources | default (dict "requests" (dict "cpu" "50m" "memory" "64Mi") "limits" (dict "memory" "256Mi"))) | nindent 4 }}
   securityContext:

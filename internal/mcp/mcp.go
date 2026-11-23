@@ -14,6 +14,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -128,17 +129,32 @@ func dial(ctx context.Context, name string, srv *config.MCPServer, version strin
 			return nil
 		},
 	}
-	var t sdk.Transport
-	switch srv.Transport {
-	case "sse":
-		t = &sdk.SSEClientTransport{Endpoint: srv.URL, HTTPClient: hc}
-	default:
+	transport := func() sdk.Transport {
+		if srv.Transport == "sse" {
+			return &sdk.SSEClientTransport{Endpoint: srv.URL, HTTPClient: hc}
+		}
 		// Workers only call tools, so no server-to-client stream is needed.
-		t = &sdk.StreamableClientTransport{Endpoint: srv.URL, HTTPClient: hc, DisableStandaloneSSE: true}
+		return &sdk.StreamableClientTransport{Endpoint: srv.URL, HTTPClient: hc, DisableStandaloneSSE: true}
 	}
 	client := sdk.NewClient(&sdk.Implementation{Name: "heraion", Version: version}, nil)
 
-	sess, err := client.Connect(ctx, t, nil)
+	// A sidecar on 127.0.0.1 may still be starting: the kubelet cannot probe
+	// a loopback port, so the worker starts right after it. A refused
+	// connection is retried until connectTimeout, e.g. kubernetes-mcp-server
+	// loading its config; any other error is returned at once.
+	deadline := time.Now().Add(connectTimeout)
+	var sess *sdk.ClientSession
+	for {
+		sess, err = client.Connect(ctx, transport(), nil)
+		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil, fmt.Errorf("connect %s: %w", srv.URL, ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect %s: %w", srv.URL, err)
 	}

@@ -80,7 +80,8 @@ tests:
       - equal: { path: "spec.jobTemplate.spec.template.spec.initContainers[0].name", value: mcp-atlassian }
       - equal: { path: "spec.jobTemplate.spec.template.spec.initContainers[0].restartPolicy", value: Always }
       - equal: { path: "spec.jobTemplate.spec.template.spec.initContainers[1].name", value: mcp-k8s }
-      - equal: { path: "spec.jobTemplate.spec.template.spec.initContainers[1].startupProbe.tcpSocket.port", value: 8080 }
+      # The kubelet cannot probe 127.0.0.1; the worker waits for the server instead.
+      - notExists: { path: "spec.jobTemplate.spec.template.spec.initContainers[1].startupProbe" }
       - matchRegex: { path: "spec.jobTemplate.spec.template.spec.initContainers[0].image", pattern: "^ghcr.io/sooperset/mcp-atlassian@sha256:[0-9a-f]{64}$" }
       - matchRegex: { path: "spec.jobTemplate.spec.template.spec.initContainers[1].image", pattern: "^quay.io/containers/kubernetes_mcp_server@sha256:[0-9a-f]{64}$" }
       - contains: { path: "spec.jobTemplate.spec.template.spec.initContainers[0].args", content: "127.0.0.1" }
