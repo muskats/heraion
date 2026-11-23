@@ -52,11 +52,11 @@ tests:
       - matchRegex: { path: 'data["config.yaml"]', pattern: "(?m)^mode: full$" }
   - it: passes the global mode to the config
     set:
-      mode: yolo
+      mode: safe
       playbooks.trivy-remediate.enabled: true
     documentSelector: { path: metadata.name, value: t-heraion-config }
     asserts:
-      - matchRegex: { path: 'data["config.yaml"]', pattern: "(?m)^mode: yolo$" }
+      - matchRegex: { path: 'data["config.yaml"]', pattern: "(?m)^mode: safe$" }
   - it: passes the playbook mode to the playbook
     set:
       playbooks.trivy-remediate: { enabled: true, mode: safe }

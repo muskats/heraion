@@ -19,7 +19,6 @@ import (
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/llm/llmtest"
 	"github.com/muskats/heraion/internal/playbook"
-	"github.com/muskats/heraion/internal/scm"
 	"github.com/muskats/heraion/internal/scm/scmtest"
 	"github.com/muskats/heraion/internal/secret"
 	"github.com/muskats/heraion/internal/worker"
@@ -423,41 +422,40 @@ func TestModeIsNarrowedToGlobal(t *testing.T) {
 	base := t.TempDir()
 	cloneURL := scmtest.NewRemote(t, base, repo, map[string]string{"Dockerfile": "FROM alpine:3.18\n"})
 	srv := llmtest.New(t,
-		llmtest.Turn{Calls: []llmtest.Call{{Name: "repo_write_file", Args: map[string]string{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"}}}},
-		llmtest.Turn{Calls: []llmtest.Call{{Name: "open_pr", Args: map[string]string{"repo": repo, "title": "Bump alpine", "body": "b", "branch": "bump"}}}},
+		llmtest.Turn{Calls: []llmtest.Call{{Name: "repo_write_file", Args: map[string]string{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.18\nUSER root\n"}}}},
+		llmtest.Turn{Calls: []llmtest.Call{{Name: "open_pr", Args: map[string]string{"repo": repo, "title": "Run as root", "body": "b", "branch": "root"}}}},
 		llmtest.Turn{Final: "done"},
 	)
 	c := cfg(t, srv.BaseURL(), cloneURL)
-	c.Mode = config.ModeFull
+	c.Mode = config.ModeSafe
+	prs := &scmtest.FakePRs{}
 	var logs strings.Builder
 	rep, err := worker.Run(context.Background(), worker.Options{
 		Config:   c,
-		Playbook: pb(t, "name: fix\ntrigger: {manual: true}\ntools: [repo_*, open_pr]\nmode: yolo\nprompt: Fix.\n"),
+		Playbook: pb(t, "name: fix\ntrigger: {manual: true}\ntools: [repo_*, open_pr]\nmode: full\nprompt: Fix.\n"),
 		LLM:      fastClient(srv.BaseURL()),
-		PRs:      &scmtest.FakePRs{},
+		PRs:      prs,
 		Log:      slog.New(slog.NewTextHandler(&logs, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Mode != config.ModeFull || len(rep.PRs) != 1 || rep.PRs[0].Outcome != scm.OutcomeOpened {
-		t.Fatalf("want a PR in full mode: %+v", rep)
-	}
-	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); got != "FROM alpine:3.18\n" {
-		t.Errorf("main must be unchanged: %q", got)
+	// Safe mode refuses a change that is not a version bump.
+	if rep.Mode != config.ModeSafe || len(rep.PRs) != 0 || len(prs.Created) != 0 {
+		t.Fatalf("want safe mode and no PR: %+v", rep)
 	}
 	if !strings.Contains(logs.String(), "narrowed") {
 		t.Errorf("no warning:\n%s", logs.String())
 	}
-	if strings.Contains(srv.Requests[0].Messages[0].Text(), "Yolo mode") {
-		t.Error("system prompt must not mention yolo")
+	if !strings.Contains(srv.Requests[0].Messages[0].Text(), "Safe mode") {
+		t.Error("system prompt must describe safe mode")
 	}
 }
 
 func TestSafeModePrompt(t *testing.T) {
 	srv := llmtest.New(t, llmtest.Turn{Final: "done"})
 	c := cfg(t, srv.BaseURL(), "file:///nonexistent")
-	c.Mode = config.ModeYolo
+	c.Mode = config.ModeFull
 	rep, err := worker.Run(context.Background(), worker.Options{
 		Config:   c,
 		Playbook: pb(t, "name: fix\ntrigger: {manual: true}\ntools: [repo_*, open_pr]\nmode: safe\nprompt: Fix.\n"),
@@ -470,38 +468,6 @@ func TestSafeModePrompt(t *testing.T) {
 	}
 	if !strings.Contains(srv.Requests[0].Messages[0].Text(), "Safe mode") {
 		t.Error("system prompt must describe safe mode")
-	}
-}
-
-func TestYoloRunPushesToBase(t *testing.T) {
-	base := t.TempDir()
-	cloneURL := scmtest.NewRemote(t, base, repo, map[string]string{"Dockerfile": "FROM alpine:3.18\n"})
-	srv := llmtest.New(t,
-		llmtest.Turn{Calls: []llmtest.Call{{Name: "repo_write_file", Args: map[string]string{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"}}}},
-		llmtest.Turn{Calls: []llmtest.Call{{Name: "open_pr", Args: map[string]string{"repo": repo, "title": "Bump alpine", "body": "b", "branch": "bump"}}}},
-		llmtest.Turn{Final: "pushed"},
-	)
-	c := cfg(t, srv.BaseURL(), cloneURL)
-	c.Mode = config.ModeYolo
-	prs := &scmtest.FakePRs{}
-	rep, err := worker.Run(context.Background(), worker.Options{
-		Config:   c,
-		Playbook: pb(t, "name: fix\ntrigger: {manual: true}\ntools: [repo_*, open_pr]\nprompt: Fix.\n"), // inherits yolo
-		LLM:      fastClient(srv.BaseURL()),
-		PRs:      prs,
-		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rep.Mode != config.ModeYolo || len(rep.PRs) != 1 || rep.PRs[0].Outcome != scm.OutcomePushed || len(prs.Created) != 0 {
-		t.Fatalf("want a direct push: %+v", rep)
-	}
-	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); got != "FROM alpine:3.20\n" {
-		t.Errorf("main: %q", got)
-	}
-	if !strings.Contains(srv.Requests[0].Messages[0].Text(), "Yolo mode") {
-		t.Error("system prompt must describe yolo mode")
 	}
 }
 

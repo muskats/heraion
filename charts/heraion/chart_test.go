@@ -103,7 +103,7 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 	if a := cfg.MCPServers["atlassian"]; a == nil || !strings.HasSuffix(a.URL, ":9000/mcp") {
 		t.Errorf("atlassian %+v", a)
 	}
-	if cfg.Mode != config.ModeYolo {
+	if cfg.Mode != config.ModeSafe {
 		t.Errorf("mode %q", cfg.Mode)
 	}
 	if cfg.Gateway.Hooks["alertmanager"].SecretEnv != "HERAION_HOOK_ALERTMANAGER_SECRET" {

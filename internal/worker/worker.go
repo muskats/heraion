@@ -161,7 +161,7 @@ func postReport(ctx context.Context, prs scm.PRService, rep *Report, redact func
 	var targets []scm.OpenedPR
 	for _, pr := range rep.PRs {
 		switch pr.Outcome {
-		case scm.OutcomeOpened, scm.OutcomeFellBack:
+		case scm.OutcomeOpened:
 			targets = append(targets, pr)
 		case scm.OutcomeDryRun:
 			log.Info("dry-run: would post report", "repo", pr.Repo, "branch", pr.Branch, "bytes", len(final))
@@ -326,8 +326,6 @@ var modePrompt = map[config.Mode]string{
 	config.ModeSafe: "Safe mode: only non-breaking changes are accepted: version upgrades within the same major version " +
 		"(e.g. alpine:3.18 -> 3.20), lockfile updates, and new entries in scanner ignore files (e.g. .trivyignore) " +
 		"for confirmed false positives. open_pr refuses anything else; put such findings in your summary or an issue instead.\n",
-	config.ModeYolo: "Yolo mode: open_pr pushes the commit straight to the default branch, where it takes effect without review. " +
-		"Only make a change when the evidence is clear, and keep it minimal. If the push is rejected, a pull request is opened instead.\n",
 }
 
 // userPrompt appends the event, which must already be redacted: cutting it

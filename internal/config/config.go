@@ -47,7 +47,7 @@ type Config struct {
 	WorkDir      string   `json:"workDir,omitempty"`
 	DryRun       bool     `json:"dryRun,omitempty"`
 	// Mode is the default and the riskiest mode a playbook may use, e.g.
-	// "full" lets a playbook pick safe or full but not yolo. Default full.
+	// "safe" makes every playbook safe. Default full.
 	Mode Mode `json:"mode,omitempty"`
 	// MCPServers maps a name to a server. Server "k8s" exposes tools such
 	// as "k8s.resources_list".

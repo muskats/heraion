@@ -444,7 +444,7 @@ litellm:
 | Gateway RBAC | `get` and `create` Jobs, plus `list` when `maxConcurrentJobs` > 0; `create`, `patch`, `delete` Secrets (one per webhook Job, holding its payload); all in its own namespace |
 | MCP servers | Their own ServiceAccount; a token only if RBAC rules are set; ingress only from workers |
 | Secrets | Never in ConfigMaps; masked in prompts, PR text and logs |
-| Git | Pushes only `heraion/<playbook>/...` branches (with `mode: yolo`, also the default branch, fast-forward only); never CI or CODEOWNERS files; no merge |
+| Git | Pushes only `heraion/<playbook>/...` branches, never the default branch; never CI or CODEOWNERS files; no merge |
 
 The gateway can create any Job, and Secrets, in its namespace. Install HeraIon in a namespace
 of its own. To pin what those Jobs may run, add a ValidatingAdmissionPolicy that only admits Jobs
@@ -541,7 +541,7 @@ rejected by [values.schema.json](values.schema.json).
 | `repos` | `[]` | Repos HeraIon may change; empty means none |
 | `namespaces` | `[]` | Kubernetes namespaces the k8s tools may read, e.g. `[shop]`; empty means all. Deployed MCP servers then get a RoleBinding per namespace instead of a ClusterRoleBinding |
 | `dryRun` | `false` | Log PRs instead of pushing them |
-| `mode` | `full` | `safe`, `full` or `yolo`: how `open_pr` delivers a fix, and the riskiest mode a playbook may use, see [Modes](../../README.md#modes) |
+| `mode` | `full` | `safe` or `full`: how `open_pr` delivers a fix, and the riskiest mode a playbook may use, see [Modes](../../README.md#modes) |
 | `playbooks.<name>.mode` | `""` | Mode for this playbook; empty: `mode`. A riskier mode is narrowed to `mode` |
 | `playbooks.<name>` | two disabled examples | See [Playbooks](#playbooks) |
 | `playbooks.<name>.guardrails.maxPRs` | `1` | PRs per run; `0` removes `open_pr` |

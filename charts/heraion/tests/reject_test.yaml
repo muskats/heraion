@@ -31,6 +31,14 @@ tests:
     set: { mode: reckless }
     asserts:
       - failedTemplate: {}
+  - it: removed mode yolo
+    set: { mode: yolo }
+    asserts:
+      - failedTemplate: {}
+  - it: removed playbook mode yolo
+    set: { playbooks.trivy-remediate.mode: yolo }
+    asserts:
+      - failedTemplate: {}
   - it: unknown playbook mode
     set: { playbooks.trivy-remediate.mode: reckless }
     asserts:

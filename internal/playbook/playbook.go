@@ -41,7 +41,7 @@ type Playbook struct {
 	JiraProjects []string `json:"jiraProjects,omitempty"`
 	Prompt       string   `json:"prompt"`
 	Output       string   `json:"output,omitempty"`
-	// Mode is safe, full or yolo, see config.Mode. Empty: the global mode.
+	// Mode is safe or full, see config.Mode. Empty: the global mode.
 	// A riskier mode than the global one is narrowed to it.
 	Mode       config.Mode `json:"mode,omitempty"`
 	Guardrails Guardrails  `json:"guardrails,omitempty"`
@@ -203,7 +203,7 @@ func intersect(local, global []string) []string {
 }
 
 // EffectiveMode is the playbook mode narrowed to the global one, e.g.
-// playbook yolo with global full gives full. No playbook mode: global.
+// playbook full with global safe gives safe. No playbook mode: global.
 // An empty global mode (a Config not built by config.Load) counts as full.
 func (p *Playbook) EffectiveMode(global config.Mode) config.Mode {
 	if global == "" {

@@ -45,8 +45,6 @@ const (
 	OutcomeDuplicate Outcome = "duplicate" // an open PR for the branch exists
 	OutcomeRejected  Outcome = "rejected"  // a PR for the branch was recently closed without merging
 	OutcomeDryRun    Outcome = "dry-run"   // logged, not pushed
-	OutcomePushed    Outcome = "pushed"    // yolo: pushed to the base branch, no PR
-	OutcomeFellBack  Outcome = "fell-back" // yolo: the push was refused, a PR was opened instead
 )
 
 // Limits of repo_read_file (bytes) and repo_list (entries).
@@ -117,9 +115,6 @@ var openPRDesc = map[config.Mode]string{
 		"Only non-breaking changes are accepted: version upgrades within the same major version " +
 		"(e.g. alpine:3.18 -> 3.20, v1.4.2 -> v1.5.0), lockfile updates, and new entries in scanner " +
 		"ignore files such as .trivyignore for false positives. Any other change is refused.",
-	config.ModeYolo: "Commit all files written to the repo since the last open_pr and push the commit directly " +
-		"to the default branch, without review. If the push is rejected (branch protection, or the " +
-		"branch moved), a pull request is opened instead.",
 }
 
 func (tb *Toolbox) repo(ctx context.Context, name string) (*Repo, error) {
@@ -212,10 +207,7 @@ func lastClosed(prs []PR) *PR {
 
 // footer is appended to the PR body and commit message, by mode.
 func (tb *Toolbox) footer() string {
-	switch tb.Guard.Mode() {
-	case config.ModeYolo:
-		return "\n\n---\n_Committed by HeraIon playbook `" + tb.Playbook + "` in yolo mode, without review._"
-	case config.ModeSafe:
+	if tb.Guard.Mode() == config.ModeSafe {
 		return "\n\n---\n_Opened by HeraIon playbook `" + tb.Playbook + "`. Mode: safe (non-breaking changes only, checked by HeraIon). " +
 			"Review carefully; HeraIon never merges._"
 	}
@@ -279,12 +271,9 @@ func (tb *Toolbox) openPR(ctx context.Context, raw json.RawMessage) (string, err
 	if err := tb.checkChangedPaths(r); err != nil {
 		return "", err
 	}
-	// Look for an existing PR before using budget or pushing. Yolo looks
-	// only if it has to fall back to a PR.
-	if mode != config.ModeYolo {
-		if msg, stop, err := tb.existingPR(ctx, a.Repo, branch, log); err != nil || stop {
-			return msg, err
-		}
+	// Look for an existing PR before using budget or pushing.
+	if msg, stop, err := tb.existingPR(ctx, a.Repo, branch, log); err != nil || stop {
+		return msg, err
 	}
 	if err := tb.Guard.ReservePR(); err != nil {
 		return "", err
@@ -357,35 +346,13 @@ func (tb *Toolbox) commit(r *Repo, branch, message string, log *slog.Logger) (st
 func (tb *Toolbox) logDryRun(r *Repo, branch, title, body, patch string, log *slog.Logger) string {
 	diff := tb.Guard.Redactor().Redact(patch)
 	tb.Opened = append(tb.Opened, OpenedPR{Repo: r.Name, Branch: branch, Outcome: OutcomeDryRun})
-	if tb.Guard.Mode() == config.ModeYolo {
-		log.Info("dry-run: would push to "+r.BaseBranch, "title", title, "body", body, "diff", diff)
-		return fmt.Sprintf("dry-run: commit %q on %s was logged, not pushed to %s", title, r.Name, r.BaseBranch)
-	}
 	log.Info("dry-run: would open PR", "title", title, "base", r.BaseBranch, "body", body, "diff", diff)
 	return fmt.Sprintf("dry-run: PR %q on %s (%s -> %s) was logged, not opened", title, r.Name, branch, r.BaseBranch)
 }
 
-// deliver pushes the committed change: in yolo mode to the base branch,
-// otherwise, or when that push is refused, as a PR. used is false when
-// nothing was pushed or opened, so the caller returns the budget.
+// deliver pushes the committed branch and opens a PR for it. used is false
+// when nothing was opened, so the caller returns the budget.
 func (tb *Toolbox) deliver(ctx context.Context, r *Repo, branch, title, body string, log *slog.Logger) (msg string, used bool, err error) {
-	outcome := OutcomeOpened
-	if tb.Guard.Mode() == config.ModeYolo {
-		err := r.PushToBase(ctx, branch)
-		if err == nil {
-			tb.Opened = append(tb.Opened, OpenedPR{Repo: r.Name, Branch: r.BaseBranch, Outcome: OutcomePushed})
-			log.Info("pushed to base branch", "base", r.BaseBranch)
-			return fmt.Sprintf("pushed commit %q to %s on %s", title, r.BaseBranch, r.Name), true, nil
-		}
-		if ctx.Err() != nil {
-			return "", false, fmt.Errorf("push to %s: %w", r.BaseBranch, err)
-		}
-		log.Warn("push to base branch rejected, opening a PR instead", "base", r.BaseBranch, "err", err)
-		if msg, stop, err := tb.existingPR(ctx, r.Name, branch, log); err != nil || stop {
-			return msg, false, err
-		}
-		outcome = OutcomeFellBack
-	}
 	if tb.PRs == nil {
 		return "", false, errors.New("no Git provider configured")
 	}
@@ -396,10 +363,7 @@ func (tb *Toolbox) deliver(ctx context.Context, r *Repo, branch, title, body str
 	if err != nil {
 		return "", false, err
 	}
-	tb.Opened = append(tb.Opened, OpenedPR{Repo: r.Name, Branch: branch, URL: pr.URL, Number: pr.Number, Outcome: outcome})
+	tb.Opened = append(tb.Opened, OpenedPR{Repo: r.Name, Branch: branch, URL: pr.URL, Number: pr.Number, Outcome: OutcomeOpened})
 	log.Info("opened PR", "url", pr.URL, "number", pr.Number)
-	if outcome == OutcomeFellBack {
-		return fmt.Sprintf("the push to %s was rejected, so PR #%d was opened instead: %s", r.BaseBranch, pr.Number, pr.URL), true, nil
-	}
 	return fmt.Sprintf("opened PR #%d: %s", pr.Number, pr.URL), true, nil
 }

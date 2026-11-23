@@ -343,34 +343,6 @@ func (r *Repo) Push(ctx context.Context, branch string) error {
 	return r.push(ctx, gitcfg.RefSpec("+"+ref+":"+ref))
 }
 
-// PushToBase pushes the commit on the local branch to the base branch,
-// e.g. heraion/x/bump -> main. There is no force: the push fails unless it
-// is a fast-forward, so a branch that moved since the clone is never
-// overwritten. Branch protection rejects it the same way.
-func (r *Repo) PushToBase(ctx context.Context, branch string) error {
-	if !strings.HasPrefix(branch, BranchPrefix) {
-		return fmt.Errorf("refusing to push branch %q outside %s", branch, BranchPrefix)
-	}
-	src := plumbing.NewBranchReferenceName(branch)
-	dst := plumbing.NewBranchReferenceName(r.BaseBranch)
-	if err := r.push(ctx, gitcfg.RefSpec(src+":"+dst)); err != nil {
-		return err
-	}
-	// The local base follows the pushed commit, so the next change in this
-	// run builds on it and its push is a fast-forward.
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	pushed, err := r.g.Reference(src, true)
-	if err != nil {
-		return err
-	}
-	if err := r.g.Storer.SetReference(plumbing.NewHashReference(dst, pushed.Hash())); err != nil {
-		return err
-	}
-	r.baseHash = pushed.Hash()
-	return nil
-}
-
 // push pushes one refspec to origin, e.g. "+refs/heads/a:refs/heads/a".
 func (r *Repo) push(ctx context.Context, spec gitcfg.RefSpec) error {
 	auth, err := r.auth()

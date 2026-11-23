@@ -132,7 +132,6 @@ dryRun: false
 # How open_pr delivers a fix, and the riskiest mode a playbook may pick:
 #   safe  PR, only for non-breaking changes (same-major version bumps, lockfiles, .trivyignore entries)
 #   full  PR for any change
-#   yolo  push to the default branch without review; a PR if the push is rejected
 mode: full
 
 # Playbooks by name. enabled: false turns one off; a playbook without the key is on.

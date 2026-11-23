@@ -1,8 +1,8 @@
 # HeraIon
 
 HeraIon looks into problems in a Kubernetes cluster with an LLM and proposes fixes as pull
-requests, or, in [yolo mode](#modes), pushes them to the default branch. When a problem needs
-a person instead, it can open a Jira issue. It never merges, and it cannot change the cluster.
+requests. When a problem needs a person instead, it can open a Jira issue. It never merges,
+never pushes to the default branch, and it cannot change the cluster.
 
 Example: Trivy Operator reports a fixable CVE in `alpine:3.18`. The `trivy-remediate`
 playbook reads the report, finds the Dockerfile in `acme/web`, and opens a PR on the branch
@@ -111,7 +111,7 @@ prompt: |
   List VulnerabilityReports with fixable HIGH or CRITICAL CVEs and open one PR per repo
   with the minimal version bump.
 output: pr                             # "report" removes open_pr
-mode: safe                             # optional: safe, full or yolo, see Modes
+mode: safe                             # optional: safe or full, see Modes
 guardrails:
   maxPRs: 3                            # default 1; 0 removes open_pr
   writePaths: [Dockerfile, "deploy/**"]  # optional; CI files are always refused
@@ -123,7 +123,7 @@ Built-in tools:
 | Tool | Does |
 |---|---|
 | `repo_list`, `repo_read_file`, `repo_write_file` | Read and edit a clone of an allowed repo |
-| `open_pr` | Commit the edits and open a pull request (in yolo mode: push them). Each call ends with a clean clone, so after a refusal the model writes the files again |
+| `open_pr` | Commit the edits and open a pull request. Each call ends with a clean clone, so after a refusal the model writes the files again |
 | `create_issue` | Create a Jira issue through mcp-atlassian, see [Jira and Confluence](#jira-and-confluence) |
 
 MCP tools are named `<server>.<tool>`, so `k8s.*` matches every tool of the `k8s` server.
@@ -139,7 +139,6 @@ The mode says how `open_pr` delivers a fix:
 |---|---|---|
 | `safe` | PR on `heraion/<playbook>/<key>`, only for non-breaking changes | `alpine:3.18` -> `3.20` opens a PR; `node:20` -> `22` is refused |
 | `full` (default) | PR on `heraion/<playbook>/<key>`, for any change | A memory limit raised from `512Mi` to `1Gi` |
-| `yolo` | Commit pushed to the default branch, without review | `alpine:3.18` -> `3.20` lands on `main` |
 
 ```yaml
 # config.yaml (chart value: mode)
@@ -149,9 +148,8 @@ mode: full    # the default, and the riskiest mode a playbook may use
 mode: safe    # optional; empty means the global mode
 ```
 
-A playbook can only pick an equal or safer mode: with global `full`, a playbook with
-`mode: yolo` runs as `full` and the run logs a warning. Yolo needs `mode: yolo` in the global
-config too.
+A playbook can only pick an equal or safer mode: with global `safe`, a playbook with
+`mode: full` runs as `safe` and the run logs a warning.
 
 Safe mode checks the diff, not only the prompt. `open_pr` refuses the change unless each
 changed file is one of:
@@ -166,12 +164,6 @@ New, deleted and renamed files are refused, except new ignore files and lockfile
 `writePaths`, safe mode writes only dependency manifests, image references, lockfiles and
 ignore files (`Dockerfile`, `go.mod`, `package.json`, `values*.yaml`, ...). With `writePaths`,
 those paths apply instead, and the diff check still runs.
-
-Yolo mode pushes without force, so the push only works as a fast-forward. If it is rejected,
-for example by branch protection or because the branch moved since the clone, the same commit
-goes to `heraion/<playbook>/<key>` as a PR, with the usual duplicate and closed-PR checks. With
-`maxPRs: 2`, a run can push two commits to the default branch, the second on top of the first.
-With `--dry-run`, yolo logs the commit and its diff instead of pushing.
 
 ## Jira and Confluence
 
@@ -351,13 +343,13 @@ for each repo's clone URL. The token needs to read the repos, push branches and 
 | Jira projects | With `jira.projects: [OPS]`, `create_issue` for `SEC` is refused |
 | Atlassian spaces | With `JIRA_PROJECTS_FILTER=CHG,OPS` on mcp-atlassian, reading `HR-1` or creating in `HR` is refused by the server |
 | Issue budget | With `maxIssues: 1`, a second new issue is refused. `maxIssues: 0` removes `create_issue` |
-| Branches | Only `heraion/<playbook>/...` branches are pushed, and in yolo mode the default branch, fast-forward only |
+| Branches | Only `heraion/<playbook>/...` branches are pushed, never the default branch |
 | Mode | A playbook's `mode` can only be equal to or safer than the global one; in `safe` mode `open_pr` refuses changes that are not version upgrades within the same major version, lockfile updates or new ignore-file entries |
 | Duplicates | An open PR on the same branch of the same repo (a fork's branch does not count), or an open issue with the same fingerprint label, is reused |
 | Masking | `ghp_...`, `glpat-...`, `sk-...`, `ATATT3...`, JWTs, `Bearer ...`, `user:password@` in URLs, PEM keys and configured secrets become `[REDACTED]` in prompts, PRs, issues and logs. `open_pr` refuses a change that adds such a value to a file |
 | Run size | `llm.maxSteps`, `llm.maxTokens` (checked before each round of tool calls), `llm.timeout`; each tool result is cut at `llm.maxToolResultBytes` (16 KiB), and above `llm.maxContextBytes` (200000) the oldest results become a stub. The defaults need a model context of about 64k tokens |
 | Webhook body | `gateway.maxBodyBytes`, default 256 KiB, at most 1032192 (it is stored in a Secret) |
-| No merge | The code has no merge call; yolo mode pushes a commit instead |
+| No merge | The code has no merge call and never pushes to the default branch |
 
 ## Development
 
@@ -411,8 +403,6 @@ cosign verify ghcr.io/muskats/charts/heraion:2.1.0 \
   --certificate-identity https://github.com/muskats/heraion/.github/workflows/release.yaml@refs/tags/v2.1.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
-
-Still to do: end-to-end tests on a `kind` cluster, and against real GitHub and Gitea servers.
 
 ## License
 
