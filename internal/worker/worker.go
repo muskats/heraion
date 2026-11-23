@@ -25,6 +25,7 @@ type Options struct {
 	Config   *config.Config
 	Playbook *playbook.Playbook
 	Event    []byte // raw trigger payload (webhook body), may be empty
+	EventID  string // identity of the webhook event (HERAION_EVENT_ID), may be empty
 	Redactor *guardrails.Redactor
 	Log      *slog.Logger
 	LLM      llm.Chatter
@@ -52,6 +53,7 @@ type scope struct {
 	repos      []string
 	namespaces []string // Kubernetes namespaces; empty: all
 	projects   []string // Jira projects for create_issue
+	eventID    string   // webhook event identity; empty for scheduled runs
 }
 
 // Run executes the playbook.
@@ -71,6 +73,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 		red.AddSources(cfg.Secrets()...)
 	}
 	s := resolveScope(cfg, pb, log)
+	s.eventID = o.EventID
 	guard := guardrails.New(guardrails.Options{
 		Repos: s.repos, MaxPRs: pb.Guardrails.MaxPRs, DryRun: s.dryRun, MaxFileBytes: pb.Guardrails.MaxFileBytes, Redactor: red,
 		AllowPaths: pb.Guardrails.WritePaths, DenyPaths: pb.Guardrails.DenyPaths, Mode: s.mode,
@@ -111,7 +114,7 @@ func Run(ctx context.Context, o Options) (*Report, error) {
 			return nil, err
 		}
 		defer mgr.Close()
-		mcpTools, issues = issueGuard(cfg.Jira, mcpTools, s.projects, pb.Name, guard, log)
+		mcpTools, issues = issueGuard(cfg.Jira, mcpTools, s.projects, pb.Name, o.EventID, guard, log)
 		all = append(all, mcp.LimitNamespaces(mcpTools, cfg.Namespaces)...)
 		if issues != nil {
 			all = append(all, issues)
@@ -161,7 +164,7 @@ func postReport(ctx context.Context, prs scm.PRService, rep *Report, redact func
 	var targets []scm.OpenedPR
 	for _, pr := range rep.PRs {
 		switch pr.Outcome {
-		case scm.OutcomeOpened:
+		case scm.OutcomeOpened, scm.OutcomeUpdated:
 			targets = append(targets, pr)
 		case scm.OutcomeDryRun:
 			log.Info("dry-run: would post report", "repo", pr.Repo, "branch", pr.Branch, "bytes", len(final))
@@ -209,7 +212,7 @@ func resolveScope(cfg *config.Config, pb *playbook.Playbook, log *slog.Logger) s
 // issueGuard removes every "<server>.jira_create_issue" tool, so issues are
 // only created through create_issue and its guardrails. With jira set, it
 // returns create_issue backed by that server's tools.
-func issueGuard(j *config.Jira, tools []llm.Tool, projects []string, playbookName string,
+func issueGuard(j *config.Jira, tools []llm.Tool, projects []string, playbookName, eventID string,
 	guard *guardrails.Guard, log *slog.Logger) ([]llm.Tool, *jira.Tool) {
 	var search, create llm.Tool
 	out := tools[:0:0]
@@ -235,7 +238,7 @@ func issueGuard(j *config.Jira, tools []llm.Tool, projects []string, playbookNam
 		return out, nil
 	}
 	return out, &jira.Tool{API: jira.MCP{Searcher: search, Creator: create}, Playbook: playbookName,
-		IssueType: j.IssueType, Labels: j.Labels, Guard: guard, Log: log}
+		IssueType: j.IssueType, Labels: j.Labels, Guard: guard, Log: log, EventID: eventID}
 }
 
 // allowedTools keeps the tools the playbook allows that can do something:
@@ -257,8 +260,8 @@ func usable(pb *playbook.Playbook, repos []string, n string) bool {
 		return false
 	case isGitTool(n) && len(repos) == 0:
 		return false
-	case n == "open_pr" && pb.Guardrails.MaxPRs == 0:
-		return false
+	case n == "open_pr":
+		return pb.OpensPRs(repos)
 	case n == "create_issue" && pb.Guardrails.MaxIssues == 0:
 		return false
 	}
@@ -307,14 +310,20 @@ Rules:
 			"other namespaces and cluster-wide queries are refused.\n", strings.Join(s.namespaces, ", "))
 	}
 	if slices.Contains(tools, "open_pr") {
-		fmt.Fprintf(&b, "You may open at most %d pull request(s) in this run. Use a stable 'branch' key per change so reruns de-duplicate.\n", pb.Guardrails.MaxPRs)
+		fmt.Fprintf(&b, "You may open at most %d pull request(s) in this run; one PR per repository is normal. "+
+			"The branch is named after the changed files, so a rerun with a new fix for the same files updates the open PR.\n", pb.Guardrails.MaxPRs)
 		b.WriteString(modePrompt[s.mode])
 	} else {
 		b.WriteString("This playbook produces a report only: do not attempt to open pull requests.\n")
 	}
 	if slices.Contains(tools, "create_issue") {
-		fmt.Fprintf(&b, "You may create at most %d Jira issue(s) with create_issue, in: %s. Create one only for a finding that needs a human, and use a stable 'key' so reruns de-duplicate.\n",
+		fmt.Fprintf(&b, "You may create at most %d Jira issue(s) with create_issue, in: %s. Create one only for a finding that needs a human. ",
 			pb.Guardrails.MaxIssues, strings.Join(s.projects, ", "))
+		if s.eventID != "" {
+			b.WriteString("This run handles one event, and create_issue de-duplicates on it: create at most one issue.\n")
+		} else {
+			b.WriteString("Give each finding a 'key' of the form <kind>-<namespace>-<workload>, lowercase, e.g. 'oomkilled-shop-payments-api', so reruns find the same issue.\n")
+		}
 	}
 	if s.dryRun {
 		b.WriteString("Dry-run mode: open_pr and create_issue record the change, but nothing is pushed or created. Behave as if it were real.\n")
@@ -323,9 +332,10 @@ Rules:
 }
 
 var modePrompt = map[config.Mode]string{
-	config.ModeSafe: "Safe mode: only non-breaking changes are accepted: version upgrades within the same major version " +
-		"(e.g. alpine:3.18 -> 3.20), lockfile updates, and new entries in scanner ignore files (e.g. .trivyignore) " +
-		"for confirmed false positives. open_pr refuses anything else; put such findings in your summary or an issue instead.\n",
+	config.ModeSafe: "Safe mode: open_pr accepts a change only if versions and image digests are all that changed: " +
+		"an upgrade within the major version (e.g. node:20.11 -> 20.18), only the patch level of a distro image " +
+		"(alpine:3.20.1 -> 3.20.3), or another @sha256 digest. Lockfiles and scanner ignore files are refused. " +
+		"Put anything else in your summary or an issue instead.\n",
 }
 
 // userPrompt appends the event, which must already be redacted: cutting it

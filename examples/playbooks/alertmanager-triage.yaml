@@ -13,11 +13,11 @@ prompt: |
   4. Decide the most likely root cause, citing the evidence. Distinguish symptoms from causes.
   5. Only if the cause is a configuration value in one of the allowed repositories (for
      example a memory limit that is clearly too low, a wrong probe, a bad image tag), open one
-     minimal PR fixing it. Use the alertname and workload as the branch key, e.g.
-     "oomkilled-payments-api-memory". Otherwise open no PR.
+     minimal PR fixing it. Otherwise open no PR.
   6. If the problem needs a human (no config fix, or low confidence) and create_issue is
-     available, create one Jira issue with the evidence. Use the same key as above.
+     available, create one Jira issue with the evidence.
   Finish with a short triage report: summary, evidence, root cause, confidence, next steps.
   Alerts with status "resolved" need no investigation; just mention them.
 output: pr
-guardrails: { maxPRs: 1, maxIssues: 1 }
+# Full mode: writePaths is required and names what a fix may touch.
+guardrails: { maxPRs: 1, maxIssues: 1, writePaths: ["deploy/**/values*.yaml", "**/kustomization.yaml"] }

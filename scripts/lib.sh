@@ -26,7 +26,14 @@ HELM_UNITTEST_VERSION=v1.2.1
 ACTIONLINT_VERSION=v1.7.12
 # Kubernetes versions kubeconform checks the rendered chart against: the
 # oldest supported (Chart.yaml kubeVersion) and a current one.
-KUBE_VERSIONS="${KUBE_VERSIONS:-1.27.0 1.33.0}"
+KUBE_VERSIONS="${KUBE_VERSIONS:-1.30.0 1.35.0}"
+# kind clusters of scripts/test-kind.sh, by Kubernetes minor: the oldest
+# supported (Chart.yaml kubeVersion) and the newest kind ships. Each kind
+# release builds its own node images, so both are pinned together.
+declare -A KIND_CLUSTERS=(
+	[1.30]="v0.29.0 kindest/node:v1.30.13@sha256:397209b3d947d154f6641f2d0ce8d473732bd91c87d9575ade99049aa33cd648"
+	[1.37]="v0.33.0 kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+)
 
 if [[ -t 1 ]]; then
 	_bold=$'\e[1m' _red=$'\e[31m' _green=$'\e[32m' _yellow=$'\e[33m' _reset=$'\e[0m'
@@ -86,6 +93,8 @@ helm_unittest() {
 	fi
 	HELM_PLUGINS="$dir" helm unittest "$@"
 }
+# kind VERSION prints the path of kind at that version, e.g. kind v0.33.0.
+kind_bin() { go_tool kind sigs.k8s.io/kind "$1"; }
 actionlint() { go_tool actionlint github.com/rhysd/actionlint/cmd/actionlint "$ACTIONLINT_VERSION"; }
 
 # optional NAME: true if the tool exists. Missing tools fail in CI and are

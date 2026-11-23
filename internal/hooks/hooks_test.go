@@ -25,11 +25,13 @@ import (
 
 type fakeDispatch struct {
 	calls []string
+	ids   [][]byte
 	err   error
 }
 
-func (f *fakeDispatch) Dispatch(_ context.Context, pb, hook string, ev []byte) (string, bool, error) {
+func (f *fakeDispatch) Dispatch(_ context.Context, pb, hook string, id, ev []byte) (string, bool, error) {
 	f.calls = append(f.calls, pb+"|"+hook+"|"+string(ev))
+	f.ids = append(f.ids, id)
 	if f.err != nil {
 		return "", false, f.err
 	}
@@ -188,5 +190,41 @@ func TestMetrics(t *testing.T) {
 	}
 	if n := testutil.CollectAndCount(s.requests); n != 3 {
 		t.Errorf("want 3 request series, got %d", n)
+	}
+}
+
+func TestRetryLaterIs503(t *testing.T) {
+	d := &fakeDispatch{err: dispatch.ErrRetryLater}
+	w := post(setup(t, d), "/hooks/alertmanager", `{}`, map[string]string{"Authorization": "Bearer am-secret"})
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") != "30" {
+		t.Fatalf("%d %q %s", w.Code, w.Header().Get("Retry-After"), w.Body)
+	}
+}
+
+func TestAlertmanagerIdentity(t *testing.T) {
+	h := &config.Hook{Identity: config.IdentityAlertmanager}
+	notification := func(value, status2 string, extra bool) []byte {
+		alerts := `{"fingerprint":"a1","status":"firing","annotations":{"summary":"` + value + `"}},` +
+			`{"fingerprint":"b2","status":"` + status2 + `"}`
+		if extra {
+			alerts += `,{"fingerprint":"c3","status":"firing"}`
+		}
+		return []byte(`{"groupKey":"{}:{alertname=\"X\"}","status":"firing","alerts":[` + alerts + `]}`)
+	}
+	base := identity(h, notification("cpu 91%", "firing", false), quiet)
+	if !bytes.Equal(base, identity(h, notification("cpu 97%", "firing", false), quiet)) {
+		t.Error("a changed annotation value must be the same event")
+	}
+	if bytes.Equal(base, identity(h, notification("cpu 91%", "resolved", false), quiet)) {
+		t.Error("a resolved alert must be a new event")
+	}
+	if bytes.Equal(base, identity(h, notification("cpu 91%", "firing", true), quiet)) {
+		t.Error("an added alert must be a new event")
+	}
+	if raw := []byte("not json"); !bytes.Equal(identity(h, raw, quiet), raw) {
+		t.Error("a body that is not a notification falls back to raw")
+	}
+	if raw := []byte(`{"a":1}`); !bytes.Equal(identity(&config.Hook{Identity: config.IdentityRaw}, raw, quiet), raw) {
+		t.Error("raw identity is the body")
 	}
 }

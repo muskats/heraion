@@ -68,3 +68,10 @@ tests:
       playbooks.trivy-remediate: { enabled: true, mode: reckless }
     asserts:
       - failedTemplate: {}
+  - it: passes the hook identity to the config
+    set:
+      playbooks.alertmanager-triage.enabled: true
+      gateway.hooks.alertmanager: { auth: token, identity: alertmanager, secret: { existingSecret: am, key: secret } }
+    documentSelector: { path: metadata.name, value: t-heraion-config }
+    asserts:
+      - matchRegex: { path: 'data["config.yaml"]', pattern: "identity: alertmanager" }

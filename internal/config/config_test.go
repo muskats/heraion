@@ -288,3 +288,17 @@ func TestCheckCredentials(t *testing.T) {
 		t.Fatalf("unset credentials are fine: %v", err)
 	}
 }
+
+func TestHookIdentity(t *testing.T) {
+	c, err := Load(write(t, "llm: {baseURL: http://x, model: m}\ngateway: {hooks: {am: {insecure: true}}}\n"))
+	if err != nil || c.Gateway.Hooks["am"].Identity != IdentityRaw {
+		t.Fatalf("default identity: %v %v", c, err)
+	}
+	if _, err := Load(write(t, "llm: {baseURL: http://x, model: m}\ngateway: {hooks: {am: {insecure: true, identity: alertmanager}}}\n")); err != nil {
+		t.Errorf("alertmanager identity: %v", err)
+	}
+	if _, err := Load(write(t, "llm: {baseURL: http://x, model: m}\ngateway: {hooks: {am: {insecure: true, identity: body}}}\n")); err == nil ||
+		!strings.Contains(err.Error(), "identity") {
+		t.Errorf("unknown identity: %v", err)
+	}
+}

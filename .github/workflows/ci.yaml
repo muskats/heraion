@@ -15,14 +15,19 @@ permissions:
 # runs the same checks.
 jobs:
   test:
-    name: ${{ matrix.stage }}
+    name: ${{ matrix.stage }}${{ matrix.kube && format(' {0}', matrix.kube) || '' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         stage: [lint, unit, chart, e2e]
+        # kind: one job per cluster of KIND_CLUSTERS in scripts/lib.sh
+        include:
+          - { stage: kind, kube: "1.30" }
+          - { stage: kind, kube: "1.37" }
     env:
       JUNIT: "1"
+      KIND_K8S: ${{ matrix.kube }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0

@@ -51,17 +51,17 @@ func (m Message) Text() string {
 
 // Turn is one scripted model response: either tool calls or final text.
 type Turn struct {
-	Calls  []Call
-	Final  string
-	Status int // non-zero: reply with this HTTP status instead
+	Calls  []Call `json:"calls,omitempty"`
+	Final  string `json:"final,omitempty"`
+	Status int    `json:"status,omitempty"` // non-zero: reply with this HTTP status instead
 	// FinishReason defaults to "stop", e.g. "length" for a cut-off answer.
-	FinishReason string
+	FinishReason string `json:"finishReason,omitempty"`
 }
 
 // Call is a scripted tool call; Args is marshalled to JSON.
 type Call struct {
-	Name string
-	Args any
+	Name string `json:"name"`
+	Args any    `json:"args"`
 }
 
 // Server is a mock endpoint that replays Turns in order and records requests.
@@ -69,9 +69,22 @@ type Server struct {
 	*httptest.Server
 	mu       sync.Mutex
 	turns    []Turn
+	script   []Turn // for Loop
 	Requests []Request
 	Auth     []string
+	// Loop starts the script over when it is used up, e.g. for a stub that
+	// serves many runs.
+	Loop bool
 }
+
+// Script returns a server that is not started, for use as an
+// http.Handler, e.g. in a stub binary.
+func Script(turns ...Turn) *Server {
+	return &Server{turns: turns, script: turns}
+}
+
+// ServeHTTP answers chat completions from the script.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.handle(w, r) }
 
 // New starts a mock server. It is closed when the test ends.
 func New(t testing.TB, turns ...Turn) *Server {
@@ -97,6 +110,9 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.Requests = append(s.Requests, req)
 	s.Auth = append(s.Auth, r.Header.Get("Authorization"))
+	if len(s.turns) == 0 && s.Loop {
+		s.turns = s.script
+	}
 	if len(s.turns) == 0 {
 		s.mu.Unlock()
 		http.Error(w, "script exhausted", http.StatusInternalServerError)

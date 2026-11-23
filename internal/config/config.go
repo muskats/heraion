@@ -134,6 +134,12 @@ type Hook struct {
 	Header string `json:"header,omitempty"`
 	// Insecure skips authentication. Local testing only.
 	Insecure bool `json:"insecure,omitempty"`
+	// Identity says which events are the same, for de-duplication:
+	//
+	//	raw           the body, byte for byte (default)
+	//	alertmanager  groupKey, status and each alert's fingerprint and status,
+	//	              so a changed annotation value is the same event
+	Identity string `json:"identity,omitempty"`
 
 	Secret *secret.Source `json:"-"` // from SecretEnv
 }
@@ -327,6 +333,9 @@ func (c *Config) applyDefaults() {
 		if h.Auth == "" {
 			h.Auth = HookAuthHMAC
 		}
+		if h.Identity == "" {
+			h.Identity = IdentityRaw
+		}
 		if h.Header == "" {
 			if h.Auth == HookAuthToken {
 				h.Header = "Authorization"
@@ -345,6 +354,12 @@ const MaxBodyBytesLimit = 1<<20 - 16<<10
 const (
 	HookAuthHMAC  = "hmac-sha256"
 	HookAuthToken = "token"
+)
+
+// Hook identities.
+const (
+	IdentityRaw          = "raw"
+	IdentityAlertmanager = "alertmanager"
 )
 
 // Jira project keys, e.g. OPS, SEC2, MY_PROJ.
@@ -504,6 +519,9 @@ func (gw *Gateway) validate() []error {
 		}
 		if h.Auth != HookAuthHMAC && h.Auth != HookAuthToken {
 			errs = append(errs, fmt.Errorf("gateway.hooks.%s.auth %q must be %s or %s", name, h.Auth, HookAuthHMAC, HookAuthToken))
+		}
+		if h.Identity != IdentityRaw && h.Identity != IdentityAlertmanager {
+			errs = append(errs, fmt.Errorf("gateway.hooks.%s.identity %q must be %s or %s", name, h.Identity, IdentityRaw, IdentityAlertmanager))
 		}
 		if !h.Insecure && h.SecretEnv == "" {
 			errs = append(errs, fmt.Errorf("gateway.hooks.%s: secretEnv is required (or set insecure: true)", name))

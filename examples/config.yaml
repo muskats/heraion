@@ -40,13 +40,14 @@ mode: full     # safe or full; playbooks may only pick this or a safer mode
 #   projects: [OPS]
 #   labels: [heraion]
 
-# MCP servers. In Kubernetes the chart writes this section.
+# MCP servers. In Kubernetes the chart writes this section; deploy-mode servers
+# are sidecars of the worker pod, e.g. http://127.0.0.1:8080/mcp.
 mcpServers:
   k8s:
-    url: http://heraion-mcp-k8s:8080/mcp
+    url: http://127.0.0.1:8080/mcp
     allowTools: [resources_list, resources_get, api_resources_list]
   # atlassian:
-  #   url: http://heraion-mcp-atlassian:9000/mcp
+  #   url: http://127.0.0.1:9000/mcp
   # datadog:
   #   url: https://mcp.datadoghq.com/api/unstable/mcp-server/mcp   # depends on your Datadog site
   #   headersFromEnv:

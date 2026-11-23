@@ -104,6 +104,33 @@ func (g *gitea) handle(w http.ResponseWriter, r *http.Request) {
 			"user": map[string]any{"login": "heraion"}, "created_at": ts(time.Now()), "updated_at": ts(time.Now())})
 		return
 	}
+	// PATCH /api/v1/repos/owner/repo/pulls/4 edits a PR's title and body.
+	if len(p) == 8 && p[3] == "repos" && p[6] == "pulls" && r.Method == http.MethodPatch {
+		n, _ := strconv.Atoi(p[7])
+		prs := g.prs[p[4]+"/"+p[5]]
+		if n < 1 || n > len(prs) {
+			send(w, http.StatusNotFound, map[string]string{"message": "not found"})
+			return
+		}
+		var in struct {
+			Title string  `json:"title"`
+			Body  *string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			send(w, http.StatusUnprocessableEntity, map[string]string{"message": err.Error()})
+			return
+		}
+		pr := prs[n-1]
+		if in.Title != "" {
+			pr["title"] = in.Title
+		}
+		if in.Body != nil {
+			pr["body"] = *in.Body
+		}
+		pr["updated_at"] = ts(time.Now())
+		send(w, http.StatusCreated, pr)
+		return
+	}
 	if len(p) != 7 || p[3] != "repos" || p[6] != "pulls" {
 		send(w, http.StatusNotFound, map[string]string{"message": "not found"})
 		return

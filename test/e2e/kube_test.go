@@ -34,6 +34,7 @@ type kube struct {
 	jobs          map[string]*batchv1.Job
 	secrets       map[string]*corev1.Secret
 	verbs         map[[2]string]bool // resource, verb
+	deletePolicy  *metav1.DeletionPropagation
 	failJobCreate bool
 }
 
@@ -62,6 +63,15 @@ func (k *kube) finishAll() {
 	defer k.mu.Unlock()
 	for _, j := range k.jobs {
 		j.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	}
+}
+
+// failAll marks every Job failed, e.g. after the LLM was down.
+func (k *kube) failAll() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, j := range k.jobs {
+		j.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
 	}
 }
 
@@ -165,6 +175,28 @@ func (k *kube) handle(w http.ResponseWriter, r *http.Request) {
 			k.jobs[j.Name] = j
 			send(w, http.StatusCreated, j)
 		}
+	case "jobs delete":
+		j, ok := k.jobs[name]
+		if !ok {
+			sendErr(w, apierrors.NewNotFound(jobsGR, name))
+			return
+		}
+		// client-go sends DeleteOptions as protobuf.
+		if obj, _, err := scheme.Codecs.UniversalDeserializer().Decode(body, nil, nil); err == nil {
+			if opts, ok := obj.(*metav1.DeleteOptions); ok {
+				k.deletePolicy = opts.PropagationPolicy
+			}
+		}
+		// Dependents go first, as with foreground deletion: the event Secret.
+		for n, s := range k.secrets {
+			for _, o := range s.OwnerReferences {
+				if o.UID == j.UID {
+					delete(k.secrets, n)
+				}
+			}
+		}
+		delete(k.jobs, name)
+		send(w, http.StatusOK, metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: "Success"})
 	case "secrets create":
 		obj, _, err := scheme.Codecs.UniversalDeserializer().Decode(body, nil, nil)
 		if err != nil {

@@ -1,5 +1,5 @@
 name: trivy-remediate
-description: Propose minimal base-image / dependency bumps for fixable HIGH and CRITICAL CVEs.
+description: Propose minimal image tag or digest bumps for fixable HIGH and CRITICAL CVEs.
 trigger: { schedule: "0 */6 * * *" }   # the Helm chart renders a CronJob
 # k8s.* tools come from the k8s MCP server; repo_* and open_pr are built in.
 tools: [k8s.resources_list, k8s.resources_get, repo_*, open_pr]
@@ -10,14 +10,15 @@ prompt: |
      Use k8s.resources_get for details. Keep only HIGH and CRITICAL vulnerabilities
      that have a fixedVersion.
   2. Map each affected image (report.artifact.repository / tag) to its source repository
-     among the allowed repos: look for Dockerfiles, Helm values and manifests that
-     reference the image or the vulnerable package.
-  3. For each repository, propose the minimal version bump that fixes the CVEs
-     (base image tag, or package/dependency version). Do not refactor anything else.
-  4. Open one PR per repository. Use a branch key derived from the fix, for example
-     "bump-alpine-3.20.3", so reruns de-duplicate. In the PR body list the CVEs,
-     severities, affected workloads, installed and fixed versions.
+     among the allowed repos: look for image references in Dockerfiles (FROM), Helm
+     values and manifests.
+  3. For each repository, change only those image references: the minimal tag bump that
+     fixes the CVEs, or a new digest. Leave package manifests alone: their lockfiles
+     cannot be updated here. Safe mode also refuses distro releases (alpine 3.18 ->
+     3.20); report those in your summary instead.
+  4. Open one PR per repository. In the PR body list the CVEs, severities, affected
+     workloads, installed and fixed versions.
   If nothing is fixable, open no PR and say so.
 output: pr
-mode: safe     # only same-major version bumps, lockfiles and .trivyignore entries
+mode: safe     # only versions (same major; distro images: patch only) and image digests change
 guardrails: { maxPRs: 3, dryRun: false }

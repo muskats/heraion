@@ -1,0 +1,109 @@
+{{- if and .Values.admissionPolicy.enabled .Values.rbac.create (include "heraion.gatewayEnabled" .) }}
+{{- /*
+What the gateway ServiceAccount may create in this namespace: only worker Jobs
+as the chart renders them (ServiceAccount, containers with their images and
+commands, volumes with their sources, Secrets referenced by env), and only
+event Secrets owned by a Job. Everything is taken from heraion.workerPodSpec,
+so the policy follows the values.
+*/}}
+{{- $ns := include "heraion.namespace" . }}
+{{- $name := printf "%s-%s" $ns (include "heraion.fullname" .) }}
+{{- $user := printf "system:serviceaccount:%s:%s" $ns (include "heraion.gatewaySA" .) }}
+{{- $pod := include "heraion.workerPodSpec" (dict "root" $ "args" (list "run")) | fromYaml }}
+{{- $containers := dict }}
+{{- $secrets := list }}
+{{- range concat ($pod.initContainers | default list) $pod.containers }}
+{{- $_ := set $containers .name (dict "image" .image "command" (.command | default list)) }}
+{{- range (.env | default list) }}{{ with ((.valueFrom | default dict).secretKeyRef | default dict).name }}{{ $secrets = append $secrets . }}{{ end }}{{ end }}
+{{- range (.envFrom | default list) }}{{ with (.secretRef | default dict).name }}{{ $secrets = append $secrets . }}{{ end }}{{ end }}
+{{- end }}
+{{- $volumes := list `(v.name == "heraion-event" && has(v.secret) && v.secret.secretName == object.metadata.name + "-event")` }}
+{{- range ($pod.volumes | default list) }}
+{{- $n := toJson .name }}
+{{- if .configMap }}{{ $volumes = append $volumes (printf "(v.name == %s && has(v.configMap) && v.configMap.name == %s)" $n (toJson .configMap.name)) }}
+{{- else if .secret }}{{ $volumes = append $volumes (printf "(v.name == %s && has(v.secret) && v.secret.secretName == %s)" $n (toJson .secret.secretName)) }}
+{{- else if .emptyDir }}{{ $volumes = append $volumes (printf "(v.name == %s && has(v.emptyDir))" $n) }}
+{{- else if .projected }}{{ $volumes = append $volumes (printf "(v.name == %s && has(v.projected) && v.projected.sources.all(s, !has(s.secret)))" $n) }}
+{{- else if .csi }}{{ $volumes = append $volumes (printf "(v.name == %s && has(v.csi) && v.csi.driver == %s)" $n (toJson .csi.driver)) }}
+{{- else }}{{ $volumes = append $volumes (printf "(v.name == %s && !has(v.hostPath))" $n) }}
+{{- end }}
+{{- end }}
+{{- $container := `c.name in variables.allowed && c.image == variables.allowed[c.name].image && ((has(c.command) && c.command == variables.allowed[c.name].command) || (!has(c.command) && size(variables.allowed[c.name].command) == 0)) && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name in variables.secrets)) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef) || f.secretRef.name in variables.secrets)) && (!has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)` }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "gateway" "name" (printf "%s-jobs" $name)) | nindent 2 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - { apiGroups: [batch], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [jobs] }
+  matchConditions:
+    - name: gateway
+      expression: {{ printf "request.userInfo.username == %s" (toJson $user) | toJson }}
+  variables:
+    - name: pod
+      expression: object.spec.template.spec
+    - name: allowed
+      expression: {{ toJson $containers | toJson }}
+    - name: secrets
+      expression: {{ toJson (uniq $secrets) | toJson }}
+  validations:
+    - expression: "has(object.metadata.labels) && 'heraion.io/playbook' in object.metadata.labels"
+      message: worker Jobs carry the heraion.io/playbook label
+    - expression: {{ printf "has(variables.pod.serviceAccountName) && variables.pod.serviceAccountName == %s" (toJson (include "heraion.workerSA" .)) | toJson }}
+      message: {{ printf "worker Jobs run as ServiceAccount %s" (include "heraion.workerSA" .) | toJson }}
+    - expression: {{ printf "variables.pod.containers.all(c, %s) && (!has(variables.pod.initContainers) || variables.pod.initContainers.all(c, %s))" $container $container | toJson }}
+      message: every container must be one the chart renders, with its image and command, Secrets the chart uses, and not privileged
+    - expression: "!has(variables.pod.ephemeralContainers)"
+      message: no ephemeral containers
+    - expression: {{ printf "!has(variables.pod.volumes) || variables.pod.volumes.all(v, %s)" (join " || " $volumes) | toJson }}
+      message: every volume must be one the chart renders, with its source; heraion-event must be the Job's own event Secret
+    - expression: "!(has(variables.pod.hostNetwork) && variables.pod.hostNetwork) && !(has(variables.pod.hostPID) && variables.pod.hostPID) && !(has(variables.pod.hostIPC) && variables.pod.hostIPC)"
+      message: no host network, PID or IPC namespace
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "gateway" "name" (printf "%s-jobs" $name)) | nindent 2 }}
+spec:
+  policyName: {{ printf "%s-jobs" $name }}
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: { kubernetes.io/metadata.name: {{ $ns }} }
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "gateway" "name" (printf "%s-event-secrets" $name)) | nindent 2 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - { apiGroups: [""], apiVersions: [v1], operations: [CREATE, UPDATE], resources: [secrets] }
+  matchConditions:
+    - name: gateway
+      expression: {{ printf "request.userInfo.username == %s" (toJson $user) | toJson }}
+  validations:
+    - expression: "object.metadata.name.endsWith('-event') && has(object.metadata.labels) && 'heraion.io/playbook' in object.metadata.labels"
+      message: the gateway only creates event Secrets (<job>-event, label heraion.io/playbook)
+    - expression: "has(object.immutable) && object.immutable && has(object.type) && object.type == 'Opaque'"
+      message: event Secrets are immutable and Opaque
+    - expression: "has(object.data) && size(object.data) == 1 && 'payload' in object.data"
+      message: event Secrets hold exactly one key, payload
+    - expression: "has(object.metadata.ownerReferences) && object.metadata.ownerReferences.exists(o, o.apiVersion == 'batch/v1' && o.kind == 'Job' && o.name + '-event' == object.metadata.name)"
+      message: event Secrets are owned by their Job
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "gateway" "name" (printf "%s-event-secrets" $name)) | nindent 2 }}
+spec:
+  policyName: {{ printf "%s-event-secrets" $name }}
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchLabels: { kubernetes.io/metadata.name: {{ $ns }} }
+{{- end }}

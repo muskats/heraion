@@ -1,0 +1,38 @@
+description: A fixable CVE in the Dockerfile base image gives one PR that bumps only that image.
+mode: safe
+playbook: |
+  name: trivy-remediate
+  trigger: { manual: true }
+  tools: [k8s.resources_list, k8s.resources_get, repo_*, open_pr]
+  mode: safe
+  prompt: |
+    List VulnerabilityReports with k8s.resources_list (apiVersion aquasecurity.github.io/v1alpha1,
+    kind VulnerabilityReport). For HIGH or CRITICAL vulnerabilities with a fixedVersion, find
+    the image reference in the allowed repos and open one PR per repo with the minimal tag bump.
+    If nothing is fixable, open no PR.
+files:
+  Dockerfile: |
+    FROM alpine:3.20.1
+    COPY app /app
+    ENTRYPOINT ["/app"]
+  deploy/values.yaml: |
+    image: ghcr.io/acme/web:1.4.2
+tools:
+  - name: resources_list
+    description: List Kubernetes resources by apiVersion and kind.
+    result: |
+      apiVersion: aquasecurity.github.io/v1alpha1
+      kind: VulnerabilityReport
+      metadata: { name: replicaset-web-7d9f-web, namespace: shop }
+      report:
+        artifact: { repository: library/alpine, tag: 3.20.1 }
+        vulnerabilities:
+          - { vulnerabilityID: CVE-2026-1001, severity: HIGH, resource: libcrypto3, installedVersion: 3.3.1-r0, fixedVersion: 3.3.2-r0, title: "OpenSSL: fixed in alpine 3.20.3" }
+      # The base image alpine:3.20.3 ships libcrypto3 3.3.2-r0.
+  - name: resources_get
+    description: Get one Kubernetes resource.
+    result: "see resources_list"
+expect:
+  prs: 1
+  paths: [Dockerfile]
+  changed: ["alpine:3.20.3"]

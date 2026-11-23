@@ -4,7 +4,7 @@ import "fmt"
 
 // Mode says how open_pr delivers a fix, from least to most risky:
 //
-//	safe  PR on a heraion/... branch, only for non-breaking changes
+//	safe  PR on a heraion/... branch; only versions and image digests may change
 //	full  PR on a heraion/... branch, for any change (default)
 type Mode string
 

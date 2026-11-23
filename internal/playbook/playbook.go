@@ -9,12 +9,12 @@ package playbook
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/robfig/cron/v3"
 
@@ -62,19 +62,21 @@ type Guardrails struct {
 	DryRun       *bool `json:"dryRun,omitempty"`
 	MaxFileBytes int   `json:"maxFileBytes"`
 	// WritePaths limits repo_write_file to these globs, e.g. [Dockerfile,
-	// "deploy/**"]. Empty: any path except the denied ones.
+	// "deploy/**"]. Required when a full-mode run may open PRs, see
+	// ValidateAgainst. Empty: any path except the denied ones.
 	WritePaths []string `json:"writePaths,omitempty"`
 	// DenyPaths adds to guardrails.DefaultDenyPaths (CI files, CODEOWNERS).
 	DenyPaths []string `json:"denyPaths,omitempty"`
-	// ReopenAfter is how long a PR closed without merging stops a new PR on
-	// the same branch. "0s": never reopen.
+	// ReopenAfter is how long a PR closed without merging blocks the same
+	// change. "0s" (default): never propose it again. A different change on
+	// the same files may open a new PR at any time.
 	ReopenAfter config.Duration `json:"reopenAfter"`
 }
 
 // DefaultGuardrails are used for keys a playbook does not set.
 func DefaultGuardrails() Guardrails {
 	return Guardrails{MaxPRs: 1, MaxIssues: 1, MaxFileBytes: 1 << 20,
-		ReopenAfter: config.Duration{Duration: 7 * 24 * time.Hour}}
+		ReopenAfter: config.Duration{}}
 }
 
 // Parse decodes and validates a single playbook.
@@ -158,10 +160,46 @@ func (p *Playbook) Validate() error {
 			errs = append(errs, fmt.Errorf("guardrails: %w", err))
 		}
 	}
+	for _, pat := range p.Guardrails.WritePaths {
+		if catchAll[strings.TrimSpace(pat)] {
+			errs = append(errs, fmt.Errorf("guardrails.writePaths %q: %s", pat, errWritePaths))
+		}
+	}
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("playbook %q: %w", p.Name, err)
 	}
 	return nil
+}
+
+// catchAll are writePaths entries that would allow every file.
+var catchAll = map[string]bool{"**": true, "**/*": true, "*": true, "/**": true, "./**": true}
+
+const errWritePaths = `writePaths must name what the playbook may change, e.g. [Dockerfile, "deploy/**"]`
+
+// ValidateAgainst checks what needs the global config: a run that may open
+// PRs in full mode must list writePaths, e.g. [Dockerfile, "deploy/**"].
+// Safe mode has its own default paths.
+func (p *Playbook) ValidateAgainst(global config.Mode, repos []string) error {
+	if p.OpensPRs(p.EffectiveRepos(repos)) && p.EffectiveMode(global) != config.ModeSafe && len(p.Guardrails.WritePaths) == 0 {
+		return fmt.Errorf("playbook %q: guardrails.writePaths is required in %s mode: %s", p.Name, p.EffectiveMode(global), errWritePaths)
+	}
+	return nil
+}
+
+// ValidateAll runs ValidateAgainst on every playbook.
+func ValidateAll(pbs map[string]*Playbook, global config.Mode, repos []string) error {
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(pbs)) {
+		errs = append(errs, pbs[name].ValidateAgainst(global, repos))
+	}
+	return errors.Join(errs...)
+}
+
+// OpensPRs reports whether a run gets open_pr: allowed by tools (never with
+// output report), maxPRs > 0, and repos left after narrowing to the global
+// list (pass EffectiveRepos).
+func (p *Playbook) OpensPRs(repos []string) bool {
+	return p.AllowsTool("open_pr") && p.Guardrails.MaxPRs > 0 && len(repos) > 0
 }
 
 // AllowsTool matches name against the tools list (path.Match syntax), e.g.

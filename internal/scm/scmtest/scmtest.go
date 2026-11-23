@@ -53,6 +53,35 @@ func NewRemote(t testing.TB, base, repo string, files map[string]string) string 
 	return "file://" + base
 }
 
+// CommitToBranch commits files to branch of the bare remote as author
+// email, e.g. a reviewer's fixup on HeraIon's PR branch.
+func CommitToBranch(t testing.TB, base, repo, branch, email string, files map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+	r, err := git.PlainClone(dir, false, &git.CloneOptions{
+		URL: filepath.Join(base, filepath.FromSlash(repo)+".git"), ReferenceName: plumbing.NewBranchReferenceName(branch), SingleBranch: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, c := range files {
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(p)), []byte(c), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wt, _ := r.Worktree()
+	if err := wt.AddWithOptions(&git.AddOptions{All: true}); err != nil {
+		t.Fatal(err)
+	}
+	sig := &object.Signature{Name: "someone", Email: email, When: time.Now()}
+	if _, err := wt.Commit("fixup", &git.CommitOptions{Author: sig}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Push(&git.PushOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // RemoteBranchFile reads a file from a branch of the bare remote.
 func RemoteBranchFile(t testing.TB, base, repo, branch, path string) (string, error) {
 	t.Helper()
@@ -82,6 +111,8 @@ type FakePRs struct {
 	Open    map[string]*scm.PR // key: repo + " " + branch
 	// Closed holds PRs closed without merging (or merged), by the same key.
 	Closed map[string][]scm.PR
+	// Updated are the inputs of Update calls.
+	Updated []scm.PRInput
 	// Comments are the comments posted, e.g. {Repo: "acme/app", Number: 1, Body: "..."}.
 	Comments []Comment
 	// CommentErr, when set, is returned by Comment.
@@ -93,6 +124,19 @@ type Comment struct {
 	Repo   string
 	Number int
 	Body   string
+}
+
+// Update replaces the title and body of the open PR number, if any.
+func (f *FakePRs) Update(_ context.Context, repo string, number int, in scm.PRInput) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Updated = append(f.Updated, in)
+	for _, pr := range f.Open {
+		if pr.Number == number {
+			pr.Body = in.Body
+		}
+	}
+	return nil
 }
 
 func (f *FakePRs) Comment(_ context.Context, repo string, number int, body string) error {
@@ -124,7 +168,7 @@ func (f *FakePRs) Create(_ context.Context, repo string, in scm.PRInput) (*scm.P
 		f.Open = map[string]*scm.PR{}
 	}
 	f.Created = append(f.Created, in)
-	pr := &scm.PR{Number: len(f.Created), URL: fmt.Sprintf("https://git.example/%s/pull/%d", repo, len(f.Created)), State: scm.PRStateOpen}
+	pr := &scm.PR{Number: len(f.Created), URL: fmt.Sprintf("https://git.example/%s/pull/%d", repo, len(f.Created)), State: scm.PRStateOpen, Body: in.Body}
 	f.Open[repo+" "+in.Head] = pr
 	return pr, nil
 }

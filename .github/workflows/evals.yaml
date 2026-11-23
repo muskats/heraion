@@ -1,0 +1,41 @@
+name: evals
+# The eval suite (test/evals) against a real model: on demand, and from
+# release.yaml before anything is published. Not on every PR: it costs tokens
+# and its results vary.
+#
+# Off unless the repo variable HERAION_EVALS is "true"; then the job is
+# skipped. When on, it needs the variables HERAION_EVAL_BASE_URL (e.g.
+# https://api.openai.com/v1) and HERAION_EVAL_MODEL (e.g. gpt-4.1), and the
+# secret HERAION_EVAL_API_KEY.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    if: vars.HERAION_EVALS == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: settings are present
+        env:
+          BASE_URL: ${{ vars.HERAION_EVAL_BASE_URL }}
+          MODEL: ${{ vars.HERAION_EVAL_MODEL }}
+        run: |
+          # Without them the suite skips, which must not pass a release.
+          if [[ -z "$BASE_URL" || -z "$MODEL" ]]; then
+            echo "::error::set the repo variables HERAION_EVAL_BASE_URL and HERAION_EVAL_MODEL"
+            exit 1
+          fi
+      - name: evals
+        env:
+          HERAION_EVAL_BASE_URL: ${{ vars.HERAION_EVAL_BASE_URL }}
+          HERAION_EVAL_MODEL: ${{ vars.HERAION_EVAL_MODEL }}
+          HERAION_EVAL_API_KEY: ${{ secrets.HERAION_EVAL_API_KEY }}
+        run: go test -tags evals -count=1 -timeout 60m -v ./test/evals

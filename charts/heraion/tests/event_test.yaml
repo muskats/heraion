@@ -18,7 +18,7 @@ tests:
     asserts:
       - contains:
           path: rules
-          content: { apiGroups: [""], resources: [secrets], verbs: [create, patch, delete] }
+          content: { apiGroups: [""], resources: [secrets], verbs: [create] }
       - notContains:
           path: rules
           content: { apiGroups: [""], resources: [secrets], verbs: [get, list, watch, create, patch, delete] }
@@ -30,7 +30,7 @@ tests:
     asserts:
       - contains:
           path: rules
-          content: { apiGroups: [batch], resources: [jobs], verbs: [get, create] }
+          content: { apiGroups: [batch], resources: [jobs], verbs: [get, create, delete] }
   - it: rejects a maxBodyBytes a Secret cannot hold
     set:
       gateway.maxBodyBytes: 2000000

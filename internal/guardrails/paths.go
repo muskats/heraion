@@ -2,14 +2,18 @@ package guardrails
 
 import (
 	"fmt"
+	"path"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
 
-// DefaultDenyPaths are files a run may never write: CI definitions and code
-// ownership. A PR from a branch in the same repository runs CI with the
-// repository's secrets, so a prompt-injected edit there could leak them.
+// DefaultDenyPaths are files a run may never write, whatever writePaths say:
+//
+//   - CI definitions, hooks and code ownership: a PR from a branch in the same
+//     repository runs CI with the repository's secrets, e.g. .github/workflows/**
+//   - package-manager and registry configs: they redirect dependency
+//     resolution to another server, e.g. .npmrc, pip.conf, settings.xml
 var DefaultDenyPaths = []string{
 	".github/workflows/**", ".github/actions/**", "**/CODEOWNERS",
 	".gitea/workflows/**", ".gitea/actions/**", ".forgejo/workflows/**",
@@ -17,8 +21,17 @@ var DefaultDenyPaths = []string{
 	"**/Jenkinsfile", ".circleci/**", ".travis.yml", ".drone.yml",
 	".woodpecker.yml", ".woodpecker/**", ".buildkite/**",
 	"azure-pipelines.yml", ".azure-pipelines/**", ".azuredevops/**",
-	"bitbucket-pipelines.yml", ".gitmodules",
+	"bitbucket-pipelines.yml", ".gitmodules", "**/.pre-commit-config.yaml",
+	"**/.npmrc", "**/.yarnrc", "**/.yarnrc.yml", "**/.pnpmfile.cjs",
+	"**/pip.conf", "**/pip.ini", "**/.pypirc", "**/.mvn/**", "**/settings.xml",
+	"**/nuget.config", "**/.cargo/config", "**/.cargo/config.toml",
+	"**/.gemrc", "**/.bundle/config", "**/gradle.properties",
 }
+
+// OptInPaths are scanner ignore files: writing one can mute the scanner, so
+// a playbook must name it in writePaths, e.g. ".trivyignore" or
+// "**/.trivyignore". "**" or "deploy/**" never unlock them.
+var OptInPaths = IgnoreFiles
 
 // CheckWritePath fails unless the repo-relative path p may be written:
 // Options.AllowPaths (empty: everything) minus DefaultDenyPaths and
@@ -37,6 +50,14 @@ func (g *Guard) CheckWritePath(p string) error {
 			return fmt.Errorf("writing %s is not allowed: this playbook denies %q", p, pat)
 		}
 	}
+	if matchAny(OptInPaths, p) {
+		for _, pat := range g.o.AllowPaths {
+			if explicitFor(pat, p) {
+				return nil
+			}
+		}
+		return fmt.Errorf("writing %s is not allowed: scanner ignore files are written only when writePaths names them, e.g. %q", p, "**/"+path.Base(p))
+	}
 	if len(g.o.AllowPaths) == 0 {
 		return nil
 	}
@@ -46,6 +67,14 @@ func (g *Guard) CheckWritePath(p string) error {
 		}
 	}
 	return fmt.Errorf("writing %s is not allowed; this playbook may only write %v", p, g.o.AllowPaths)
+}
+
+// explicitFor reports whether pattern matches p and names the file itself:
+// its last segment has no wildcard, e.g. "**/.trivyignore" is explicit for
+// "app/.trivyignore", "deploy/**" and "**/.trivy*" are not.
+func explicitFor(pattern, p string) bool {
+	last := pattern[strings.LastIndex(pattern, "/")+1:]
+	return !strings.ContainsAny(last, "*?[{") && MatchPath(pattern, p)
 }
 
 // ValidatePathPattern reports a malformed pattern, e.g. "deploy/[".

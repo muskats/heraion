@@ -1,53 +1,54 @@
 suite: mcp connectors
 templates:
   - mcp.yaml
+  - worker.yaml
+  - gateway.yaml
+  - test-check.yaml
 set:
   llm: { baseURL: https://api.openai.com/v1, model: m }
+  playbooks.trivy-remediate.enabled: true
 tests:
-  - it: renders nothing when every connector is off
+  - it: renders no MCP objects when every connector is off
+    template: mcp.yaml
     asserts:
       - hasDocuments: { count: 0 }
-  - it: k8s connector is read-only and only reachable from workers
-    set:
-      mcpServers.k8s.enabled: true
-    documentSelector: { path: "kind", value: NetworkPolicy }
-    asserts:
-      - equal:
-          path: spec.ingress[0].from[0].podSelector.matchLabels["app.kubernetes.io/component"]
-          value: worker
-  - it: third-party images are pinned by digest
+  - it: deploy-mode servers get no Deployment, Service or ServiceAccount of their own
     set:
       mcpServers.k8s.enabled: true
       mcpServers.atlassian.enabled: true
-    documentSelector: { path: kind, value: Deployment, matchMany: true }
+    template: mcp.yaml
     asserts:
-      - matchRegex: { path: "spec.template.spec.containers[0].image", pattern: "@sha256:[0-9a-f]{64}$" }
-  - it: a digest set to "" uses the tag
+      - hasDocuments: { count: 3 } # k8s: ClusterRole, ClusterRoleBinding, files ConfigMap
+      - notMatchRegex: { path: kind, pattern: "^(Deployment|Service|ServiceAccount|NetworkPolicy)$" }
+  - it: k8s connector RBAC is bound to the worker ServiceAccount
     set:
       mcpServers.k8s.enabled: true
-      mcpServers.k8s.deploy.image.tag: v9.9.9
-      mcpServers.k8s.deploy.image.digest: ""
-    documentSelector: { path: kind, value: Deployment }
+    template: mcp.yaml
+    documentSelector: { path: kind, value: ClusterRoleBinding }
     asserts:
-      - equal: { path: "spec.template.spec.containers[0].image", value: "quay.io/containers/kubernetes_mcp_server:v9.9.9" }
+      - equal: { path: "subjects[0].name", value: RELEASE-NAME-heraion-worker }
   - it: k8s connector ClusterRole has no write verbs
     set:
       mcpServers.k8s.enabled: true
+    template: mcp.yaml
     documentSelector: { path: "kind", value: ClusterRole }
     asserts:
       - notContains: { path: "rules[0].verbs", content: create }
       - notContains: { path: "rules[0].verbs", content: delete }
-  - it: k8s connector also refuses Secrets and ConfigMaps in its own config
+  - it: k8s connector also refuses Secrets and ConfigMaps in its own config and binds to localhost
     set:
       mcpServers.k8s.enabled: true
+    template: mcp.yaml
     documentSelector: { path: kind, value: ConfigMap }
     asserts:
       - matchRegex: { path: 'data["config.toml"]', pattern: 'kind = "Secret"' }
       - matchRegex: { path: 'data["config.toml"]', pattern: 'kind = "ConfigMap"' }
       - matchRegex: { path: 'data["config.toml"]', pattern: "read_only = true" }
+      - matchRegex: { path: 'data["config.toml"]', pattern: 'bind_address = "127.0.0.1"' }
   - it: k8s connector ClusterRole cannot read Secrets
     set:
       mcpServers.k8s.enabled: true
+    template: mcp.yaml
     documentSelector: { path: kind, value: ClusterRole }
     asserts:
       - notContains: { path: "rules[0].resources", content: secrets }
@@ -56,6 +57,7 @@ tests:
     set:
       mcpServers.k8s.enabled: true
       namespaces: [shop, payments]
+    template: mcp.yaml
     documentSelector: { path: kind, value: RoleBinding, matchMany: true }
     asserts:
       - equal: { path: roleRef.kind, value: ClusterRole }
@@ -64,23 +66,92 @@ tests:
     set:
       mcpServers.k8s.enabled: true
       namespaces: [shop]
+    template: mcp.yaml
     documentSelector: { path: kind, value: ClusterRoleBinding, skipEmptyTemplates: true }
     asserts:
       - hasDocuments: { count: 0 }
+  - it: deploy-mode servers are native sidecars of the worker, pinned by digest
+    set:
+      mcpServers.k8s.enabled: true
+      mcpServers.atlassian.enabled: true
+    template: worker.yaml
+    documentSelector: { path: kind, value: CronJob }
+    asserts:
+      - equal: { path: "spec.jobTemplate.spec.template.spec.initContainers[0].name", value: mcp-atlassian }
+      - equal: { path: "spec.jobTemplate.spec.template.spec.initContainers[0].restartPolicy", value: Always }
+      - equal: { path: "spec.jobTemplate.spec.template.spec.initContainers[1].name", value: mcp-k8s }
+      - equal: { path: "spec.jobTemplate.spec.template.spec.initContainers[1].startupProbe.tcpSocket.port", value: 8080 }
+      - matchRegex: { path: "spec.jobTemplate.spec.template.spec.initContainers[0].image", pattern: "^ghcr.io/sooperset/mcp-atlassian@sha256:[0-9a-f]{64}$" }
+      - matchRegex: { path: "spec.jobTemplate.spec.template.spec.initContainers[1].image", pattern: "^quay.io/containers/kubernetes_mcp_server@sha256:[0-9a-f]{64}$" }
+      - contains: { path: "spec.jobTemplate.spec.template.spec.initContainers[0].args", content: "127.0.0.1" }
+  - it: only the k8s sidecar gets the Kubernetes token
+    set:
+      mcpServers.k8s.enabled: true
+      mcpServers.atlassian.enabled: true
+    template: worker.yaml
+    documentSelector: { path: kind, value: CronJob }
+    asserts:
+      - equal: { path: "spec.jobTemplate.spec.template.spec.automountServiceAccountToken", value: false }
+      - contains:
+          path: "spec.jobTemplate.spec.template.spec.initContainers[1].volumeMounts"
+          content: { name: mcp-k8s-token, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+      - notContains:
+          path: "spec.jobTemplate.spec.template.spec.initContainers[0].volumeMounts"
+          content: { name: mcp-k8s-token, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+      - notContains:
+          path: "spec.jobTemplate.spec.template.spec.containers[0].volumeMounts"
+          content: { name: mcp-k8s-token, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+      - contains:
+          path: "spec.jobTemplate.spec.template.spec.volumes"
+          content:
+            name: mcp-k8s-token
+            projected:
+              sources:
+                - serviceAccountToken: { path: token, expirationSeconds: 3600 }
+                - configMap: { name: kube-root-ca.crt, items: [{ key: ca.crt, path: ca.crt }] }
+                - downwardAPI: { items: [{ path: namespace, fieldRef: { fieldPath: metadata.namespace } }] }
+  - it: the gateway Job template and the helm test pod get the sidecars too
+    set:
+      mcpServers.k8s.enabled: true
+      playbooks.alertmanager-triage.enabled: true
+      gateway.hooks.alertmanager: { auth: token, secret: { existingSecret: am, key: secret } }
+    asserts:
+      - matchRegex: { path: 'data["job-template.yaml"]', pattern: "name: mcp-k8s" }
+        template: gateway.yaml
+        documentSelector: { path: metadata.name, value: RELEASE-NAME-heraion-job-template }
+      - equal: { path: "spec.initContainers[0].name", value: mcp-k8s }
+        template: test-check.yaml
+  - it: two sidecars on one port fail the render
+    set:
+      mcpServers.k8s.enabled: true
+      mcpServers.atlassian.enabled: true
+      mcpServers.atlassian.deploy.port: 8080
+    template: worker.yaml
+    asserts:
+      - failedTemplate: { errorPattern: "port 8080 is also used by mcpServers.atlassian" }
+  - it: a digest set to "" uses the tag
+    set:
+      mcpServers.k8s.enabled: true
+      mcpServers.k8s.deploy.image.tag: v9.9.9
+      mcpServers.k8s.deploy.image.digest: ""
+    template: worker.yaml
+    documentSelector: { path: kind, value: CronJob }
+    asserts:
+      - equal: { path: "spec.jobTemplate.spec.template.spec.initContainers[0].image", value: "quay.io/containers/kubernetes_mcp_server:v9.9.9" }
   - it: atlassian connector gets its token from secretEnv and pins the tools
     set:
       secrets.existingSecret: shared
       mcpServers.atlassian.enabled: true
       mcpServers.atlassian.deploy.secretEnv:
         JIRA_API_TOKEN: {}
-    documentSelector: { path: kind, value: Deployment }
+    template: worker.yaml
+    documentSelector: { path: kind, value: CronJob }
     asserts:
-      - equal: { path: "spec.template.spec.containers[0].image", value: "ghcr.io/sooperset/mcp-atlassian@sha256:40e8470584820a32f7e385dadc38bf263536e0ec536f9915bd9036dae1807fb6" }
       - contains:
-          path: spec.template.spec.containers[0].env
+          path: "spec.jobTemplate.spec.template.spec.initContainers[0].env"
           content: { name: ENABLED_TOOLS, value: "jira_search,jira_get_issue,jira_create_issue,confluence_search,confluence_get_page" }
       - contains:
-          path: spec.template.spec.containers[0].env
+          path: "spec.jobTemplate.spec.template.spec.initContainers[0].env"
           content:
             name: JIRA_API_TOKEN
             valueFrom: { secretKeyRef: { name: shared, key: mcp-atlassian-env-jira-api-token } }

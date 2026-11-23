@@ -343,6 +343,47 @@ func (r *Repo) Push(ctx context.Context, branch string) error {
 	return r.push(ctx, gitcfg.RefSpec("+"+ref+":"+ref))
 }
 
+// HeadByHeraIon reports whether the head commit of branch on the remote
+// was made by HeraIon (author git.authorEmail), so a force-push never
+// overwrites a person's commits on an open PR. A missing branch counts as
+// HeraIon's.
+func (r *Repo) HeadByHeraIon(ctx context.Context, branch string) (bool, error) {
+	auth, err := r.auth()
+	if err != nil {
+		return false, err
+	}
+	rem, err := r.g.Remote("origin")
+	if err != nil {
+		return false, err
+	}
+	refs, err := rem.ListContext(ctx, &git.ListOptions{Auth: auth})
+	if err != nil {
+		return false, fmt.Errorf("list remote branches: %w", err)
+	}
+	ref := plumbing.NewBranchReferenceName(branch)
+	var head plumbing.Hash
+	for _, x := range refs {
+		if x.Name() == ref {
+			head = x.Hash()
+		}
+	}
+	if head.IsZero() {
+		return true, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	spec := gitcfg.RefSpec("+" + ref.String() + ":refs/remotes/origin/" + branch)
+	err = r.g.FetchContext(ctx, &git.FetchOptions{RemoteName: "origin", RefSpecs: []gitcfg.RefSpec{spec}, Depth: 1, Auth: auth, Tags: git.NoTags})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return false, fmt.Errorf("fetch %s: %w", branch, err)
+	}
+	c, err := r.g.CommitObject(head)
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(c.Author.Email, r.author.AuthorEmail), nil
+}
+
 // push pushes one refspec to origin, e.g. "+refs/heads/a:refs/heads/a".
 func (r *Repo) push(ctx context.Context, spec gitcfg.RefSpec) error {
 	auth, err := r.auth()

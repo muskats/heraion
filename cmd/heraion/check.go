@@ -49,6 +49,9 @@ func cmdCheck(ctx context.Context, args []string) error {
 	c.ok("config", *cfgPath)
 
 	pbs, err := playbook.LoadDir(cfg.PlaybooksDir)
+	if err == nil {
+		err = playbook.ValidateAll(pbs, cfg.Mode, cfg.Repos)
+	}
 	if err != nil {
 		c.fail("playbooks", err.Error())
 	} else {

@@ -12,7 +12,7 @@ tests:
       playbooks.alertmanager-triage.enabled: true
     asserts:
       - failedTemplate: {}
-  - it: gets only get/create/list on jobs and create/patch/delete on secrets
+  - it: gets only get/create/delete/list on jobs and create on secrets
     set:
       playbooks.alertmanager-triage.enabled: true
       gateway.hooks.alertmanager: { auth: token, secret: { existingSecret: am, key: secret } }
@@ -21,8 +21,8 @@ tests:
       - equal:
           path: rules
           value:
-            - { apiGroups: [batch], resources: [jobs], verbs: [get, create, list] }
-            - { apiGroups: [""], resources: [secrets], verbs: [create, patch, delete] }
+            - { apiGroups: [batch], resources: [jobs], verbs: [get, create, delete, list] }
+            - { apiGroups: [""], resources: [secrets], verbs: [create] }
   - it: serves metrics on their own port of the Service
     set:
       playbooks.alertmanager-triage.enabled: true

@@ -270,7 +270,7 @@ dict "root" $ "role" "worker"|"gateway"
 {{- range $n, $s := $v.mcpServers }}{{ if $s.enabled -}}
 {{- $url := "" -}}
 {{- if eq $s.mode "deploy" -}}
-{{- $url = printf "http://%s.%s.svc:%v%s" (include "heraion.mcpName" (dict "root" $ "name" $n)) (include "heraion.namespace" $) $s.deploy.port ($s.path | default "/mcp") -}}
+{{- $url = printf "http://127.0.0.1:%v%s" $s.deploy.port ($s.path | default "/mcp") -}}
 {{- else -}}
 {{- $url = tpl (required (printf "mcpServers.%s.url is required for mode %s" $n $s.mode) $s.url) $ -}}
 {{- end -}}
@@ -291,6 +291,7 @@ dict "root" $ "role" "worker"|"gateway"
 {{- range $n, $h := $v.gateway.hooks -}}
 {{- $e := dict "auth" ($h.auth | default "hmac-sha256") "secretEnv" (include "heraion.hookEnv" $n) -}}
 {{- with $h.header }}{{ $_ := set $e "header" . }}{{ end -}}
+{{- with $h.identity }}{{ $_ := set $e "identity" . }}{{ end -}}
 {{- $_ := set $hooks $n $e -}}
 {{- end -}}
 {{- $cfg := dict "llm" $llm "git" $git "repos" ($v.repos | default list) "dryRun" $v.dryRun
@@ -369,9 +370,15 @@ restartPolicy: Never
 serviceAccountName: {{ include "heraion.workerSA" $root }}
 automountServiceAccountToken: {{ $w.automountServiceAccountToken }}
 {{- include "heraion.podScheduling" (dict "root" $root "role" $w "component" "worker") }}
-{{- with $w.initContainers }}
+{{- $sidecars := include "heraion.mcpSidecars" $root }}
+{{- if or $sidecars $w.initContainers }}
 initContainers:
+  {{- with $sidecars }}
+  {{- . | nindent 2 }}
+  {{- end }}
+  {{- with $w.initContainers }}
   {{- toYaml . | nindent 2 }}
+  {{- end }}
 {{- end }}
 containers:
   - name: worker
@@ -415,9 +422,116 @@ volumes:
   - name: tmp
     emptyDir: { sizeLimit: 256Mi }
   {{- include "heraion.credVolumes" (dict "root" $root "items" $creds.items) | nindent 2 }}
+  {{- include "heraion.mcpVolumes" $root | nindent 2 }}
   {{- with $w.extraVolumes }}
   {{- toYaml . | nindent 2 }}
   {{- end }}
+{{- end }}
+
+{{/* ---------- MCP sidecars ---------- */}}
+
+{{/* "true" when the server's sidecar gets a Kubernetes token: RBAC rules are set. */}}
+{{- define "heraion.mcpNeedsToken" -}}
+{{- $rbac := .server.deploy.rbac | default dict -}}
+{{- if and .root.Values.rbac.create (or $rbac.clusterRules $rbac.rules) }}true{{ end -}}
+{{- end }}
+
+{{/*
+Native sidecars (restartPolicy: Always) for mode: deploy servers, e.g. container
+mcp-k8s on 127.0.0.1:8080. The worker starts after each startupProbe passes.
+They share the pod's network, so ports must differ.
+*/}}
+{{- define "heraion.mcpSidecars" -}}
+{{- $root := . -}}
+{{- $ports := dict -}}
+{{- range $n, $s := $root.Values.mcpServers }}{{ if and $s.enabled (eq $s.mode "deploy") }}
+{{- $d := $s.deploy }}
+{{- $p := toString $d.port }}
+{{- if hasKey $ports $p }}{{ fail (printf "mcpServers.%s.deploy.port %s is also used by mcpServers.%s: sidecars share the worker pod's network" $n $p (index $ports $p)) }}{{ end }}
+{{- $_ := set $ports $p $n }}
+- name: mcp-{{ $n }}
+  image: {{ include "heraion.image" (dict "image" $d.image "root" $root) }}
+  imagePullPolicy: {{ $d.image.pullPolicy | default "IfNotPresent" }}
+  restartPolicy: Always
+  {{- with $d.command }}
+  command:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $d.args }}
+  args:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  ports:
+    - { containerPort: {{ $d.port }}, protocol: TCP }
+  {{- if or $d.env $d.secretEnv }}
+  env:
+    {{- with $d.env }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- /* Third-party servers read plain env vars, so the source is picked here:
+           own existingSecret, then value, then secrets.existingSecret. */}}
+    {{- range $e, $ref := ($d.secretEnv | default dict) }}
+    {{- $key := printf "mcp-%s-env-%s" $n (include "heraion.keySuffix" $e) }}
+    {{- if $ref.existingSecret }}
+    - name: {{ $e }}
+      valueFrom: { secretKeyRef: { name: {{ $ref.existingSecret }}, key: {{ $ref.key | default $key }} } }
+    {{- else if $ref.value }}
+    - name: {{ $e }}
+      valueFrom: { secretKeyRef: { name: {{ include "heraion.secretName" $root }}, key: {{ $key }} } }
+    {{- else if $root.Values.secrets.existingSecret }}
+    - name: {{ $e }}
+      valueFrom: { secretKeyRef: { name: {{ $root.Values.secrets.existingSecret }}, key: {{ $ref.key | default $key }} } }
+    {{- end }}
+    {{- end }}
+  {{- end }}
+  {{- with $d.envFrom }}
+  envFrom:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  startupProbe:
+    {{- toYaml ($d.startupProbe | default (dict "tcpSocket" (dict "port" $d.port) "periodSeconds" 1 "failureThreshold" 120)) | nindent 4 }}
+  resources:
+    {{- toYaml ($d.resources | default (dict "requests" (dict "cpu" "50m" "memory" "64Mi") "limits" (dict "memory" "256Mi"))) | nindent 4 }}
+  securityContext:
+    {{- include "heraion.containerSecurityContext" (dict "root" $root "role" $d) | nindent 4 }}
+  volumeMounts:
+    - { name: mcp-{{ $n }}-tmp, mountPath: /tmp }
+    {{- if $d.files }}
+    - { name: mcp-{{ $n }}-files, mountPath: {{ $d.filesMountPath | default "/etc/mcp" }}, readOnly: true }
+    {{- end }}
+    {{- if include "heraion.mcpNeedsToken" (dict "root" $root "server" $s) }}
+    # Only this container gets the worker ServiceAccount's token.
+    - { name: mcp-{{ $n }}-token, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+    {{- end }}
+    {{- with $d.extraVolumeMounts }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}{{ end }}
+{{- end }}
+
+{{/* Volumes of the MCP sidecars: /tmp, the files ConfigMap, the token. */}}
+{{- define "heraion.mcpVolumes" -}}
+{{- $root := . -}}
+{{- range $n, $s := $root.Values.mcpServers }}{{ if and $s.enabled (eq $s.mode "deploy") }}
+{{- $d := $s.deploy }}
+- name: mcp-{{ $n }}-tmp
+  emptyDir: { sizeLimit: 256Mi }
+{{- if $d.files }}
+- name: mcp-{{ $n }}-files
+  configMap: { name: {{ include "heraion.mcpName" (dict "root" $root "name" $n) }} }
+{{- end }}
+{{- if include "heraion.mcpNeedsToken" (dict "root" $root "server" $s) }}
+- name: mcp-{{ $n }}-token
+  projected:
+    sources:
+      - serviceAccountToken: { path: token, expirationSeconds: 3600 }
+      - configMap: { name: kube-root-ca.crt, items: [{ key: ca.crt, path: ca.crt }] }
+      - downwardAPI: { items: [{ path: namespace, fieldRef: { fieldPath: metadata.namespace } }] }
+{{- end }}
+{{- with $d.extraVolumes }}
+{{- toYaml . | nindent 0 }}
+{{- end }}
+{{- end }}{{ end }}
 {{- end }}
 
 {{- define "heraion.workerPodMetadata" -}}

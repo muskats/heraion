@@ -157,7 +157,7 @@ func TestCreateDeduplicatesAndBudgets(t *testing.T) {
 	}
 	// Budget is 2: one more works, then refused.
 	for i, ok := range []bool{true, false} {
-		_, err := call(t, tl, map[string]any{"project": "OPS", "summary": fmt.Sprintf("other %d", i), "description": "d", "key": fmt.Sprint(i)})
+		_, err := call(t, tl, map[string]any{"project": "OPS", "summary": fmt.Sprintf("other %d", i), "description": "d", "key": fmt.Sprintf("key-%d", i)})
 		if (err == nil) != ok {
 			t.Fatalf("issue %d: %v", i, err)
 		}
@@ -182,7 +182,7 @@ func TestCreateGuards(t *testing.T) {
 
 func TestCreateDryRunCallsNothing(t *testing.T) {
 	tl, f := newTool(t, true, 1)
-	out, err := call(t, tl, map[string]any{"project": "OPS", "summary": "s", "description": "d", "key": "k"})
+	out, err := call(t, tl, map[string]any{"project": "OPS", "summary": "s", "description": "d", "key": "key-k"})
 	if err != nil || !strings.Contains(out, "dry-run") || tl.Created[0].Outcome != jira.OutcomeDryRun {
 		t.Fatalf("%q %v", out, err)
 	}
@@ -194,10 +194,10 @@ func TestCreateDryRunCallsNothing(t *testing.T) {
 // maxIssues: 1 allows one dry-run issue, as in a real run.
 func TestCreateDryRunUsesBudget(t *testing.T) {
 	tl, _ := newTool(t, true, 1)
-	if _, err := call(t, tl, map[string]any{"project": "OPS", "summary": "a", "description": "d", "key": "a"}); err != nil {
+	if _, err := call(t, tl, map[string]any{"project": "OPS", "summary": "a", "description": "d", "key": "key-a"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := call(t, tl, map[string]any{"project": "OPS", "summary": "b", "description": "d", "key": "b"})
+	_, err := call(t, tl, map[string]any{"project": "OPS", "summary": "b", "description": "d", "key": "key-b"})
 	if err == nil || !strings.Contains(err.Error(), "budget") || len(tl.Created) != 1 {
 		t.Fatalf("second dry-run issue: %v, created %d", err, len(tl.Created))
 	}
@@ -224,5 +224,30 @@ func TestFingerprint(t *testing.T) {
 	}
 	if a == jira.Fingerprint("p", "SEC", "oomkilled payments-api") || len(a) != len("heraion-")+12 {
 		t.Error("project must be part of the fingerprint")
+	}
+}
+
+// A webhook run de-duplicates on its event: the model's key does not matter.
+func TestWebhookRunIgnoresModelKey(t *testing.T) {
+	tl, f := newTool(t, false, 2)
+	tl.EventID = "1b2c3d4e5f607182"
+	if _, err := call(t, tl, map[string]any{"project": "OPS", "summary": "a", "description": "d", "key": "oom-shop-web"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := call(t, tl, map[string]any{"project": "OPS", "summary": "b", "description": "d", "key": "Whatever Words"})
+	if err != nil || !strings.Contains(out, "already handled in this run") || len(f.created) != 1 {
+		t.Fatalf("%q %v created=%d", out, err, len(f.created))
+	}
+	if tl.Created[0].Fingerprint != jira.Fingerprint("triage", "OPS", "event:1b2c3d4e5f607182") {
+		t.Errorf("fingerprint %s", tl.Created[0].Fingerprint)
+	}
+}
+
+func TestScheduledRunNeedsAStableKey(t *testing.T) {
+	for _, key := range []string{"", "ab", "OOMKilled payments", "-starts-with-dash", strings.Repeat("a", 61)} {
+		tl, f := newTool(t, false, 1)
+		if _, err := call(t, tl, map[string]any{"project": "OPS", "summary": "s", "description": "d", "key": key}); err == nil || len(f.created) != 0 {
+			t.Errorf("key %q must be refused", key)
+		}
 	}
 }
