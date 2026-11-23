@@ -327,6 +327,7 @@
                 "minimum": 0
               },
               "writePaths": {
+                "description": "Globs the playbook may write, e.g. [Dockerfile, \"deploy/**\"]. Required when a full-mode playbook may open PRs; catch-alls such as ** are refused.",
                 "type": "array",
                 "items": {
                   "type": "string",
@@ -559,6 +560,13 @@
               },
               "header": {
                 "type": "string"
+              },
+              "identity": {
+                "description": "Which deliveries are the same event: raw (the body) or alertmanager (groupKey, status and alert fingerprints).",
+                "enum": [
+                  "raw",
+                  "alertmanager"
+                ]
               },
               "secret": {
                 "type": "object",
@@ -895,10 +903,6 @@
               "envFrom": {
                 "type": "array"
               },
-              "replicas": {
-                "type": "integer",
-                "minimum": 0
-              },
               "files": {
                 "type": "object",
                 "additionalProperties": {
@@ -938,32 +942,11 @@
                   }
                 }
               },
-              "readinessProbe": {
-                "type": "object"
-              },
-              "livenessProbe": {
-                "type": "object"
-              },
               "resources": {
-                "type": "object"
-              },
-              "podAnnotations": {
-                "type": "object"
-              },
-              "podLabels": {
-                "type": "object"
-              },
-              "podSecurityContext": {
                 "type": "object"
               },
               "securityContext": {
                 "type": "object"
-              },
-              "extraEnv": {
-                "type": "array"
-              },
-              "extraEnvFrom": {
-                "type": "array"
               },
               "extraVolumes": {
                 "type": "array"
@@ -971,43 +954,12 @@
               "extraVolumeMounts": {
                 "type": "array"
               },
-              "extraContainers": {
-                "type": "array"
-              },
-              "initContainers": {
-                "type": "array"
-              },
-              "nodeSelector": {
+              "startupProbe": {
                 "type": "object"
-              },
-              "tolerations": {
-                "type": "array"
-              },
-              "affinity": {
-                "type": "object"
-              },
-              "topologySpreadConstraints": {
-                "type": "array"
-              },
-              "priorityClassName": {
-                "type": "string"
-              },
-              "serviceAccount": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "create": {
-                    "type": "boolean"
-                  },
-                  "name": {
-                    "type": "string"
-                  },
-                  "annotations": {
-                    "type": "object"
-                  }
-                }
               }
-            }
+            },
+            "additionalProperties": false,
+            "description": "A native sidecar of the worker pod. Scheduling, replicas and probes other than startupProbe do not apply."
           }
         },
         "allOf": [
@@ -1234,6 +1186,15 @@
           "projects": {
             "minItems": 1
           }
+        }
+      }
+    },
+    "admissionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
         }
       }
     }

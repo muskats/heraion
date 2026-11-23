@@ -130,7 +130,7 @@ namespaces: []
 dryRun: false
 
 # How open_pr delivers a fix, and the riskiest mode a playbook may pick:
-#   safe  PR, only for non-breaking changes (same-major version bumps, lockfiles, .trivyignore entries)
+#   safe  PR; only versions (same major, distro images: patch only) and image digests may change
 #   full  PR for any change
 mode: full
 
@@ -138,6 +138,7 @@ mode: full
 #   trigger: { schedule: "0 */6 * * *" }   renders a CronJob
 #   trigger: { webhook: alertmanager }     runs on POST /hooks/alertmanager
 #   mode: safe                             optional; never riskier than the global mode
+#   guardrails.writePaths: [Dockerfile]    required when a full-mode playbook may open PRs
 playbooks:
   trivy-remediate:
     enabled: false   # needs mcpServers.k8s and Trivy Operator
@@ -148,13 +149,15 @@ playbooks:
          kind "VulnerabilityReport" to find Trivy Operator reports, in each allowed
          namespace (all namespaces if none are listed).
          Keep only HIGH and CRITICAL vulnerabilities that have a fixedVersion.
-      2. Map each affected image to its source repository among the allowed repos
-         (Dockerfiles, Helm values and manifests that reference the image or package).
-      3. For each repository, propose the minimal version bump that fixes the CVEs.
-      4. Open one PR per repository, with a branch key derived from the fix
-         (e.g. "bump-alpine-3.20.3"). List CVEs, severities, workloads, installed
+      2. Map each affected image to its source repository among the allowed repos:
+         image references in Dockerfiles (FROM), Helm values and manifests.
+      3. For each repository, change only those image references: the minimal tag bump
+         that fixes the CVEs, or a new digest. Safe mode refuses anything else, e.g.
+         lockfiles or distro releases (alpine 3.18 -> 3.20); report those instead.
+      4. Open one PR per repository. List CVEs, severities, workloads, installed
          and fixed versions in the PR body. If nothing is fixable, open no PR.
     output: pr
+    mode: safe
     guardrails: { maxPRs: 3 }
   alertmanager-triage:
     enabled: false   # needs gateway.hooks.alertmanager and mcpServers.k8s
@@ -166,11 +169,12 @@ playbooks:
       atlassian.* tools if they are available, gather evidence with the k8s tools (pod
       status, restarts, events, logs, resource usage, owning controller) and determine
       the most likely root cause. Only if the cause is a configuration value in one of
-      the allowed repositories, open one minimal PR (branch key: alertname + workload).
+      the allowed repositories, open one minimal PR.
       If it needs a human instead and create_issue is available, create one issue.
       Finish with a short report: summary, evidence, root cause, confidence, next steps.
     output: pr
-    guardrails: { maxPRs: 1 }
+    # Full mode: writePaths is required and names what a fix may touch.
+    guardrails: { maxPRs: 1, writePaths: ["deploy/**/values*.yaml", "**/kustomization.yaml"] }
 
 # Worker: one Job per run.
 worker:
@@ -237,10 +241,14 @@ gateway:
   #   hooks:
   #     alertmanager:                # Authorization: Bearer <secret>
   #       auth: token
+  #       identity: alertmanager     # same event: groupKey, status and alert fingerprints
   #       secret: {}                 # key hook-alertmanager in secrets.existingSecret
   #     github:                      # X-Hub-Signature-256: sha256=<hmac>
   #       auth: hmac-sha256
   #       secret: { existingSecret: github-webhook, key: secret }
+  #
+  # identity says which deliveries are the same event: raw (default, the body)
+  # or alertmanager (a changed annotation value is the same event).
   hooks: {}
   serviceAccount:
     create: true
@@ -295,7 +303,7 @@ gateway:
   priorityClassName: ""
 
 # MCP servers. Tools of server "k8s" are named "k8s.<tool>", e.g. k8s.pods_log.
-#   mode: deploy      the chart runs it
+#   mode: deploy      a native sidecar in each worker pod, on 127.0.0.1:<port>
 #   mode: dependency  a subchart runs it; url points at its Service
 #   mode: external    nothing is deployed; set url
 # Any name works, e.g. mcpServers.pagerduty. See docs/integrations.md.
@@ -322,6 +330,7 @@ mcpServers:
       files:
         config.toml: |
           port = "8080"
+          bind_address = "127.0.0.1"
           read_only = true
           disable_destructive = true
           stateless = true
@@ -336,7 +345,8 @@ mcpServers:
           group = ""
           version = "v1"
           kind = "ConfigMap"
-      # Read-only. Secrets and ConfigMaps are not readable.
+      # Read-only. Secrets and ConfigMaps are not readable. Bound to the worker
+      # ServiceAccount; only this sidecar gets the token.
       rbac:
         clusterRules:
           - apiGroups: [""]
@@ -384,7 +394,7 @@ mcpServers:
         # Wins over tag: set digest "" when you change tag.
         digest: sha256:40e8470584820a32f7e385dadc38bf263536e0ec536f9915bd9036dae1807fb6
         pullPolicy: IfNotPresent
-      args: ["--transport", "streamable-http", "--port", "9000"]
+      args: ["--transport", "streamable-http", "--host", "127.0.0.1", "--port", "9000"]
       port: 9000
       env:
         - { name: STATELESS, value: "true" }
@@ -430,6 +440,13 @@ litellm:
 
 rbac:
   create: true
+
+# ValidatingAdmissionPolicies (Kubernetes 1.30+) for the gateway ServiceAccount:
+# it may create only worker Jobs as the chart renders them (ServiceAccount,
+# images, commands, volumes, Secrets) and only event Secrets owned by a Job.
+# Installing it needs permission to create cluster-scoped admission policies.
+admissionPolicy:
+  enabled: true
 
 networkPolicy:
   enabled: true

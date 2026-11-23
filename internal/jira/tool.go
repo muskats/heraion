@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	"github.com/muskats/heraion/internal/config"
@@ -30,6 +31,9 @@ type Tool struct {
 	Labels    []string // added to every issue, e.g. [heraion]
 	Guard     *guardrails.Guard
 	Log       *slog.Logger
+	// EventID identifies the webhook event of the run (HERAION_EVENT_ID).
+	// When set, the fingerprint comes from it and the model's key is ignored.
+	EventID string
 	// Created records each call, for the run report.
 	Created []Created
 }
@@ -73,7 +77,7 @@ type args struct {
 	IssueType   string   `json:"issueType,omitempty" jsonschema:"e.g. Bug, Task, Incident. Default: the configured type"`
 	Priority    string   `json:"priority,omitempty" jsonschema:"e.g. High. Leave empty for the project default"`
 	Labels      []string `json:"labels,omitempty" jsonschema:"Extra labels, no spaces"`
-	Key         string   `json:"key" jsonschema:"Stable key for this finding, e.g. 'oomkilled-payments-api'. Reusing a key de-duplicates."`
+	Key         string   `json:"key" jsonschema:"Stable key for this finding: <kind>-<namespace>-<workload>, lowercase, e.g. 'oomkilled-payments-api'. Reusing a key de-duplicates."`
 }
 
 func (t *Tool) Schema() json.RawMessage {
@@ -102,12 +106,14 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 			return "", fmt.Errorf("label %q must not contain spaces", l)
 		}
 	}
-	key := a.Key
-	if key == "" {
-		// The summary usually changes between runs, so reruns may not find
-		// this issue again.
-		t.Log.Warn("create_issue without key: de-duplicating on the summary", "summary", a.Summary)
-		key = a.Summary
+	// A webhook run is about one event, so the event is the finding. A
+	// scheduled run needs the model's key, in a shape that stays stable.
+	key := "event:" + t.EventID
+	if t.EventID == "" {
+		if !keyRE.MatchString(a.Key) {
+			return "", fmt.Errorf("key %q must match %s, e.g. 'oomkilled-payments-api' (<kind>-<namespace>-<workload>)", a.Key, keyRE)
+		}
+		key = a.Key
 	}
 	fp := Fingerprint(t.Playbook, a.Project, key)
 	in := NewIssue{
@@ -162,6 +168,9 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 	t.Created = append(t.Created, Created{Project: a.Project, Key: issue.Key, URL: issue.URL, Summary: in.Summary, Fingerprint: fp, Outcome: OutcomeCreated})
 	return fmt.Sprintf("created %s: %s", issue.Key, issue.URL), nil
 }
+
+// keyRE is the shape of a scheduled run's key, e.g. "oomkilled-shop-payments-api".
+var keyRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,59}$`)
 
 func firstNonEmpty(v ...string) string {
 	for _, s := range v {

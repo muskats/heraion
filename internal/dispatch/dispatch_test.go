@@ -8,6 +8,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -27,7 +28,7 @@ func newDispatcher(t *testing.T, max int) (*Dispatcher, *fake.Clientset) {
 func TestDispatchBuildsJobAndDeduplicates(t *testing.T) {
 	d, c := newDispatcher(t, 0)
 	ctx := context.Background()
-	name, created, err := d.Dispatch(ctx, "alertmanager-triage", "alertmanager", []byte(`{"a":1}`))
+	name, created, err := d.Dispatch(ctx, "alertmanager-triage", "alertmanager", []byte(`{"a":1}`), []byte(`{"a":1}`))
 	if err != nil || !created {
 		t.Fatalf("%v %v", created, err)
 	}
@@ -44,7 +45,8 @@ func TestDispatchBuildsJobAndDeduplicates(t *testing.T) {
 		env[e.Name] = e.Value
 	}
 	// The template's stale HERAION_PLAYBOOK is replaced; the payload is a file.
-	if env[EnvEventFile] != EventDir+"/payload" || env[EnvPlaybook] != "alertmanager-triage" || env["KEEP"] != "1" || len(ct.Env) != 3 {
+	if env[EnvEventFile] != EventDir+"/payload" || env[EnvPlaybook] != "alertmanager-triage" || env["KEEP"] != "1" ||
+		env[EnvEventID] != EventID("alertmanager", []byte(`{"a":1}`)) || len(ct.Env) != 4 {
 		t.Errorf("env %v", ct.Env)
 	}
 	sec, err := c.CoreV1().Secrets("heraion").Get(ctx, EventSecretName(name), metav1.GetOptions{})
@@ -72,12 +74,12 @@ func TestDispatchBuildsJobAndDeduplicates(t *testing.T) {
 	}
 
 	// Same delivery again: no second Job.
-	name2, created, err := d.Dispatch(ctx, "alertmanager-triage", "alertmanager", []byte(`{"a":1}`))
+	name2, created, err := d.Dispatch(ctx, "alertmanager-triage", "alertmanager", []byte(`{"a":1}`), []byte(`{"a":1}`))
 	if err != nil || created || name2 != name {
 		t.Fatalf("dedup: %s %v %v", name2, created, err)
 	}
 	// Different payload: new Job.
-	if _, created, _ := d.Dispatch(ctx, "alertmanager-triage", "alertmanager", []byte(`{"a":2}`)); !created {
+	if _, created, _ := d.Dispatch(ctx, "alertmanager-triage", "alertmanager", []byte(`{"a":2}`), []byte(`{"a":2}`)); !created {
 		t.Fatal("different payload must create a new job")
 	}
 }
@@ -85,11 +87,11 @@ func TestDispatchBuildsJobAndDeduplicates(t *testing.T) {
 func TestCapacity(t *testing.T) {
 	d, c := newDispatcher(t, 1)
 	ctx := context.Background()
-	name, _, err := d.Dispatch(ctx, "p", "h", []byte("1"))
+	name, _, err := d.Dispatch(ctx, "p", "h", []byte("1"), []byte("1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := d.Dispatch(ctx, "p", "h", []byte("2")); !errors.Is(err, ErrAtCapacity) {
+	if _, _, err := d.Dispatch(ctx, "p", "h", []byte("2"), []byte("2")); !errors.Is(err, ErrAtCapacity) {
 		t.Fatalf("want ErrAtCapacity, got %v", err)
 	}
 	job, _ := c.BatchV1().Jobs("heraion").Get(ctx, name, metav1.GetOptions{})
@@ -97,7 +99,7 @@ func TestCapacity(t *testing.T) {
 	if _, err := c.BatchV1().Jobs("heraion").UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, created, err := d.Dispatch(ctx, "p", "h", []byte("2")); err != nil || !created {
+	if _, created, err := d.Dispatch(ctx, "p", "h", []byte("2"), []byte("2")); err != nil || !created {
 		t.Fatalf("finished jobs must not count: %v", err)
 	}
 }
@@ -107,7 +109,7 @@ func TestLargeEventAndRedeliveryAtCapacity(t *testing.T) {
 	ctx := context.Background()
 	// Over Linux's 128 KiB limit for one env string: must not be an env var.
 	big := []byte(strings.Repeat("x", 200<<10))
-	name, created, err := d.Dispatch(ctx, "p", "h", big)
+	name, created, err := d.Dispatch(ctx, "p", "h", big, big)
 	if err != nil || !created {
 		t.Fatalf("%v %v", created, err)
 	}
@@ -118,7 +120,7 @@ func TestLargeEventAndRedeliveryAtCapacity(t *testing.T) {
 		}
 	}
 	// At capacity, a redelivery of the same event is a duplicate, not a 429.
-	name2, created, err := d.Dispatch(ctx, "p", "h", big)
+	name2, created, err := d.Dispatch(ctx, "p", "h", big, big)
 	if err != nil || created || name2 != name {
 		t.Fatalf("redelivery: %s %v %v", name2, created, err)
 	}
@@ -127,7 +129,7 @@ func TestLargeEventAndRedeliveryAtCapacity(t *testing.T) {
 func TestNoEventNoSecret(t *testing.T) {
 	d, c := newDispatcher(t, 0)
 	ctx := context.Background()
-	name, _, err := d.Dispatch(ctx, "p", "h", nil)
+	name, _, err := d.Dispatch(ctx, "p", "h", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,18 +142,60 @@ func TestNoEventNoSecret(t *testing.T) {
 	}
 }
 
-func TestFailedJobCreateDeletesSecret(t *testing.T) {
+func TestFailedJobCreateMakesNoSecret(t *testing.T) {
 	d, c := newDispatcher(t, 0)
 	c.PrependReactor("create", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("quota exceeded")
 	})
 	ctx := context.Background()
-	if _, _, err := d.Dispatch(ctx, "p", "h", []byte("e")); err == nil {
+	if _, _, err := d.Dispatch(ctx, "p", "h", []byte("e"), []byte("e")); err == nil {
 		t.Fatal("expected error")
 	}
 	list, _ := c.CoreV1().Secrets("heraion").List(ctx, metav1.ListOptions{})
 	if len(list.Items) != 0 {
 		t.Fatalf("orphaned secrets: %d", len(list.Items))
+	}
+}
+
+// The Job comes first, so its Secret can be owned by it from the start.
+func TestJobBeforeSecret(t *testing.T) {
+	d, c := newDispatcher(t, 0)
+	if _, _, err := d.Dispatch(context.Background(), "p", "h", []byte("e"), []byte("e")); err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, a := range c.Actions() {
+		if a.GetVerb() == "create" || a.GetVerb() == "patch" {
+			order = append(order, a.GetVerb()+" "+a.GetResource().Resource)
+		}
+	}
+	if strings.Join(order, ", ") != "create jobs, create secrets" {
+		t.Fatalf("calls %v; want the Job, then the Secret, and no patch", order)
+	}
+}
+
+func TestFailedSecretCreateDeletesJob(t *testing.T) {
+	d, c := newDispatcher(t, 0)
+	c.PrependReactor("create", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("secret too large")
+	})
+	ctx := context.Background()
+	if _, _, err := d.Dispatch(ctx, "p", "h", []byte("e"), []byte("e")); err == nil {
+		t.Fatal("expected error")
+	}
+	if list, _ := c.BatchV1().Jobs("heraion").List(ctx, metav1.ListOptions{}); len(list.Items) != 0 {
+		t.Fatalf("a Job without its Secret is left: %d", len(list.Items))
+	}
+}
+
+// A Secret that exists (another replica created it) is fine.
+func TestExistingSecretIsFine(t *testing.T) {
+	d, c := newDispatcher(t, 0)
+	c.PrependReactor("create", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("secrets"), "x")
+	})
+	if _, created, err := d.Dispatch(context.Background(), "p", "h", []byte("e"), []byte("e")); err != nil || !created {
+		t.Fatalf("created=%v err=%v", created, err)
 	}
 }
 
@@ -168,5 +212,71 @@ func TestJobName(t *testing.T) {
 func TestTemplateNeedsWorkerContainer(t *testing.T) {
 	if _, err := LoadTemplate("testdata/missing.yaml"); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func setCondition(t *testing.T, c *fake.Clientset, name string, cond batchv1.JobConditionType) {
+	t.Helper()
+	ctx := context.Background()
+	job, err := c.BatchV1().Jobs("heraion").Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Status.Conditions = []batchv1.JobCondition{{Type: cond, Status: corev1.ConditionTrue}}
+	if _, err := c.BatchV1().Jobs("heraion").UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A failed run is deleted, so the sender's retry runs again; running and
+// complete runs stay duplicates.
+func TestFailedJobIsRetried(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		cond      batchv1.JobConditionType
+		wantRetry bool
+	}{{"", false}, {batchv1.JobComplete, false}, {batchv1.JobFailed, true}} {
+		d, c := newDispatcher(t, 0)
+		name, _, err := d.Dispatch(ctx, "p", "h", []byte("id"), []byte("body"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.cond != "" {
+			setCondition(t, c, name, tc.cond)
+		}
+		_, created, err := d.Dispatch(ctx, "p", "h", []byte("id"), []byte("body"))
+		if created || errors.Is(err, ErrRetryLater) != tc.wantRetry {
+			t.Errorf("%q: created=%v err=%v", tc.cond, created, err)
+		}
+		_, getErr := c.BatchV1().Jobs("heraion").Get(ctx, name, metav1.GetOptions{})
+		if deleted := getErr != nil; deleted != tc.wantRetry {
+			t.Errorf("%q: job deleted=%v", tc.cond, deleted)
+		}
+		if tc.wantRetry {
+			var policy *metav1.DeletionPropagation
+			for _, a := range c.Actions() {
+				if del, ok := a.(k8stesting.DeleteAction); ok && del.GetResource().Resource == "jobs" {
+					policy = del.GetDeleteOptions().PropagationPolicy
+				}
+			}
+			if policy == nil || *policy != metav1.DeletePropagationForeground {
+				t.Errorf("failed job must be deleted in the foreground, got %v", policy)
+			}
+			// The retry after the deletion creates a new run.
+			if _, created, err := d.Dispatch(ctx, "p", "h", []byte("id"), []byte("body")); err != nil || !created {
+				t.Errorf("retry: created=%v err=%v", created, err)
+			}
+		}
+	}
+}
+
+// The identity, not the body, names the Job.
+func TestIdentityNamesTheJob(t *testing.T) {
+	d, _ := newDispatcher(t, 0)
+	ctx := context.Background()
+	a, _, _ := d.Dispatch(ctx, "p", "h", []byte("same"), []byte("body 1"))
+	b, created, err := d.Dispatch(ctx, "p", "h", []byte("same"), []byte("body 2"))
+	if err != nil || created || a != b {
+		t.Fatalf("same identity must be a duplicate: %s %s %v %v", a, b, created, err)
 	}
 }

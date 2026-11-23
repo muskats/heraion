@@ -69,7 +69,7 @@ playbooks:
       The event is a Jira webhook for a new bug. Read the issue with atlassian.jira_get_issue,
       gather related error logs from Loki, locate the faulty code in acme/web and open
       one minimal PR that fixes it. If the cause is unclear, open no PR and explain why.
-    guardrails: { maxPRs: 1 }
+    guardrails: { maxPRs: 1, writePaths: ["src/**"] }   # full mode: name what a fix may touch
 
 gateway:
   hooks:

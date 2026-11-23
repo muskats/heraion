@@ -67,3 +67,13 @@ tests:
     set: { playbooks.trivy-remediate.trigger.schedule: "" }
     asserts:
       - failedTemplate: {}
+  - it: unknown hook identity
+    set:
+      playbooks.alertmanager-triage.enabled: true
+      gateway.hooks.alertmanager: { auth: token, identity: body, secret: { existingSecret: am, key: secret } }
+    asserts:
+      - failedTemplate: {}
+  - it: deploy keys of the removed MCP Deployment
+    set: { mcpServers.k8s.enabled: true, mcpServers.k8s.deploy.replicas: 2 }
+    asserts:
+      - failedTemplate: {}

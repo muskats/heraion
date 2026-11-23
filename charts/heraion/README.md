@@ -23,7 +23,7 @@ propose fixes as pull requests.
 
 | Needed for | Requirement |
 |---|---|
-| Always | Kubernetes 1.27+, Helm 3.18+ or Helm 4 |
+| Always | Kubernetes 1.30+ (native sidecars, ValidatingAdmissionPolicy), Helm 3.18+ or Helm 4 |
 | `trivy-remediate` playbook | [Trivy Operator](https://github.com/aquasecurity/trivy-operator) |
 | `csiKey` secrets | [Secrets Store CSI driver](https://secrets-store-csi-driver.sigs.k8s.io/) and a provider (AWS, Azure, GCP, Vault) |
 | `litellm.enabled` | PostgreSQL for LiteLLM |
@@ -75,7 +75,8 @@ ConfigMaps, a ServiceAccount, NetworkPolicies and the k8s MCP server.
 | Job | A schedule fires, or a webhook arrives | CronJob: `<release>-heraion-<playbook>-<timestamp>`; gateway: `heraion-<playbook>-<hash of payload>` |
 | Gateway Deployment, Service, Role | A playbook with `trigger.webhook` is enabled | `<release>-heraion-gateway` |
 | Ingress, HPA, PDB | `gateway.ingress`, `.autoscaling`, `.podDisruptionBudget` enabled | `<release>-heraion-gateway` |
-| MCP server Deployment, Service, RBAC | `mcpServers.<name>.enabled` and `mode: deploy` | `<release>-heraion-mcp-<name>` |
+| MCP server RBAC, files ConfigMap | `mcpServers.<name>.enabled` and `mode: deploy`; the server runs as sidecar `mcp-<name>` in each worker pod | `<release>-heraion-mcp-<name>` |
+| ValidatingAdmissionPolicy and binding, for Jobs and for event Secrets | `admissionPolicy.enabled` (default), `rbac.create` and a webhook playbook | `<namespace>-<release>-heraion-jobs`, `-event-secrets` |
 | Secret | Any credential has a `value` | `<release>-heraion-secrets` |
 | Secret per webhook Job | A webhook with a body arrives; deleted with its Job | `heraion-<playbook>-<hash>-event` |
 | ResourceQuota | `resourceQuota.enabled` | `<release>-heraion` |
@@ -266,7 +267,7 @@ playbooks:
   trivy-remediate:
     enabled: true
     trigger: { schedule: "0 3 * * *" }
-    mode: safe               # only non-breaking PRs, see the main README's Modes section
+    mode: safe               # only versions and digests change, see the main README's Modes section
   nightly-digest:
     trigger: { schedule: "0 7 * * 1-5" }
     tools: ["grafana.*"]
@@ -328,10 +329,12 @@ Header settings for other senders (GitLab, Gitea, Jira, Grafana) are in
 Load control:
 
 - `gateway.maxConcurrentJobs` (default 5): above it the gateway answers 429 and the sender
-  retries. A redelivery of a payload whose Job exists is answered as a duplicate, even then.
+  retries. A redelivery of an event whose run exists is answered as a duplicate, even then.
 - `resourceQuota.enabled` caps Jobs in the namespace (`count/jobs.batch`) as a hard limit.
-- The same payload delivered twice gets the same Job name, so it runs only once while that
-  Job exists (`worker.ttlSecondsAfterFinished`, default one day).
+- The same event delivered twice gets the same Job name, so it runs only once while that
+  Job exists (`worker.ttlSecondsAfterFinished`, default one day). A failed run is deleted
+  and answered with 503, so the retry runs again. `gateway.hooks.<name>.identity:
+  alertmanager` makes the event identity ignore annotation values.
 - `gateway.maxBodyBytes` (default 256 KiB) caps the body. Each body is stored in a Secret
   `heraion-<playbook>-<hash>-event`, owned by its Job, and mounted into the worker at
   `/var/run/heraion/event/payload`.
@@ -375,7 +378,7 @@ How `create_issue` de-duplicates is in the [main README](../../README.md#jira-an
 
 | Mode | The chart creates | Example |
 |---|---|---|
-| `deploy` | Deployment, Service, ServiceAccount, your RBAC rules, a NetworkPolicy that only admits workers | `k8s` (kubernetes-mcp-server) |
+| `deploy` | A native sidecar `mcp-<name>` in each worker pod on `127.0.0.1:<port>` (ports must differ); your RBAC rules bound to the worker ServiceAccount, its token mounted in that sidecar only | `k8s` (kubernetes-mcp-server) |
 | `dependency` | Nothing; a subchart runs it | `grafana` (grafana-mcp subchart) |
 | `external` | Nothing; workers call `url` | `datadog` |
 
@@ -440,16 +443,25 @@ litellm:
 | Area | Default |
 |---|---|
 | Pods | Non-root (65532), read-only root filesystem, all capabilities dropped, seccomp `RuntimeDefault` |
-| Workers | No ServiceAccount token, `emptyDir` workspace, deny all ingress |
-| Gateway RBAC | `get` and `create` Jobs, plus `list` when `maxConcurrentJobs` > 0; `create`, `patch`, `delete` Secrets (one per webhook Job, holding its payload); all in its own namespace |
-| MCP servers | Their own ServiceAccount; a token only if RBAC rules are set; ingress only from workers |
+| Workers | No ServiceAccount token in the worker container (only an MCP sidecar with RBAC rules gets one), `emptyDir` workspace, deny all ingress |
+| Gateway RBAC | `get`, `create` and `delete` (a failed run, so the retry runs again) Jobs, plus `list` when `maxConcurrentJobs` > 0; `create` Secrets (one per webhook Job, holding its payload, owned by the Job from creation); all in its own namespace. The [admission policy](#admission-policy) narrows which Jobs and Secrets it may create |
+| MCP servers | Sidecars of the worker pod, listening on `127.0.0.1`; no Service, nothing reachable from other pods |
 | Secrets | Never in ConfigMaps; masked in prompts, PR text and logs |
 | Git | Pushes only `heraion/<playbook>/...` branches, never the default branch; never CI or CODEOWNERS files; no merge |
 
-The gateway can create any Job, and Secrets, in its namespace. Install HeraIon in a namespace
-of its own. To pin what those Jobs may run, add a ValidatingAdmissionPolicy that only admits Jobs
-with the `heraion.io/playbook` label whose pod uses the worker ServiceAccount and the HeraIon
-image.
+### Admission policy
+
+The gateway's Role allows creating Jobs and Secrets in its namespace. The shipped
+ValidatingAdmissionPolicies (`admissionPolicy.enabled: true`) narrow that for requests by the
+gateway ServiceAccount, using the worker pod spec the chart renders:
+
+| Object | Admitted only when |
+|---|---|
+| Job | Label `heraion.io/playbook`; the worker ServiceAccount; every container one the chart renders, with its image and command; Secrets in `env` only those the chart uses; every volume one the chart renders, with its source; `heraion-event` is `<job>-event`; no privileged container, host network, PID or IPC, ephemeral container |
+| Secret | Named `<job>-event`, label `heraion.io/playbook`, immutable, `Opaque`, one key `payload`, owned by that Job |
+
+Installing the policies needs permission to create cluster-scoped admission objects. Install
+HeraIon in a namespace of its own.
 
 Turn off parts that conflict with your platform with `rbac.create: false` (bring your own
 RBAC), `networkPolicy.enabled: false`, or role-level `podSecurityContext` and
@@ -475,8 +487,8 @@ global:
 
 The scheduling keys `nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints`,
 `priorityClassName`, `podSecurityContext` and `securityContext` exist under `global` and
-under each role (`worker`, `gateway`, `mcpServers.<name>.deploy`). A role's value replaces
-the global one.
+under each role (`worker`, `gateway`). A role's value replaces the global one.
+`mcpServers.<name>.deploy` has `securityContext` only: sidecars run in the worker pod.
 
 A `topologySpreadConstraints` entry without a `labelSelector` gets the role's pod labels.
 This is how the gateway spreads its replicas across nodes by default:
@@ -546,9 +558,9 @@ rejected by [values.schema.json](values.schema.json).
 | `playbooks.<name>` | two disabled examples | See [Playbooks](#playbooks) |
 | `playbooks.<name>.guardrails.maxPRs` | `1` | PRs per run; `0` removes `open_pr` |
 | `playbooks.<name>.guardrails.maxFileBytes` | `1048576` | Largest file `repo_write_file` may write |
-| `playbooks.<name>.guardrails.writePaths` | `[]` | Globs `repo_write_file` may write, e.g. `[Dockerfile, "deploy/**"]`; empty: all but denied |
+| `playbooks.<name>.guardrails.writePaths` | `[]` | Globs `repo_write_file` may write, e.g. `[Dockerfile, "deploy/**"]`. Required when a full-mode playbook may open PRs; `**`, `*` and other catch-alls are refused. Scanner ignore files need a pattern that names them, e.g. `**/.trivyignore`. Empty (safe mode or no PRs): safe mode's defaults, or all but denied |
 | `playbooks.<name>.guardrails.denyPaths` | `[]` | Added to the built-in denylist of CI and CODEOWNERS files |
-| `playbooks.<name>.guardrails.reopenAfter` | `168h` | A PR closed without merging blocks the same branch this long; `0s`: forever |
+| `playbooks.<name>.guardrails.reopenAfter` | `0s` | A PR closed without merging blocks the same change this long; `0s`: forever |
 | `playbooks.<name>.guardrails.dryRun` | `false` | Dry-run for this playbook only |
 
 ### Jira
@@ -589,6 +601,7 @@ rejected by [values.schema.json](values.schema.json).
 | `gateway.hooks.<name>.auth` | `hmac-sha256` | Or `token` |
 | `gateway.hooks.<name>.header` | `X-Hub-Signature-256`, or `Authorization` for `token` | Header to check |
 | `gateway.hooks.<name>.secret` | `{}` | Credential |
+| `gateway.hooks.<name>.identity` | `raw` | Which deliveries are the same event: `raw` (the body) or `alertmanager` (`groupKey`, `status`, alert fingerprints) |
 | `gateway.replicas` | `1` | Ignored with autoscaling |
 | `gateway.maxConcurrentJobs` | `5` | 0 = no limit |
 | `gateway.maxBodyBytes` | `262144` | Larger bodies get 413; at most 1032192, since the body is stored in a Secret |
@@ -625,11 +638,11 @@ rejected by [values.schema.json](values.schema.json).
 | `mcpServers.<name>.secretHeaders.<header>` | | Credential |
 | `mcpServers.<name>.deploy.image` | | `registry`, `repository`, `tag`, `digest`, `pullPolicy` |
 | `mcpServers.{k8s,atlassian}.deploy.image.digest` | `sha256:...` of the default tag | Wins over `tag`: set `""` when you change `tag` |
-| `mcpServers.<name>.deploy.port`, `args`, `command`, `env`, `envFrom`, `replicas` | | Container settings |
+| `mcpServers.<name>.deploy.port`, `args`, `command`, `env`, `envFrom` | | Sidecar settings; ports must differ between deploy-mode servers |
 | `mcpServers.<name>.deploy.files` | `{}` | Files mounted at `filesMountPath` (default `/etc/mcp`) |
 | `mcpServers.<name>.deploy.secretEnv.<VAR>` | | `existingSecret` + `key`, or `value` |
 | `mcpServers.<name>.deploy.rbac.clusterRules`, `rules` | read-only for `k8s` | ClusterRole and Role rules |
-| `mcpServers.<name>.deploy.*` | | `resources`, probes, scheduling keys, `serviceAccount.annotations` |
+| `mcpServers.<name>.deploy.resources`, `startupProbe`, `securityContext`, `extraVolumes`, `extraVolumeMounts` | 50m / 64Mi requests, 256Mi limit; no startupProbe | The worker retries a refused connection for 30s while the sidecar starts. A `startupProbe` only works for a server listening on all interfaces: the kubelet probes the pod IP |
 | `grafana-mcp.*` | `disableWrite: true`, streamable HTTP | Values for the grafana-mcp subchart |
 | `litellm.*` | `enabled: false` | Values for the LiteLLM subchart |
 
@@ -637,7 +650,8 @@ rejected by [values.schema.json](values.schema.json).
 
 | Key | Default | Description |
 |---|---|---|
-| `networkPolicy.enabled` | `true` | Worker ingress denied; MCP servers only reachable from workers |
+| `networkPolicy.enabled` | `true` | Worker ingress denied |
+| `admissionPolicy.enabled` | `true` | Admission policies for the gateway's Jobs and Secrets, see [Admission policy](#admission-policy) |
 | `networkPolicy.gatewayIngressFrom` | `[]` | Who may call the gateway; empty = anyone |
 | `networkPolicy.metricsFrom` | `[]` | Who may scrape `gateway.metrics.port`; empty = anyone |
 | `networkPolicy.workerEgress` | `[]` | Egress rules for workers; empty = unrestricted |
@@ -678,7 +692,7 @@ scripts/test-chart.sh   # or: make chart-test
 | `helm lint --strict` | Defaults and every [ci/](ci/) values file |
 | helm-unittest | The suites in [tests/](tests/), including values that must be rejected ([reject_test.yaml](tests/reject_test.yaml)) |
 | [chart_test.go](chart_test.go) | Renders the chart and loads the result with the binary's own config, playbook and Job-template loaders, so a key the binary does not know fails |
-| kubeconform | Rendered output of the defaults, [ci/](ci/) and [examples/helm](../../examples/helm) against Kubernetes 1.27 and 1.33 |
+| kubeconform | Rendered output of the defaults, [ci/](ci/) and [examples/helm](../../examples/helm) against Kubernetes 1.30 and 1.35 |
 
 ## Upgrading
 
@@ -693,7 +707,8 @@ helm upgrade heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f my-value
   [Rotation and restarts](#rotation-and-restarts).
 - With `rbac.create: false`, keep your RBAC in line with the chart's: see
   [Security defaults](#security-defaults).
-- Breaking changes are listed in the release notes of each chart version.
+- Breaking changes are listed in the release notes of each chart version. From 2.x to 3.0.0:
+  [docs/upgrading-3.md](../../docs/upgrading-3.md), one row per change with what to do.
 
 Behavior changes in 2.1.1 (no values need to change):
 

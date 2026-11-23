@@ -20,6 +20,8 @@ import (
 	"github.com/muskats/heraion/internal/secret"
 )
 
+var dockerfileBranch = scm.BranchForPaths("trivy-remediate", repo, []string{"Dockerfile"})
+
 const repo = "acme/app"
 
 func setup(t *testing.T, dryRun bool, maxPRs int) (*scm.Toolbox, map[string]llm.Tool, *scmtest.FakePRs, string) {
@@ -116,7 +118,7 @@ func TestOpenPRPushesAndDeduplicates(t *testing.T) {
 	if _, err := call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"}); err != nil {
 		t.Fatal(err)
 	}
-	pr := map[string]any{"repo": repo, "title": "Bump alpine", "body": "fixes CVE; token supersecret-token", "branch": "bump-alpine-3.20"}
+	pr := map[string]any{"repo": repo, "title": "Bump alpine", "body": "fixes CVE; token supersecret-token"}
 	out, err := call(t, tools["open_pr"], pr)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +126,7 @@ func TestOpenPRPushesAndDeduplicates(t *testing.T) {
 	if !strings.Contains(out, "opened PR #1") {
 		t.Fatalf("unexpected: %q", out)
 	}
-	branch := "heraion/trivy-remediate/bump-alpine-3-20"
+	branch := dockerfileBranch
 	if got, err := scmtest.RemoteBranchFile(t, base, repo, branch, "Dockerfile"); err != nil || got != "FROM alpine:3.20\n" {
 		t.Fatalf("remote branch content %q, %v", got, err)
 	}
@@ -144,14 +146,18 @@ func TestOpenPRPushesAndDeduplicates(t *testing.T) {
 		t.Errorf("workspace not reset: %q", out)
 	}
 
-	// Same change again: the open PR is reused and no budget is used.
+	if scm.ChangeOf(in.Body) == "" {
+		t.Errorf("no change marker in the body: %q", in.Body)
+	}
+
+	// Same change again, worded differently: same branch, nothing pushed, no budget used.
 	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
-	out, err = call(t, tools["open_pr"], pr)
-	if err != nil || !strings.Contains(out, "already exists") {
+	out, err = call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Update alpine image", "body": "other words"})
+	if err != nil || !strings.Contains(out, "already has exactly this change") {
 		t.Fatalf("dedup: %q %v", out, err)
 	}
-	if len(prs.Created) != 1 || tb.Opened[1].Outcome != scm.OutcomeDuplicate {
-		t.Fatalf("expected dedup, created=%d", len(prs.Created))
+	if len(prs.Created) != 1 || len(prs.Updated) != 0 || tb.Opened[1].Outcome != scm.OutcomeUnchanged {
+		t.Fatalf("expected unchanged, created=%d updated=%d", len(prs.Created), len(prs.Updated))
 	}
 
 	// maxPRs is 2: one more PR works, the next is refused.
@@ -174,22 +180,30 @@ func TestOpenPRDryRun(t *testing.T) {
 	if len(prs.Created) != 0 || tb.Opened[0].Outcome != scm.OutcomeDryRun {
 		t.Fatal("dry-run must not create PRs")
 	}
-	if _, err := scmtest.RemoteBranchFile(t, base, repo, "heraion/trivy-remediate/bump", "Dockerfile"); err == nil {
+	if _, err := scmtest.RemoteBranchFile(t, base, repo, dockerfileBranch, "Dockerfile"); err == nil {
 		t.Fatal("dry-run must not push")
 	}
 }
 
-func TestBranchName(t *testing.T) {
-	cases := map[string]string{
-		"Bump OpenSSL to 3.0.15":      "heraion/pb/bump-openssl-to-3-0-15",
-		"heraion/pb/already-prefixed": "heraion/pb/already-prefixed",
-		"../../refs/heads/main":       "heraion/pb/refs-heads-main",
-		"!!!":                         "heraion/pb/change",
+func TestBranchForPaths(t *testing.T) {
+	a := scm.BranchForPaths("pb", "acme/web", []string{"deploy/values.yaml", "Dockerfile"})
+	if a != scm.BranchForPaths("pb", "acme/web", []string{"Dockerfile", "deploy/values.yaml"}) {
+		t.Error("the order of paths must not matter")
 	}
-	for in, want := range cases {
-		if got := scm.BranchName("pb", in); got != want {
-			t.Errorf("BranchName(%q) = %q, want %q", in, got, want)
+	if !strings.HasPrefix(a, "heraion/pb/dockerfile-") || len(a) != len("heraion/pb/dockerfile-")+8 {
+		t.Errorf("branch %q", a)
+	}
+	for _, other := range []string{
+		scm.BranchForPaths("pb", "acme/api", []string{"Dockerfile", "deploy/values.yaml"}),
+		scm.BranchForPaths("pb", "acme/web", []string{"Dockerfile"}),
+	} {
+		if other == a {
+			t.Errorf("%q: another repo or path set must give another branch", other)
 		}
+	}
+	long := scm.BranchForPaths("pb", "acme/web", []string{"../../" + strings.Repeat("x", 80) + "/values.yaml"})
+	if strings.Contains(long, "..") || len(long) > len("heraion/pb/")+30+1+8 {
+		t.Errorf("long path: %q", long)
 	}
 }
 
@@ -228,36 +242,116 @@ func TestWritesThroughSymlinksAreRefused(t *testing.T) {
 	}
 }
 
+// A denied file that changed in the clone without repo_write_file, e.g.
+// through a symlink, stops the PR.
+func TestOpenPRRechecksChangedPaths(t *testing.T) {
+	tb, tools, prs, _ := setup(t, false, 1)
+	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
+	r, _ := tb.Workspaces.Get(context.Background(), repo)
+	if err := os.MkdirAll(filepath.Join(r.Dir, "web"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(r.Dir, "web", ".npmrc"), []byte("registry=https://evil.example/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Bump", "body": "b"})
+	if err == nil || !strings.Contains(err.Error(), "writing web/.npmrc is not allowed") || len(prs.Created) != 0 {
+		t.Fatalf("got %v, created %d", err, len(prs.Created))
+	}
+}
+
+// closeOpenPR moves the open PR of branch to the closed (or merged) list,
+// as a reviewer would.
+func closeOpenPR(prs *scmtest.FakePRs, branch, state string, ago time.Duration) {
+	key := repo + " " + branch
+	pr := *prs.Open[key]
+	delete(prs.Open, key)
+	pr.State, pr.Closed = state, time.Now().Add(-ago)
+	if prs.Closed == nil {
+		prs.Closed = map[string][]scm.PR{}
+	}
+	prs.Closed[key] = append(prs.Closed[key], pr)
+}
+
 func TestClosedPRCooldown(t *testing.T) {
-	branch := "heraion/trivy-remediate/bump"
 	for _, tc := range []struct {
 		name        string
 		state       string
 		closedAgo   time.Duration
 		reopenAfter time.Duration
+		again       string // the Dockerfile of the second proposal
 		wantOpened  bool
 	}{
-		{"closed in window", scm.PRStateClosed, time.Hour, 7 * 24 * time.Hour, false},
-		{"closed after window", scm.PRStateClosed, 8 * 24 * time.Hour, 7 * 24 * time.Hour, true},
-		{"never reopen", scm.PRStateClosed, 365 * 24 * time.Hour, 0, false},
-		{"merged does not block", scm.PRStateMerged, time.Hour, 7 * 24 * time.Hour, true},
+		{"same change, never again by default", scm.PRStateClosed, 365 * 24 * time.Hour, 0, "FROM alpine:3.20\n", false},
+		{"same change in window", scm.PRStateClosed, time.Hour, 7 * 24 * time.Hour, "FROM alpine:3.20\n", false},
+		{"same change after window", scm.PRStateClosed, 8 * 24 * time.Hour, 7 * 24 * time.Hour, "FROM alpine:3.20\n", true},
+		{"other change on the same file", scm.PRStateClosed, time.Hour, 0, "FROM alpine:3.21\n", true},
+		{"merged does not block", scm.PRStateMerged, time.Hour, 0, "FROM alpine:3.20\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tb, tools, prs, _ := setup(t, false, 1)
+			tb, tools, prs, _ := setup(t, false, 2)
 			tb.ReopenAfter = tc.reopenAfter
-			prs.Closed = map[string][]scm.PR{repo + " " + branch: {{Number: 9, URL: "https://git.example/pull/9", State: tc.state, Closed: time.Now().Add(-tc.closedAgo)}}}
 			_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
-			out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b", "branch": "bump"})
+			if _, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b"}); err != nil {
+				t.Fatal(err)
+			}
+			closeOpenPR(prs, dockerfileBranch, tc.state, tc.closedAgo)
+			_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": tc.again})
+			out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "other title", "body": "b"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if opened := len(prs.Created) == 1; opened != tc.wantOpened {
+			if opened := len(prs.Created) == 2; opened != tc.wantOpened {
 				t.Fatalf("opened=%v want %v: %s", opened, tc.wantOpened, out)
 			}
-			if !tc.wantOpened && (tb.Opened[0].Outcome != scm.OutcomeRejected || !strings.Contains(out, "closed without merging")) {
+			if !tc.wantOpened && (tb.Opened[1].Outcome != scm.OutcomeRejected || !strings.Contains(out, "closed without merging")) {
 				t.Fatalf("rejection not reported: %q %+v", out, tb.Opened)
 			}
 		})
+	}
+}
+
+// A new change on the same files updates the open PR: force-push, new body.
+func TestOpenPRUpdatesOpenPR(t *testing.T) {
+	tb, tools, prs, base := setup(t, false, 2)
+	for _, v := range []string{"3.20", "3.21"} {
+		_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:" + v + "\n"})
+		if _, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Bump alpine to " + v, "body": "b"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(prs.Created) != 1 || len(prs.Updated) != 1 || tb.Opened[1].Outcome != scm.OutcomeUpdated || tb.Opened[1].Number != 1 {
+		t.Fatalf("created=%d updated=%d opened=%+v", len(prs.Created), len(prs.Updated), tb.Opened)
+	}
+	if got, _ := scmtest.RemoteBranchFile(t, base, repo, dockerfileBranch, "Dockerfile"); got != "FROM alpine:3.21\n" {
+		t.Errorf("branch not updated: %q", got)
+	}
+	if u := prs.Updated[0]; u.Title != "Bump alpine to 3.21" || scm.ChangeOf(u.Body) == scm.ChangeOf(prs.Created[0].Body) {
+		t.Errorf("update %+v", u)
+	}
+}
+
+// A commit by someone else on the PR branch is never force-pushed over.
+func TestOpenPRLeavesHumanCommitsAlone(t *testing.T) {
+	tb, tools, prs, base := setup(t, false, 2)
+	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
+	if _, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b"}); err != nil {
+		t.Fatal(err)
+	}
+	scmtest.CommitToBranch(t, base, repo, dockerfileBranch, "reviewer@example.com", map[string]string{"Dockerfile": "FROM alpine:3.20\nUSER app\n"})
+	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.21\n"})
+	out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b"})
+	if err != nil || !strings.Contains(out, "commits by someone else") {
+		t.Fatalf("%q %v", out, err)
+	}
+	if len(prs.Updated) != 0 || tb.Opened[1].Outcome != scm.OutcomeSkipped {
+		t.Fatalf("updated=%d opened=%+v", len(prs.Updated), tb.Opened)
+	}
+	if got, _ := scmtest.RemoteBranchFile(t, base, repo, dockerfileBranch, "Dockerfile"); got != "FROM alpine:3.20\nUSER app\n" {
+		t.Errorf("the reviewer's commit was overwritten: %q", got)
+	}
+	if err := tb.Guard.ReservePR(); err != nil {
+		t.Errorf("a skipped PR must not use budget: %v", err)
 	}
 }
 
@@ -297,11 +391,11 @@ func TestCloneURLResolver(t *testing.T) {
 	}
 }
 
-func TestSameBranchKeyTwiceInOneRun(t *testing.T) {
+func TestSamePathsTwiceInOneRun(t *testing.T) {
 	_, tools, _, _ := setup(t, true, 2)
 	for i := range 2 {
 		_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": fmt.Sprintf("FROM alpine:3.2%d\n", i)})
-		if _, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b", "branch": "bump"}); err != nil {
+		if _, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "t", "body": "b"}); err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
 	}
@@ -309,7 +403,7 @@ func TestSameBranchKeyTwiceInOneRun(t *testing.T) {
 
 func TestSafeModeRefusesBreakingChange(t *testing.T) {
 	tb, tools, prs, _ := setupMode(t, false, 1, config.ModeSafe)
-	if !strings.Contains(tools["open_pr"].Description(), "non-breaking") {
+	if d := tools["open_pr"].Description(); !strings.Contains(d, "only versions and image digests") || strings.Contains(d, "non-breaking") {
 		t.Errorf("open_pr description: %q", tools["open_pr"].Description())
 	}
 	if _, err := call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "main.go", "content": "package main\n"}); err == nil {
@@ -324,8 +418,8 @@ func TestSafeModeRefusesBreakingChange(t *testing.T) {
 		t.Errorf("workspace not reset: %q", out)
 	}
 	// The refused change used no budget.
-	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
-	out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Minor", "body": "b"})
+	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.18.4\n"})
+	out, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Patch", "body": "b"})
 	if err != nil || !strings.Contains(out, "opened PR #1") {
 		t.Fatalf("%q %v", out, err)
 	}
@@ -340,14 +434,14 @@ func TestFailedPushReleasesBudget(t *testing.T) {
 	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	b, _ := json.Marshal(map[string]any{"repo": repo, "title": "Bump alpine", "body": "b", "branch": "bump"})
+	b, _ := json.Marshal(map[string]any{"repo": repo, "title": "Bump alpine", "body": "b"})
 	if _, err := tools["open_pr"].Call(ctx, b); err == nil {
 		t.Fatal("a cancelled push must fail")
 	}
 	if len(prs.Created) != 0 || len(tb.Opened) != 0 {
 		t.Fatalf("created=%+v opened=%+v", prs.Created, tb.Opened)
 	}
-	if _, err := scmtest.RemoteBranchFile(t, base, repo, "heraion/trivy-remediate/bump", "Dockerfile"); err == nil {
+	if _, err := scmtest.RemoteBranchFile(t, base, repo, dockerfileBranch, "Dockerfile"); err == nil {
 		t.Error("nothing may be pushed")
 	}
 	if err := tb.Guard.ReservePR(); err != nil {
@@ -366,14 +460,14 @@ func TestOpenPRLookupErrorStopsPR(t *testing.T) {
 	prs := &failingPRs{}
 	tb.PRs = prs
 	_, _ = call(t, tools["repo_write_file"], map[string]any{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"})
-	if _, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Bump", "body": "b", "branch": "bump"}); err == nil ||
+	if _, err := call(t, tools["open_pr"], map[string]any{"repo": repo, "title": "Bump", "body": "b"}); err == nil ||
 		!strings.Contains(err.Error(), "server unavailable") {
 		t.Fatalf("lookup error: %v", err)
 	}
 	if len(prs.Created) != 0 {
 		t.Error("no PR without a successful lookup")
 	}
-	if _, err := scmtest.RemoteBranchFile(t, base, repo, "heraion/trivy-remediate/bump", "Dockerfile"); err == nil {
+	if _, err := scmtest.RemoteBranchFile(t, base, repo, dockerfileBranch, "Dockerfile"); err == nil {
 		t.Error("nothing may be pushed")
 	}
 	if out, _ := call(t, tools["repo_read_file"], map[string]any{"repo": repo, "path": "Dockerfile"}); out != "FROM alpine:3.18\n" {

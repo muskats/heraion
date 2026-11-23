@@ -12,7 +12,7 @@ Credentials (`secretHeaders`, `secretEnv`) accept the sources described in the c
 
 | Mode | The chart creates | Example |
 |---|---|---|
-| `deploy` | Deployment, Service, ServiceAccount, the RBAC you list, a ConfigMap for `deploy.files`, a NetworkPolicy that only admits workers | kubernetes-mcp-server, mcp-atlassian |
+| `deploy` | A native sidecar in each worker pod on `127.0.0.1:<port>`, the RBAC you list (bound to the worker ServiceAccount, token mounted in that sidecar only), a ConfigMap for `deploy.files` | kubernetes-mcp-server, mcp-atlassian |
 | `dependency` | Nothing; a subchart runs the server and `url` points at it | grafana-mcp |
 | `external` | Nothing; workers call `url` | Datadog, Atlassian Rovo |
 
@@ -151,8 +151,10 @@ playbooks:
 | Jira | `hmac-sha256` | `X-Hub-Signature` | |
 | Grafana alerting | `token` | `Authorization` | Contact point with an authorization header |
 
-A retried delivery has the same payload, so it gets the same Job name and starts nothing new
-while that Job exists.
+A retried delivery is the same event, so it gets the same Job name and starts nothing new
+while that run is running or done; a failed run is deleted and the retry runs again. For
+Alertmanager, set `identity: alertmanager` on the hook, so a changing annotation value
+(`{{ $value }}`) does not make every repeat a new event.
 
 ## Your own connector
 
@@ -165,8 +167,8 @@ mcpServers:
     mode: deploy
     deploy:
       image: { repository: ghcr.io/example/pagerduty-mcp, tag: "1.2.3" }
-      args: ["--http", ":9000"]
-      port: 9000
+      args: ["--http", "127.0.0.1:9100"]   # localhost: only the worker in the same pod connects
+      port: 9100                           # unique among deploy-mode servers (k8s 8080, atlassian 9000)
       secretEnv:
         PAGERDUTY_TOKEN: { existingSecret: pagerduty, key: token }
 ```

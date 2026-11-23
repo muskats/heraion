@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the CI stages and prints a summary. Each stage is also a script:
 #
-#   scripts/ci.sh                  lint unit chart e2e
+#   scripts/ci.sh                  lint unit chart e2e kind
 #   scripts/ci.sh unit chart       some stages
 #   KEEP_GOING=1 scripts/ci.sh     run every stage even after a failure
 #
@@ -9,12 +9,13 @@
 #   unit   scripts/test-unit.sh   go test -race with a coverage floor
 #   chart  scripts/test-chart.sh  helm lint, helm-unittest, cross-check, kubeconform, rejected values
 #   e2e    scripts/test-e2e.sh    binary + mock cluster, LLM and Gitea
+#   kind   scripts/test-kind.sh   the chart on kind clusters (skipped without docker, outside CI)
 # shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 
 stages=("$@")
-[[ ${#stages[@]} -gt 0 ]] || stages=(lint unit chart e2e)
-declare -A script=([lint]=lint.sh [unit]=test-unit.sh [chart]=test-chart.sh [e2e]=test-e2e.sh)
+[[ ${#stages[@]} -gt 0 ]] || stages=(lint unit chart e2e kind)
+declare -A script=([lint]=lint.sh [unit]=test-unit.sh [chart]=test-chart.sh [e2e]=test-e2e.sh [kind]=test-kind.sh)
 
 results=() failed=0
 for s in "${stages[@]}"; do

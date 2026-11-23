@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-git/v5/plumbing/object"
+
 	"github.com/muskats/heraion/internal/config"
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/llm"
@@ -22,10 +24,10 @@ type Toolbox struct {
 	PRs        PRService // may be nil when dry-run
 	Guard      *guardrails.Guard
 	Log        *slog.Logger
-	// ReopenAfter is how long a PR closed without merging blocks a new PR
-	// on the same branch. 0: forever.
+	// ReopenAfter is how long a PR closed without merging blocks the same
+	// change again. 0: forever.
 	ReopenAfter time.Duration
-	// Opened collects PRs opened (or found as duplicates) during the run.
+	// Opened collects the outcome of every open_pr call of the run.
 	Opened []OpenedPR
 }
 
@@ -42,8 +44,10 @@ type Outcome string
 // Outcomes.
 const (
 	OutcomeOpened    Outcome = "opened"    // a new PR
-	OutcomeDuplicate Outcome = "duplicate" // an open PR for the branch exists
-	OutcomeRejected  Outcome = "rejected"  // a PR for the branch was recently closed without merging
+	OutcomeUpdated   Outcome = "updated"   // the open PR on the branch got the new change
+	OutcomeUnchanged Outcome = "unchanged" // the open PR already has this change
+	OutcomeRejected  Outcome = "rejected"  // a PR with this change was closed without merging
+	OutcomeSkipped   Outcome = "skipped"   // the open PR has commits not made by HeraIon
 	OutcomeDryRun    Outcome = "dry-run"   // logged, not pushed
 )
 
@@ -70,10 +74,9 @@ type (
 		Content string `json:"content" jsonschema:"Full new file content"`
 	}
 	openPRArgs struct {
-		Repo   string `json:"repo" jsonschema:"Repository as owner/name"`
-		Title  string `json:"title" jsonschema:"Short PR title"`
-		Body   string `json:"body" jsonschema:"Markdown description: problem, evidence, change, risk"`
-		Branch string `json:"branch,omitempty" jsonschema:"Stable short key for this change, e.g. 'bump-openssl-3.0.15'. Reusing a key de-duplicates."`
+		Repo  string `json:"repo" jsonschema:"Repository as owner/name"`
+		Title string `json:"title" jsonschema:"Short PR title"`
+		Body  string `json:"body" jsonschema:"Markdown description: problem, evidence, change, risk"`
 	}
 )
 
@@ -110,11 +113,12 @@ func (tb *Toolbox) Tools() []llm.Tool {
 
 var openPRDesc = map[config.Mode]string{
 	config.ModeFull: "Commit all files written to the repo since the last open_pr and open a pull request. " +
-		"Never merges. If an identical PR is already open it is reused.",
+		"Never merges. The branch is named after the changed files, so a rerun updates the open PR for them.",
 	config.ModeSafe: "Commit all files written to the repo since the last open_pr and open a pull request. " +
-		"Only non-breaking changes are accepted: version upgrades within the same major version " +
-		"(e.g. alpine:3.18 -> 3.20, v1.4.2 -> v1.5.0), lockfile updates, and new entries in scanner " +
-		"ignore files such as .trivyignore for false positives. Any other change is refused.",
+		"Safe mode: only versions and image digests may change in existing lines: an upgrade within the major " +
+		"version (e.g. node:20.11 -> 20.18, v1.4.2 -> v1.5.0), only the patch level of a distro image " +
+		"(alpine:3.20.1 -> 3.20.3), or another @sha256 digest. Lockfiles, scanner ignore files, and new, " +
+		"deleted or renamed files are refused.",
 }
 
 func (tb *Toolbox) repo(ctx context.Context, name string) (*Repo, error) {
@@ -194,11 +198,12 @@ func openPR(prs []PR) *PR {
 	return nil
 }
 
-// lastClosed returns the most recently closed unmerged PR in prs, or nil.
-func lastClosed(prs []PR) *PR {
+// closedWith returns the most recently closed unmerged PR in prs that
+// carries change, or nil. Merged PRs never block.
+func closedWith(prs []PR, change string) *PR {
 	var last *PR
 	for i := range prs {
-		if prs[i].State == PRStateClosed && (last == nil || prs[i].Closed.After(last.Closed)) {
+		if prs[i].State == PRStateClosed && ChangeOf(prs[i].Body) == change && (last == nil || prs[i].Closed.After(last.Closed)) {
 			last = &prs[i]
 		}
 	}
@@ -208,35 +213,57 @@ func lastClosed(prs []PR) *PR {
 // footer is appended to the PR body and commit message, by mode.
 func (tb *Toolbox) footer() string {
 	if tb.Guard.Mode() == config.ModeSafe {
-		return "\n\n---\n_Opened by HeraIon playbook `" + tb.Playbook + "`. Mode: safe (non-breaking changes only, checked by HeraIon). " +
+		return "\n\n---\n_Opened by HeraIon playbook `" + tb.Playbook + "`. Mode: safe (HeraIon checked that only versions and image digests changed). " +
 			"Review carefully; HeraIon never merges._"
 	}
 	return "\n\n---\n_Opened by HeraIon playbook `" + tb.Playbook + "`. Review carefully; HeraIon never merges._"
 }
 
-// existingPR reports an open PR on branch, or one closed without merging
-// within ReopenAfter. It returns the tool result and true if no new PR may
-// be opened.
-func (tb *Toolbox) existingPR(ctx context.Context, repo, branch string, log *slog.Logger) (string, bool, error) {
+// existingPR decides what open_pr does with change on branch:
+//
+//	open PR, same change            unchanged, nothing pushed
+//	open PR, head not by HeraIon    skipped: a human's commits are not overwritten
+//	open PR, other change           update returns that PR
+//	closed PR with the same change  rejected, within ReopenAfter (0: forever)
+//	otherwise                       a new PR
+//
+// stop is true when nothing may be pushed; msg is then the tool result.
+func (tb *Toolbox) existingPR(ctx context.Context, r *Repo, branch, change string, log *slog.Logger) (update *PR, msg string, stop bool, err error) {
 	if tb.Guard.DryRun() || tb.PRs == nil {
-		return "", false, nil
+		return nil, "", false, nil
 	}
-	found, err := tb.PRs.FindByBranch(ctx, repo, branch)
+	found, err := tb.PRs.FindByBranch(ctx, r.Name, branch)
 	if err != nil {
-		return "", false, err
+		return nil, "", false, err
+	}
+	record := func(o Outcome, pr *PR) {
+		tb.Opened = append(tb.Opened, OpenedPR{Repo: r.Name, Branch: branch, URL: pr.URL, Number: pr.Number, Outcome: o})
 	}
 	if open := openPR(found); open != nil {
-		tb.Opened = append(tb.Opened, OpenedPR{Repo: repo, Branch: branch, URL: open.URL, Outcome: OutcomeDuplicate})
-		log.Info("PR already open, skipping", "url", open.URL)
-		return fmt.Sprintf("an open PR for this change already exists: %s (not opened again)", open.URL), true, nil
+		if ChangeOf(open.Body) == change {
+			record(OutcomeUnchanged, open)
+			log.Info("open PR already has this change", "url", open.URL)
+			return nil, fmt.Sprintf("the open PR %s already has exactly this change; nothing was pushed", open.URL), true, nil
+		}
+		ours, err := r.HeadByHeraIon(ctx, branch)
+		if err != nil {
+			return nil, "", false, err
+		}
+		if !ours {
+			record(OutcomeSkipped, open)
+			log.Warn("open PR has commits not made by HeraIon, leaving it alone", "url", open.URL)
+			return nil, fmt.Sprintf("the open PR %s has commits by someone else, so it is not updated; "+
+				"mention the change in your summary instead", open.URL), true, nil
+		}
+		return open, "", false, nil
 	}
-	if c := lastClosed(found); c != nil && (tb.ReopenAfter == 0 || time.Since(c.Closed) < tb.ReopenAfter) {
-		tb.Opened = append(tb.Opened, OpenedPR{Repo: repo, Branch: branch, URL: c.URL, Outcome: OutcomeRejected})
-		log.Info("PR for this change was closed without merging, not reopening", "url", c.URL, "closed", c.Closed)
-		return fmt.Sprintf("a PR for this change was closed without merging on %s: %s. It is not reopened; "+
-			"mention it in your summary instead.", c.Closed.Format(time.DateOnly), c.URL), true, nil
+	if c := closedWith(found, change); c != nil && (tb.ReopenAfter == 0 || time.Since(c.Closed) < tb.ReopenAfter) {
+		record(OutcomeRejected, c)
+		log.Info("this change was closed without merging, not proposing it again", "url", c.URL, "closed", c.Closed)
+		return nil, fmt.Sprintf("a PR with exactly this change was closed without merging on %s: %s. It is not proposed "+
+			"again; mention it in your summary instead.", c.Closed.Format(time.DateOnly), c.URL), true, nil
 	}
-	return "", false, nil
+	return nil, "", false, nil
 }
 
 func (tb *Toolbox) openPR(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -251,48 +278,49 @@ func (tb *Toolbox) openPR(ctx context.Context, raw json.RawMessage) (string, err
 	if err != nil {
 		return "", err
 	}
-	key := a.Branch
-	if key == "" {
-		key = a.Title
-	}
-	mode := tb.Guard.Mode()
-	branch := BranchName(tb.Playbook, key)
-	// The PR text leaves the cluster, so mask it too.
-	red := tb.Guard.Redactor()
-	title, body := red.Redact(a.Title), red.Redact(a.Body+tb.footer())
-	log := tb.Log.With("repo", a.Repo, "branch", branch, "mode", mode)
-
 	// Whatever happens, the next open_pr starts from a clean base branch.
 	defer func() {
 		if err := r.Reset(); err != nil {
-			log.Warn("could not reset the clone", "err", err)
+			tb.Log.Warn("could not reset the clone", "repo", a.Repo, "err", err)
 		}
 	}()
-	if err := tb.checkChangedPaths(r); err != nil {
+	paths, err := tb.checkChangedPaths(r)
+	if err != nil {
 		return "", err
 	}
-	// Look for an existing PR before using budget or pushing.
-	if msg, stop, err := tb.existingPR(ctx, a.Repo, branch, log); err != nil || stop {
+	if len(paths) == 0 {
+		return "", errors.New("no changes to commit: write files with repo_write_file first")
+	}
+	// The branch comes from what changed, not from the model's words.
+	branch := BranchForPaths(tb.Playbook, a.Repo, paths)
+	// The PR text leaves the cluster, so mask it too.
+	red := tb.Guard.Redactor()
+	title, body := red.Redact(a.Title), red.Redact(a.Body+tb.footer())
+	log := tb.Log.With("repo", a.Repo, "branch", branch, "mode", tb.Guard.Mode())
+
+	patch, err := tb.commit(r, branch, title+"\n\n"+body, log)
+	if err != nil {
+		return "", err
+	}
+	change := ChangeID(patch)
+	body += "\n\n" + changeMarker(change)
+	if tb.Guard.DryRun() {
+		if err := tb.Guard.ReservePR(); err != nil {
+			return "", err
+		}
+		return tb.logDryRun(r, branch, title, body, patch.String(), log), nil
+	}
+	update, msg, stop, err := tb.existingPR(ctx, r, branch, change, log)
+	if err != nil || stop {
 		return msg, err
 	}
 	if err := tb.Guard.ReservePR(); err != nil {
 		return "", err
 	}
-	used := false
-	defer func() {
-		if !used {
-			tb.Guard.ReleasePR()
-		}
-	}()
-	patch, err := tb.commit(r, branch, title+"\n\n"+body, log)
-	if err != nil {
-		return "", err
+	msg, used, err := tb.deliver(ctx, r, branch, title, body, update, log)
+	if !used {
+		tb.Guard.ReleasePR()
 	}
-	if tb.Guard.DryRun() {
-		used = true
-		return tb.logDryRun(r, branch, title, body, patch, log), nil
-	}
-	msg, used, err := tb.deliver(ctx, r, branch, title, body, log)
 	return msg, err
 }
 
@@ -300,46 +328,47 @@ func (tb *Toolbox) openPR(ctx context.Context, raw json.RawMessage) (string, err
 // so the model must write the files it still wants again.
 const discarded = "All edits in this repo were discarded: write the files you still want again, then call open_pr."
 
-// checkChangedPaths re-checks every changed path: a write through a symlink
-// in the repo can land somewhere repo_write_file would have refused.
-func (tb *Toolbox) checkChangedPaths(r *Repo) error {
+// checkChangedPaths returns the changed paths after re-checking each: a
+// write through a symlink in the repo can land somewhere repo_write_file
+// would have refused.
+func (tb *Toolbox) checkChangedPaths(r *Repo) ([]string, error) {
 	paths, err := r.Changed()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, p := range paths {
 		if err := tb.Guard.CheckWritePath(p); err != nil {
-			return fmt.Errorf("not opening a PR: %w. %s", err, discarded)
+			return nil, fmt.Errorf("not opening a PR: %w. %s", err, discarded)
 		}
 	}
-	return nil
+	return paths, nil
 }
 
 // commit commits the clone's changes to branch and returns the diff. It
-// refuses a diff that adds a credential, or in safe mode one that is not
-// non-breaking.
-func (tb *Toolbox) commit(r *Repo, branch, message string, log *slog.Logger) (string, error) {
+// refuses a diff that adds a credential, or in safe mode one that changes
+// more than versions and image digests (guardrails.CheckSafeDiff).
+func (tb *Toolbox) commit(r *Repo, branch, message string, log *slog.Logger) (*object.Patch, error) {
 	patch, err := r.Commit(branch, message)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if patch == nil {
-		return "", errors.New("no changes to commit: write files with repo_write_file first")
+		return nil, errors.New("no changes to commit: write files with repo_write_file first")
 	}
 	// File contents are pushed as written, so refuse a change that adds a
 	// credential, e.g. one the model copied from a tool result.
 	if leaks := tb.Guard.Redactor().FindSecretLines(patch); len(leaks) > 0 {
 		log.Warn("refusing PR with secret-like content", "lines", len(leaks))
-		return "", fmt.Errorf("not opening a PR: the change adds %d line(s) that look like credentials, e.g. %q. %s",
+		return nil, fmt.Errorf("not opening a PR: the change adds %d line(s) that look like credentials, e.g. %q. %s",
 			len(leaks), textutil.Truncate(leaks[0], 200), discarded)
 	}
 	if tb.Guard.Mode() == config.ModeSafe {
-		if err := guardrails.CheckNonBreaking(patch); err != nil {
+		if err := guardrails.CheckSafeDiff(patch); err != nil {
 			log.Info("refusing PR in safe mode", "reason", err)
-			return "", fmt.Errorf("not opening a PR: %w. Leave this change out, or mention it in your summary. %s", err, discarded)
+			return nil, fmt.Errorf("not opening a PR: %w. Leave this change out, or mention it in your summary. %s", err, discarded)
 		}
 	}
-	return patch.String(), nil
+	return patch, nil
 }
 
 // logDryRun logs the change instead of pushing it.
@@ -350,16 +379,28 @@ func (tb *Toolbox) logDryRun(r *Repo, branch, title, body, patch string, log *sl
 	return fmt.Sprintf("dry-run: PR %q on %s (%s -> %s) was logged, not opened", title, r.Name, branch, r.BaseBranch)
 }
 
-// deliver pushes the committed branch and opens a PR for it. used is false
-// when nothing was opened, so the caller returns the budget.
-func (tb *Toolbox) deliver(ctx context.Context, r *Repo, branch, title, body string, log *slog.Logger) (msg string, used bool, err error) {
+// deliver force-pushes branch, then opens a PR for it, or refreshes the
+// title and body of update. used is false when nothing was pushed, so the
+// caller returns the budget.
+func (tb *Toolbox) deliver(ctx context.Context, r *Repo, branch, title, body string, update *PR, log *slog.Logger) (msg string, used bool, err error) {
 	if tb.PRs == nil {
 		return "", false, errors.New("no Git provider configured")
 	}
 	if err := r.Push(ctx, branch); err != nil {
 		return "", false, fmt.Errorf("push %s: %w", branch, err)
 	}
-	pr, err := tb.PRs.Create(ctx, r.Name, PRInput{Title: title, Body: body, Head: branch, Base: r.BaseBranch})
+	in := PRInput{Title: title, Body: body, Head: branch, Base: r.BaseBranch}
+	if update != nil {
+		tb.Opened = append(tb.Opened, OpenedPR{Repo: r.Name, Branch: branch, URL: update.URL, Number: update.Number, Outcome: OutcomeUpdated})
+		if err := tb.PRs.Update(ctx, r.Name, update.Number, in); err != nil {
+			// The PR shows the pushed commit anyway; only its text is old.
+			log.Warn("pushed the new change, but could not refresh the PR title and body", "url", update.URL, "err", err)
+			return fmt.Sprintf("updated PR #%d with the new change (its description could not be refreshed): %s", update.Number, update.URL), true, nil
+		}
+		log.Info("updated PR", "url", update.URL, "number", update.Number)
+		return fmt.Sprintf("updated PR #%d with the new change: %s", update.Number, update.URL), true, nil
+	}
+	pr, err := tb.PRs.Create(ctx, r.Name, in)
 	if err != nil {
 		return "", false, err
 	}

@@ -73,7 +73,7 @@ mcpServers:
     mode: deploy
     deploy:
       image: { repository: ghcr.io/example/custom-mcp, tag: "1.0.0" }
-      port: 9000
+      port: 9100
       env: [{ name: LOG_LEVEL, value: info }]
       secretEnv:
         API_TOKEN: { value: custom-token-value }

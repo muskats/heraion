@@ -88,7 +88,7 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 	if cfg.LLM.MaxToolResultBytes != 32768 || cfg.LLM.MaxContextBytes != 120000 {
 		t.Errorf("llm limits %d %d", cfg.LLM.MaxToolResultBytes, cfg.LLM.MaxContextBytes)
 	}
-	if got := cfg.MCPServers["k8s"].URL; got != "http://t-heraion-mcp-k8s.default.svc:8080/mcp" {
+	if got := cfg.MCPServers["k8s"].URL; got != "http://127.0.0.1:8080/mcp" {
 		t.Errorf("k8s url %s", got)
 	}
 	if got := cfg.MCPServers["grafana"].URL; got != "http://t-grafana-mcp:8000/mcp" {
@@ -119,6 +119,9 @@ func TestFullValuesAreAcceptedByTheBinary(t *testing.T) {
 	loaded, err := playbook.LoadDir(pbDir)
 	if err != nil || len(loaded) != 3 {
 		t.Fatalf("playbooks: %v (%d)", err, len(loaded))
+	}
+	if err := playbook.ValidateAll(loaded, cfg.Mode, cfg.Repos); err != nil {
+		t.Errorf("playbooks against the config: %v", err)
 	}
 	if m := loaded["trivy-remediate"].EffectiveMode(cfg.Mode); m != config.ModeSafe {
 		t.Errorf("trivy-remediate mode %q", m)
@@ -191,14 +194,19 @@ func TestExampleValues(t *testing.T) {
 			cm := find(objs, "ConfigMap", "t-heraion-config")
 			p := filepath.Join(t.TempDir(), "config.yaml")
 			_ = os.WriteFile(p, []byte(cm.Data["config.yaml"]), 0o600)
-			if _, err := config.Load(p); err != nil {
+			cfg, err := config.Load(p)
+			if err != nil {
 				t.Fatalf("%v\n%s", err, cm.Data["config.yaml"])
 			}
 			dir := t.TempDir()
 			for name, c := range find(objs, "ConfigMap", "t-heraion-playbooks").Data {
 				_ = os.WriteFile(filepath.Join(dir, name), []byte(c), 0o600)
 			}
-			if _, err := playbook.LoadDir(dir); err != nil {
+			pbs, err := playbook.LoadDir(dir)
+			if err == nil {
+				err = playbook.ValidateAll(pbs, cfg.Mode, cfg.Repos)
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -252,5 +260,33 @@ func TestNamespacesBindRBACPerNamespace(t *testing.T) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil || strings.Join(cfg.Namespaces, ",") != "shop,payments" {
 		t.Errorf("config namespaces: %v %v", cfg, err)
+	}
+}
+
+// An enabled full-mode PR playbook without writePaths renders, but the
+// binary refuses it, so run, serve and helm test fail.
+func TestFullModePlaybookNeedsWritePaths(t *testing.T) {
+	objs := render(t, "--set", "llm.baseURL=https://api.openai.com/v1", "--set", "llm.model=m",
+		"--set", "repos={acme/web}", "--set", "playbooks.alertmanager-triage.enabled=true",
+		"--set", "playbooks.alertmanager-triage.guardrails.writePaths=null",
+		"--set", "gateway.hooks.alertmanager.auth=token", "--set", "gateway.hooks.alertmanager.secret.existingSecret=am")
+	cm := find(objs, "ConfigMap", "t-heraion-config")
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	_ = os.WriteFile(p, []byte(cm.Data["config.yaml"]), 0o600)
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range find(objs, "ConfigMap", "t-heraion-playbooks").Data {
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(c), 0o600)
+	}
+	_ = os.Remove(p)
+	pbs, err := playbook.LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := playbook.ValidateAll(pbs, cfg.Mode, cfg.Repos); err == nil || !strings.Contains(err.Error(), "writePaths is required") {
+		t.Fatalf("got %v", err)
 	}
 }

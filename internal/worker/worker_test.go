@@ -19,6 +19,7 @@ import (
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/llm/llmtest"
 	"github.com/muskats/heraion/internal/playbook"
+	"github.com/muskats/heraion/internal/scm"
 	"github.com/muskats/heraion/internal/scm/scmtest"
 	"github.com/muskats/heraion/internal/secret"
 	"github.com/muskats/heraion/internal/worker"
@@ -56,7 +57,7 @@ func TestRunOpensPR(t *testing.T) {
 	srv := llmtest.New(t,
 		llmtest.Turn{Calls: []llmtest.Call{{Name: "repo_read_file", Args: map[string]string{"repo": repo, "path": "Dockerfile"}}}},
 		llmtest.Turn{Calls: []llmtest.Call{{Name: "repo_write_file", Args: map[string]string{"repo": repo, "path": "Dockerfile", "content": "FROM alpine:3.20\n"}}}},
-		llmtest.Turn{Calls: []llmtest.Call{{Name: "open_pr", Args: map[string]string{"repo": repo, "title": "Bump alpine to 3.20", "body": "CVE-2024-0001", "branch": "bump-alpine"}}}},
+		llmtest.Turn{Calls: []llmtest.Call{{Name: "open_pr", Args: map[string]string{"repo": repo, "title": "Bump alpine to 3.20", "body": "CVE-2024-0001"}}}},
 		llmtest.Turn{Final: "Opened one PR."},
 	)
 	prs := &scmtest.FakePRs{}
@@ -81,7 +82,10 @@ prompt: Fix fixable HIGH CVEs.
 	if rep.Final != "Opened one PR." || len(rep.PRs) != 1 || rep.PRs[0].URL == "" || rep.DryRun {
 		t.Fatalf("%+v", rep)
 	}
-	if got, err := scmtest.RemoteBranchFile(t, base, repo, "heraion/trivy-remediate/bump-alpine", "Dockerfile"); err != nil || got != "FROM alpine:3.20\n" {
+	if !strings.HasPrefix(rep.PRs[0].Branch, "heraion/trivy-remediate/dockerfile-") {
+		t.Errorf("branch %q is not named after the changed file", rep.PRs[0].Branch)
+	}
+	if got, err := scmtest.RemoteBranchFile(t, base, repo, rep.PRs[0].Branch, "Dockerfile"); err != nil || got != "FROM alpine:3.20\n" {
 		t.Fatalf("pushed content %q %v", got, err)
 	}
 
@@ -145,6 +149,21 @@ func TestReportIsPostedOnOpenedPR(t *testing.T) {
 	}
 	if strings.Contains(body, "git-token-123456") {
 		t.Error("report was not redacted")
+	}
+}
+
+// A rerun with the same change leaves the PR alone and posts no second report.
+func TestReportNotPostedOnUnchangedPR(t *testing.T) {
+	prs := &scmtest.FakePRs{}
+	if _, _, err := runFix(t, prs, false, "Bumped alpine."); err != nil {
+		t.Fatal(err)
+	}
+	rep, _, err := runFix(t, prs, false, "Bumped alpine again.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.PRs) != 1 || rep.PRs[0].Outcome != scm.OutcomeUnchanged || len(prs.Comments) != 1 {
+		t.Fatalf("PRs %+v, comments %d", rep.PRs, len(prs.Comments))
 	}
 }
 

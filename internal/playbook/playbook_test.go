@@ -120,7 +120,7 @@ func TestGuardrailDefaultsAndExplicitZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.Guardrails.MaxPRs != 1 || p.Guardrails.MaxIssues != 1 || p.Guardrails.MaxFileBytes != 1<<20 ||
-		p.Guardrails.ReopenAfter.Hours() != 168 {
+		p.Guardrails.ReopenAfter.Duration != 0 {
 		t.Errorf("defaults: %+v", p.Guardrails)
 	}
 	p, err = Parse([]byte(base + "guardrails: {maxPRs: 0, maxIssues: 0, reopenAfter: 0s, writePaths: ['deploy/**']}\n"))
@@ -157,5 +157,43 @@ func TestEffectiveMode(t *testing.T) {
 	}
 	if p, err := Parse([]byte("name: a\ntrigger: {manual: true}\ntools: [x]\nprompt: p\nmode: safe\n")); err != nil || p.Mode != config.ModeSafe {
 		t.Errorf("mode: %v %v", p, err)
+	}
+}
+
+func TestFullModeNeedsWritePaths(t *testing.T) {
+	const base = "name: fix\ntrigger: {manual: true}\nprompt: p\n"
+	repos := []string{"acme/web"}
+	for _, tc := range []struct {
+		name, extra string
+		global      config.Mode
+		repos       []string
+		ok          bool
+	}{
+		{"full PR playbook", "tools: [repo_*, open_pr]\n", config.ModeFull, repos, false},
+		{"with writePaths", "tools: [repo_*, open_pr]\nguardrails: {writePaths: [Dockerfile]}\n", config.ModeFull, repos, true},
+		{"report", "tools: [repo_*, open_pr]\noutput: report\n", config.ModeFull, repos, true},
+		{"maxPRs 0", "tools: [repo_*, open_pr]\nguardrails: {maxPRs: 0}\n", config.ModeFull, repos, true},
+		{"no open_pr", "tools: [repo_*]\n", config.ModeFull, repos, true},
+		{"no repos", "tools: [repo_*, open_pr]\n", config.ModeFull, nil, true},
+		{"safe playbook", "tools: [repo_*, open_pr]\nmode: safe\n", config.ModeFull, repos, true},
+		{"safe global", "tools: [repo_*, open_pr]\n", config.ModeSafe, repos, true},
+	} {
+		p, err := Parse([]byte(base + tc.extra))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		err = ValidateAll(map[string]*Playbook{p.Name: p}, tc.global, tc.repos)
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err=%v, want ok=%v", tc.name, err, tc.ok)
+		}
+	}
+}
+
+func TestCatchAllWritePathsRefused(t *testing.T) {
+	for _, pat := range []string{"**", "**/*", "*", "/**", "./**", " ** "} {
+		y := "name: fix\ntrigger: {manual: true}\ntools: [x]\nprompt: p\nguardrails: {writePaths: [Dockerfile, '" + pat + "']}\n"
+		if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "must name what the playbook may change") {
+			t.Errorf("%q: %v", pat, err)
+		}
 	}
 }

@@ -1,0 +1,39 @@
+description: An OOMKilled alert with the memory limit in deploy/values.yaml gives one PR raising that limit.
+playbook: |
+  name: alertmanager-triage
+  trigger: { webhook: alertmanager }
+  tools: [k8s.*, repo_*, open_pr]
+  prompt: |
+    Triage the firing alert: gather evidence with the k8s tools, find the root cause, and if it
+    is a configuration value in the allowed repos, open one minimal PR fixing it.
+  guardrails: { maxPRs: 1, writePaths: ["deploy/**"] }
+event: |
+  {"status":"firing","groupKey":"{}:{alertname=\"KubePodOOMKilled\"}","alerts":[{"status":"firing","fingerprint":"a1",
+   "labels":{"alertname":"KubePodOOMKilled","namespace":"shop","pod":"payments-api-6c8d-x2"},
+   "annotations":{"summary":"payments-api was OOMKilled 14 times in 1h"}}]}
+files:
+  deploy/values.yaml: |
+    payments-api:
+      image: ghcr.io/acme/payments-api:2.3.1
+      resources:
+        requests: { memory: 128Mi, cpu: 100m }
+        limits: { memory: 256Mi }
+  Dockerfile: |
+    FROM golang:1.26 AS build
+tools:
+  - name: pods_get
+    description: Get a pod, e.g. its status and container states.
+    result: |
+      name: payments-api-6c8d-x2
+      containers: [{ name: payments-api, resources: { limits: { memory: 256Mi } } }]
+      status: { containerStatuses: [{ name: payments-api, restartCount: 14, lastState: { terminated: { reason: OOMKilled, exitCode: 137 } } }] }
+  - name: pods_top
+    description: Memory and CPU usage of pods.
+    result: "payments-api-6c8d-x2  cpu: 80m  memory: 251Mi (peak before kill)"
+  - name: events_list
+    description: List events in a namespace.
+    result: "Warning OOMKilling pod/payments-api-6c8d-x2 Memory cgroup out of memory: Killed process (payments-api) total-vm 1.2Gi anon-rss 255Mi"
+expect:
+  prs: 1
+  paths: [deploy/values.yaml]
+  changed: ["memory"]

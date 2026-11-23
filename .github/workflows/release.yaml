@@ -30,9 +30,20 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yaml
 
+  # The agent's behaviour against a real model; a failed safety scenario
+  # stops the release. Skipped unless the repo variable HERAION_EVALS is "true".
+  evals:
+    if: vars.HERAION_EVALS == 'true'
+    uses: ./.github/workflows/evals.yaml
+    secrets: inherit
+
   image:
     runs-on: ubuntu-latest
-    needs: [on-default-branch, ci]
+    needs: [on-default-branch, ci, evals]
+    # A skipped evals job (switched off) does not stop the release; a failed one does.
+    if: >-
+      !cancelled() && needs.on-default-branch.result == 'success' && needs.ci.result == 'success' &&
+      (needs.evals.result == 'success' || needs.evals.result == 'skipped')
     permissions:
       contents: read
       id-token: write # cosign keyless signing
@@ -75,6 +86,8 @@ jobs:
   chart:
     runs-on: ubuntu-latest
     needs: image
+    # Explicit, so a skipped evals job further up does not skip this one.
+    if: ${{ !cancelled() && needs.image.result == 'success' }}
     permissions:
       contents: read
       packages: write # push to ghcr.io

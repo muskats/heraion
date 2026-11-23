@@ -20,6 +20,9 @@ scripts/check-version.sh
 
 log "go vet"
 go vet ./...
+# Code behind build tags: the e2e suite and the evals.
+go vet -tags e2e ./test/e2e/
+go vet -tags evals ./test/evals/
 ok "go vet"
 
 log "go mod tidy"

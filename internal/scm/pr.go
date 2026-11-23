@@ -16,7 +16,7 @@ import (
 )
 
 // BranchPrefix starts every branch HeraIon pushes, e.g.
-// "heraion/trivy-remediate/bump-alpine-3-20".
+// "heraion/trivy-remediate/dockerfile-1b2c3d4e", see BranchForPaths.
 const BranchPrefix = "heraion/"
 
 // PR is a pull (or merge) request on the Git server.
@@ -25,6 +25,7 @@ type PR struct {
 	URL    string
 	State  string    // PRStateOpen, PRStateClosed (not merged) or PRStateMerged
 	Closed time.Time // last update of a closed or merged PR, i.e. about when it was closed
+	Body   string    // carries the change marker, see ChangeOf
 }
 
 // PR states.
@@ -46,6 +47,9 @@ type PRService interface {
 	// closed and merged ones when none is open.
 	FindByBranch(ctx context.Context, repo, branch string) ([]PR, error)
 	Create(ctx context.Context, repo string, in PRInput) (*PR, error)
+	// Update replaces the title and body of PR number. Bitbucket Cloud and
+	// Gogs return go-scm's ErrNotSupported.
+	Update(ctx context.Context, repo string, number int, in PRInput) error
 	// Comment adds a comment to PR number, e.g. the run's report. Azure
 	// DevOps and Gogs return go-scm's ErrNotSupported.
 	Comment(ctx context.Context, repo string, number int, body string) error
@@ -149,7 +153,7 @@ func (s *goscmService) list(ctx context.Context, repo, branch string, opts goscm
 }
 
 func toPR(pr *goscm.PullRequest) PR {
-	p := PR{Number: pr.Number, URL: pr.Link, State: PRStateOpen}
+	p := PR{Number: pr.Number, URL: pr.Link, State: PRStateOpen, Body: pr.Body}
 	switch {
 	case pr.Merged:
 		p.State, p.Closed = PRStateMerged, pr.Updated
@@ -169,6 +173,15 @@ func (s *goscmService) Create(ctx context.Context, repo string, in PRInput) (*PR
 	return &PR{Number: pr.Number, URL: pr.Link, State: PRStateOpen}, nil
 }
 
+func (s *goscmService) Update(ctx context.Context, repo string, number int, in PRInput) error {
+	if _, _, err := s.c.PullRequests.Update(ctx, repo, number, &goscm.PullRequestInput{
+		Title: in.Title, Body: in.Body, Base: in.Base,
+	}); err != nil {
+		return fmt.Errorf("update PR #%d on %s: %w", number, repo, err)
+	}
+	return nil
+}
+
 func (s *goscmService) Comment(ctx context.Context, repo string, number int, body string) error {
 	if _, _, err := s.c.PullRequests.CreateComment(ctx, repo, number, &goscm.CommentInput{Body: body}); err != nil {
 		return fmt.Errorf("comment on PR #%d on %s: %w", number, repo, err)
@@ -184,16 +197,4 @@ func slug(s string, max int) string {
 		s = strings.TrimRight(s[:max], "-")
 	}
 	return s
-}
-
-// BranchName is stable per change, so reruns find the existing PR:
-//
-//	BranchName("trivy-remediate", "Bump alpine to 3.20")
-//	  = "heraion/trivy-remediate/bump-alpine-to-3-20"
-func BranchName(playbook, key string) string {
-	k := slug(strings.TrimPrefix(strings.TrimPrefix(key, BranchPrefix), playbook+"/"), 60)
-	if k == "" {
-		k = "change"
-	}
-	return BranchPrefix + playbook + "/" + k
 }

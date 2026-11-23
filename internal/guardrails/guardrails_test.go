@@ -82,6 +82,42 @@ func TestCheckWritePath(t *testing.T) {
 	}
 }
 
+func TestRegistryConfigsAreDenied(t *testing.T) {
+	g := New(Options{AllowPaths: []string{"**/*.yaml", "frontend/**", ".mvn/**", "**/config*", "**/*.properties", "**/.*", "**/*.xml", "**/*.conf", "**/*.ini", "**/*.cjs", "**/*.toml"}})
+	for _, p := range []string{
+		".npmrc", ".NPMRC", "frontend/.npmrc", ".yarnrc", "app/.yarnrc.yml", ".pnpmfile.cjs",
+		"pip.conf", "pip.ini", ".pypirc", ".mvn/wrapper/maven-wrapper.properties", "settings.xml",
+		"nuget.config", ".cargo/config", ".cargo/config.toml", ".gemrc", ".bundle/config",
+		"gradle.properties", ".pre-commit-config.yaml",
+	} {
+		if err := g.CheckWritePath(p); err == nil {
+			t.Errorf("%s must be refused, whatever writePaths say", p)
+		}
+	}
+}
+
+func TestIgnoreFilesNeedAnExplicitPattern(t *testing.T) {
+	for _, tc := range []struct {
+		allow []string
+		ok    bool
+	}{
+		{nil, false},
+		{[]string{"deploy/**"}, false},
+		{[]string{"**"}, false},
+		{[]string{"**/.trivy*"}, false},
+		{[]string{".trivyignore"}, true},
+		{[]string{"**/.trivyignore"}, true},
+	} {
+		err := New(Options{AllowPaths: tc.allow}).CheckWritePath(".trivyignore")
+		if (err == nil) != tc.ok {
+			t.Errorf("writePaths %v: err=%v, want ok=%v", tc.allow, err, tc.ok)
+		}
+		if err != nil && !strings.Contains(err.Error(), "**/.trivyignore") {
+			t.Errorf("error does not say how to opt in: %v", err)
+		}
+	}
+}
+
 func TestMatchPath(t *testing.T) {
 	cases := []struct {
 		pat, name string

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/muskats/heraion/internal/config"
+	"github.com/muskats/heraion/internal/dispatch"
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/playbook"
 	"github.com/muskats/heraion/internal/worker"
@@ -139,6 +140,9 @@ func cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := playbook.ValidateAll(pbs, cfg.Mode, cfg.Repos); err != nil {
+		return err
+	}
 	pb, ok := pbs[*name]
 	if !ok {
 		return fmt.Errorf("playbook %q not found in %s", *name, cfg.PlaybooksDir)
@@ -157,7 +161,8 @@ func cmdRun(ctx context.Context, args []string) error {
 	}
 
 	start := time.Now()
-	rep, err := worker.Run(ctx, worker.Options{Config: cfg, Playbook: pb, Event: event, Redactor: red, Log: log, Version: version})
+	rep, err := worker.Run(ctx, worker.Options{Config: cfg, Playbook: pb, Event: event, EventID: os.Getenv(dispatch.EnvEventID),
+		Redactor: red, Log: log, Version: version})
 	// One line per run for log-based monitoring, e.g. in Loki:
 	//   {app_kubernetes_io_component="worker"} | json | msg="run finished" | status="failed"
 	status, errText := "ok", ""

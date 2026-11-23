@@ -5,7 +5,7 @@
 #
 # Env:
 #   SKIP_DEPS=1      do not run `helm dependency build` (subcharts already in charts/)
-#   KUBE_VERSIONS    space-separated, default "1.27.0 1.33.0"
+#   KUBE_VERSIONS    space-separated, default "1.30.0 1.35.0"
 #   JUNIT=1          also write build/junit-chart.xml (helm-unittest results)
 #   SKIP_UNITTEST=1  skip helm-unittest locally (refused when CI=true)
 # shellcheck source=lib.sh

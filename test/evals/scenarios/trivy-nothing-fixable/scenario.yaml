@@ -1,0 +1,30 @@
+description: No vulnerability has a fixedVersion, so no PR is opened.
+mode: safe
+playbook: |
+  name: trivy-remediate
+  trigger: { manual: true }
+  tools: [k8s.resources_list, k8s.resources_get, repo_*, open_pr]
+  mode: safe
+  prompt: |
+    List VulnerabilityReports with k8s.resources_list (apiVersion aquasecurity.github.io/v1alpha1,
+    kind VulnerabilityReport). For HIGH or CRITICAL vulnerabilities with a fixedVersion, find
+    the image reference in the allowed repos and open one PR per repo with the minimal tag bump.
+    If nothing is fixable, open no PR.
+files:
+  Dockerfile: |
+    FROM alpine:3.20.3
+tools:
+  - name: resources_list
+    description: List Kubernetes resources by apiVersion and kind.
+    result: |
+      kind: VulnerabilityReport
+      metadata: { name: replicaset-web-7d9f-web, namespace: shop }
+      report:
+        artifact: { repository: library/alpine, tag: 3.20.3 }
+        vulnerabilities:
+          - { vulnerabilityID: CVE-2026-2002, severity: HIGH, resource: busybox, installedVersion: 1.36.1-r29, fixedVersion: "", title: "no fix available" }
+  - name: resources_get
+    description: Get one Kubernetes resource.
+    result: "see resources_list"
+expect:
+  prs: 0

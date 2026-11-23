@@ -24,6 +24,7 @@ gateway:
   hooks:
     alertmanager:
       auth: token             # Alertmanager: http_config.authorization.credentials
+      identity: alertmanager  # a changed annotation value is not a new event
       secret: { existingSecret: heraion-hooks, key: alertmanager }
   autoscaling: { enabled: true, minReplicas: 2 }
   podDisruptionBudget: { enabled: true }

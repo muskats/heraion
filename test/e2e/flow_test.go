@@ -15,9 +15,11 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/muskats/heraion/internal/dispatch"
 	"github.com/muskats/heraion/internal/llm/llmtest"
+	"github.com/muskats/heraion/internal/scm"
 )
 
 const (
@@ -38,6 +40,7 @@ func TestWebhookToPullRequest(t *testing.T) {
 		"llm.baseURL=http://llm.invalid/v1", "llm.model=mock", // per run: HERAION_LLM_BASE_URL
 		"git.provider=gitea", "git.endpoint="+gt.URL, "repos={"+repo+"}",
 		"gateway.maxConcurrentJobs=1", "playbooks."+playbook+".enabled=true",
+		"playbooks."+playbook+".guardrails.writePaths={Dockerfile,deploy/**}",
 		"gateway.hooks.alertmanager.auth=token", "gateway.hooks.alertmanager.secret.existingSecret=am")
 
 	dir := t.TempDir()
@@ -148,6 +151,18 @@ func TestWebhookToPullRequest(t *testing.T) {
 			t.Errorf("want 1 Job and 1 Secret, got %d and %d", j, s)
 		}
 
+		// A failed run is never a duplicate: its Job goes, the sender retries.
+		kube.failAll()
+		if code, _ := post(t, hook, hookSecret, event); code != http.StatusServiceUnavailable {
+			t.Errorf("redelivery of a failed run: %d", code)
+		}
+		if kube.job(jobName) != nil || kube.deletePolicy == nil || *kube.deletePolicy != metav1.DeletePropagationForeground {
+			t.Errorf("the failed Job must be deleted in the foreground (policy %v)", kube.deletePolicy)
+		}
+		if code, res := post(t, hook, hookSecret, event); code != http.StatusAccepted || res.Jobs[0].Duplicate || res.Jobs[0].Job != jobName {
+			t.Errorf("retry after a failed run: %d %+v", code, res)
+		}
+
 		for v := range kube.verbs {
 			if !granted(c.GatewayRole, v[0], v[1]) {
 				t.Errorf("the gateway used %s %s, which the chart's Role does not grant", v[1], v[0])
@@ -185,12 +200,13 @@ func TestWebhookToPullRequest(t *testing.T) {
 	write := func(path, content string) llmtest.Call {
 		return llmtest.Call{Name: "repo_write_file", Args: map[string]string{"repo": repo, "path": path, "content": content}}
 	}
-	openPR := func(title, branch string) llmtest.Call {
-		return llmtest.Call{Name: "open_pr", Args: map[string]string{"repo": repo, "title": title, "branch": branch,
+	openPR := func(title string) llmtest.Call {
+		return llmtest.Call{Name: "open_pr", Args: map[string]string{"repo": repo, "title": title,
 			"body": "Fixes CVEs. ref " + gitToken}}
 	}
-	bump := []llmtest.Call{write("Dockerfile", "FROM alpine:3.20\n"), openPR("Bump alpine to 3.20", "bump-alpine")}
-	branch := "heraion/" + playbook + "/bump-alpine"
+	bump := []llmtest.Call{write("Dockerfile", "FROM alpine:3.20\n"), openPR("Bump alpine to 3.20")}
+	// Named after the changed file, whatever the model calls the change.
+	branch := scm.BranchForPaths(playbook, repo, []string{"Dockerfile"})
 
 	t.Run("worker refuses unsafe changes and opens a PR", func(t *testing.T) {
 		llm, out := worker(t, eventFile,
@@ -199,7 +215,7 @@ func TestWebhookToPullRequest(t *testing.T) {
 				write(".github/workflows/ci.yml", "on: pull_request\n"),
 				write("deploy/values.yaml", "image: web:1\ntoken: "+ghToken+"\n"),
 			}},
-			llmtest.Turn{Calls: []llmtest.Call{openPR("leak", "leak")}},
+			llmtest.Turn{Calls: []llmtest.Call{openPR("leak")}},
 			llmtest.Turn{Calls: bump},
 			llmtest.Turn{Final: "Bumped alpine. ref " + gitToken},
 		)
@@ -240,9 +256,10 @@ func TestWebhookToPullRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("a rerun reuses the open PR", func(t *testing.T) {
-		llm, _ := worker(t, eventFile, llmtest.Turn{Calls: bump}, llmtest.Turn{Final: "done"})
-		if !strings.Contains(toolResults(llm), "already exists") || len(gt.list(repo)) != 1 {
+	t.Run("a rerun with the same change leaves the open PR alone", func(t *testing.T) {
+		calls := []llmtest.Call{write("Dockerfile", "FROM alpine:3.20\n"), openPR("Update the alpine base image")}
+		llm, _ := worker(t, eventFile, llmtest.Turn{Calls: calls}, llmtest.Turn{Final: "done"})
+		if !strings.Contains(toolResults(llm), "already has exactly this change") || len(gt.list(repo)) != 1 {
 			t.Errorf("not deduplicated: %s", toolResults(llm))
 		}
 	})
@@ -251,7 +268,7 @@ func TestWebhookToPullRequest(t *testing.T) {
 		gt.close(repo, 1)
 		llm, _ := worker(t, eventFile, llmtest.Turn{Calls: bump}, llmtest.Turn{Final: "done"})
 		if !strings.Contains(toolResults(llm), "closed without merging") || len(gt.list(repo)) != 1 {
-			t.Errorf("closed PR reopened: %s", toolResults(llm))
+			t.Errorf("rejected change proposed again: %s", toolResults(llm))
 		}
 		if !slices.Contains(gt.listStates, "closed") {
 			t.Errorf("closed PRs were never listed explicitly (states %v); Gitea defaults to open only", gt.listStates)
@@ -259,13 +276,29 @@ func TestWebhookToPullRequest(t *testing.T) {
 	})
 
 	t.Run("fork and untitled PRs do not interfere", func(t *testing.T) {
-		gt.add(repo, "evil", "heraion/"+playbook+"/bump-musl", "mallory/web")
-		gt.add(repo, "", "x", repo) // go-scm's Gitea driver turns this into a nil entry
+		gt.add(repo, "evil", branch, "mallory/web") // a fork's branch with our name
+		gt.add(repo, "", "x", repo)                 // go-scm's Gitea driver turns this into a nil entry
 		llm, _ := worker(t, eventFile,
-			llmtest.Turn{Calls: []llmtest.Call{write("Dockerfile", "FROM alpine:3.21\n"), openPR("Bump musl", "bump-musl")}},
+			llmtest.Turn{Calls: []llmtest.Call{write("Dockerfile", "FROM alpine:3.21\n"), openPR("Bump alpine to 3.21")}},
 			llmtest.Turn{Final: "done"})
 		if !strings.Contains(toolResults(llm), "opened PR #4") {
-			t.Errorf("fork PR treated as ours: %s", toolResults(llm))
+			t.Errorf("a new change after a rejected one, or the fork PR: %s", toolResults(llm))
+		}
+	})
+
+	t.Run("a new change updates the open PR", func(t *testing.T) {
+		llm, _ := worker(t, eventFile,
+			llmtest.Turn{Calls: []llmtest.Call{write("Dockerfile", "FROM alpine:3.22\n"), openPR("Bump alpine to 3.22")}},
+			llmtest.Turn{Final: "done"})
+		if !strings.Contains(toolResults(llm), "updated PR #4") || len(gt.list(repo)) != 4 {
+			t.Errorf("open PR not updated: %s", toolResults(llm))
+		}
+		if got := git(t, remotes, "--git-dir", repo+".git", "show", branch+":Dockerfile"); got != "FROM alpine:3.22" {
+			t.Errorf("branch not force-pushed: %q", got)
+		}
+		pr := gt.list(repo)[3]
+		if pr["title"] != "Bump alpine to 3.22" || scm.ChangeOf(pr["body"].(string)) == "" {
+			t.Errorf("PR #4 text not refreshed: %v", pr["title"])
 		}
 	})
 
@@ -281,6 +314,7 @@ func TestWebhookToPullRequest(t *testing.T) {
 	})
 
 	t.Run("an old closed PR is found beyond the first page", func(t *testing.T) {
+		gt.close(repo, 4)
 		for i := range 60 {
 			gt.add(repo, fmt.Sprintf("other %d", i), fmt.Sprintf("feature/%d", i), repo)
 		}

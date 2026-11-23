@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -166,6 +167,7 @@ func TestMalformedDenyPatternDeniesAll(t *testing.T) {
 }
 
 func TestUnreachable(t *testing.T) {
+	defer mcp.SetConnectTimeout(200 * time.Millisecond)() // refused connections are retried this long
 	dead := map[string]*config.MCPServer{"grafana": {URL: "http://127.0.0.1:1/mcp", Transport: "streamable"}}
 	m, tools, err := mcp.Connect(context.Background(), dead, []string{"*"}, "test", quiet)
 	if err != nil || len(tools) != 0 {
@@ -296,4 +298,36 @@ func TestSlowToolGetsToolTimeout(t *testing.T) {
 	if out, err := tools[0].Call(context.Background(), json.RawMessage(`{}`)); err != nil || out != "done" {
 		t.Fatalf("got %q, %v", out, err)
 	}
+}
+
+// A sidecar that starts listening a moment after the worker is waited for.
+func TestWaitsForAStartingServer(t *testing.T) {
+	defer mcp.SetConnectTimeout(5 * time.Second)()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close() // nothing listens: connections are refused
+	s := sdk.NewServer(&sdk.Implementation{Name: "late", Version: "1"}, nil)
+	sdk.AddTool(s, &sdk.Tool{Name: "ping"}, func(context.Context, *sdk.CallToolRequest, struct{}) (*sdk.CallToolResult, any, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "pong"}}}, nil, nil
+	})
+	srv := &http.Server{Handler: sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return s }, nil), ReadHeaderTimeout: time.Second}
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			return
+		}
+		_ = srv.Serve(l)
+	}()
+	defer srv.Close()
+
+	cfg := &config.MCPServer{URL: "http://" + addr + "/mcp", Transport: "streamable", Timeout: config.Duration{Duration: 5 * time.Second}}
+	sess, tools, err := mcp.Dial(context.Background(), "late", cfg, "test")
+	if err != nil || len(tools) != 1 {
+		t.Fatalf("tools=%d err=%v", len(tools), err)
+	}
+	sess.Close()
 }

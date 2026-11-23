@@ -27,7 +27,7 @@ import (
 
 // Dispatcher starts an investigation. *dispatch.Dispatcher implements it.
 type Dispatcher interface {
-	Dispatch(ctx context.Context, playbook, hook string, event []byte) (name string, created bool, err error)
+	Dispatch(ctx context.Context, playbook, hook string, identity, event []byte) (name string, created bool, err error)
 }
 
 // Server serves POST /hooks/{name}, /healthz and /readyz.
@@ -52,7 +52,7 @@ func New(gw config.Gateway, pbs map[string]*playbook.Playbook, d Dispatcher, log
 		}, []string{"hook", "code"}),
 		dispatches: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "heraion_dispatches_total",
-			Help: "Worker Jobs requested by webhooks, by result: created, duplicate, at_capacity or error.",
+			Help: "Worker Jobs requested by webhooks, by result: created, duplicate, retry_failed, at_capacity or error.",
 		}, []string{"hook", "playbook", "result"}),
 	}
 	var errs []error
@@ -141,11 +141,21 @@ func (s *Server) serveHook(w http.ResponseWriter, r *http.Request, name string) 
 
 	status := http.StatusAccepted
 	results := make([]JobResult, 0, len(pbs))
+	id := identity(h, body, s.log.With("hook", name))
 	for _, pb := range pbs {
-		job, created, err := s.dispatch.Dispatch(r.Context(), pb, name, body)
+		job, created, err := s.dispatch.Dispatch(r.Context(), pb, name, id, body)
 		res := JobResult{Playbook: pb, Job: job, Duplicate: err == nil && !created}
 		result := "created"
 		switch {
+		case errors.Is(err, dispatch.ErrRetryLater):
+			// The earlier run of this event failed and is being deleted; the
+			// sender's retry starts a fresh one.
+			if status == http.StatusAccepted {
+				status = http.StatusServiceUnavailable
+			}
+			res.Error = err.Error()
+			result = "retry_failed"
+			s.log.Info("earlier run of this event failed, asking the sender to retry", "hook", name, "playbook", pb, "job", job)
 		case errors.Is(err, dispatch.ErrAtCapacity):
 			// 429 makes the sender retry; the retry gets the same Job name.
 			status = http.StatusTooManyRequests
@@ -167,13 +177,49 @@ func (s *Server) serveHook(w http.ResponseWriter, r *http.Request, name string) 
 		s.dispatches.WithLabelValues(name, pb, result).Inc()
 		results = append(results, res)
 	}
-	if status == http.StatusTooManyRequests {
+	switch status {
+	case http.StatusTooManyRequests:
 		w.Header().Set("Retry-After", "60")
+	case http.StatusServiceUnavailable:
+		w.Header().Set("Retry-After", "30")
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"jobs": results})
 	return status
+}
+
+// identity is what makes two deliveries the same event, by hook.Identity:
+//
+//	raw           the body
+//	alertmanager  groupKey, status and the sorted "fingerprint:status" of each
+//	              alert, so a changed annotation ({{ $value }}) is the same
+//	              event, and a new or resolved alert is a new one
+//
+// A body that is not an Alertmanager notification falls back to raw.
+func identity(h *config.Hook, body []byte, log *slog.Logger) []byte {
+	if h.Identity != config.IdentityAlertmanager {
+		return body
+	}
+	var n struct {
+		GroupKey string `json:"groupKey"`
+		Status   string `json:"status"`
+		Alerts   []struct {
+			Fingerprint string `json:"fingerprint"`
+			Status      string `json:"status"`
+		} `json:"alerts"`
+	}
+	if err := json.Unmarshal(body, &n); err != nil || n.GroupKey == "" {
+		log.Warn("not an Alertmanager notification; de-duplicating on the raw body")
+		return body
+	}
+	alerts := make([]string, 0, len(n.Alerts))
+	for _, a := range n.Alerts {
+		alerts = append(alerts, a.Fingerprint+":"+a.Status)
+	}
+	sort.Strings(alerts)
+	sum := sha256.Sum256([]byte(n.GroupKey + "\x00" + n.Status + "\x00" + strings.Join(alerts, "\x00")))
+	return sum[:]
 }
 
 // verify checks the request against the hook's secret in constant time.
