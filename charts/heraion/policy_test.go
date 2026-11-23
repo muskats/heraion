@@ -157,7 +157,7 @@ func TestAdmissionPolicies(t *testing.T) {
 			podSpec(m)["initContainers"].([]any)[0].(map[string]any)["command"] = []any{"python", "-c", "steal()"}
 		}},
 		{"extra container", func(m map[string]any) {
-			podSpec(m)["containers"] = append(containers(m), map[string]any{"name": "x", "image": "docker.io/muskats/heraion:2.1.1"})
+			podSpec(m)["containers"] = append(containers(m), map[string]any{"name": "x", "image": "docker.io/muskats/heraion:3.0.0"})
 		}},
 		{"other Secret in env", func(m map[string]any) {
 			c := containers(m)[0].(map[string]any)
