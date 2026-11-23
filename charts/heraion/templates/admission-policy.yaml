@@ -10,10 +10,14 @@ so the policy follows the values.
 {{- $name := printf "%s-%s" $ns (include "heraion.fullname" .) }}
 {{- $user := printf "system:serviceaccount:%s:%s" $ns (include "heraion.gatewaySA" .) }}
 {{- $pod := include "heraion.workerPodSpec" (dict "root" $ "args" (list "run")) | fromYaml }}
-{{- $containers := dict }}
+{{- /* CEL map literals must be homogeneous: images and commands are two
+       maps of strings; a command is its arguments joined by \x1f. */}}
+{{- $images := dict }}
+{{- $commands := dict }}
 {{- $secrets := list }}
 {{- range concat ($pod.initContainers | default list) $pod.containers }}
-{{- $_ := set $containers .name (dict "image" .image "command" (.command | default list)) }}
+{{- $_ := set $images .name .image }}
+{{- $_ := set $commands .name (join "\x1f" (.command | default list)) }}
 {{- range (.env | default list) }}{{ with ((.valueFrom | default dict).secretKeyRef | default dict).name }}{{ $secrets = append $secrets . }}{{ end }}{{ end }}
 {{- range (.envFrom | default list) }}{{ with (.secretRef | default dict).name }}{{ $secrets = append $secrets . }}{{ end }}{{ end }}
 {{- end }}
@@ -28,7 +32,7 @@ so the policy follows the values.
 {{- else }}{{ $volumes = append $volumes (printf "(v.name == %s && !has(v.hostPath))" $n) }}
 {{- end }}
 {{- end }}
-{{- $container := `c.name in variables.allowed && c.image == variables.allowed[c.name].image && ((has(c.command) && c.command == variables.allowed[c.name].command) || (!has(c.command) && size(variables.allowed[c.name].command) == 0)) && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name in variables.secrets)) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef) || f.secretRef.name in variables.secrets)) && (!has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)` }}
+{{- $container := `c.name in variables.images && c.image == variables.images[c.name] && (has(c.command) ? c.command.join('\x1f') : '') == variables.commands[c.name] && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name in variables.secrets)) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef) || f.secretRef.name in variables.secrets)) && (!has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)` }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -45,8 +49,10 @@ spec:
   variables:
     - name: pod
       expression: object.spec.template.spec
-    - name: allowed
-      expression: {{ toJson $containers | toJson }}
+    - name: images
+      expression: {{ toJson $images | toJson }}
+    - name: commands
+      expression: {{ toJson $commands | toJson }}
     - name: secrets
       expression: {{ toJson (uniq $secrets) | toJson }}
   validations:

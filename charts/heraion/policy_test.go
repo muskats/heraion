@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/ext"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/yaml"
@@ -27,7 +28,10 @@ type policy struct {
 // the API server would: it returns false and the first failed message.
 func (p *policy) check(t *testing.T, object map[string]any, user string) (matched, ok bool, msg string) {
 	t.Helper()
+	// As strict as the API server: homogeneous literals, the strings library.
 	env, err := cel.NewEnv(
+		cel.HomogeneousAggregateLiterals(),
+		ext.Strings(),
 		cel.Variable("object", cel.DynType),
 		cel.Variable("request", cel.DynType),
 		cel.Variable("variables", cel.MapType(cel.StringType, cel.DynType)),
