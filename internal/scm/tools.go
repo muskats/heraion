@@ -221,7 +221,7 @@ func (tb *Toolbox) footer() string {
 
 // existingPR decides what open_pr does with change on branch:
 //
-//	open PR, same change            unchanged, nothing pushed
+//	open PR, same change            unchanged, nothing pushed (the head commit's trailer, else the body's marker)
 //	open PR, head not by HeraIon    skipped: a human's commits are not overwritten
 //	open PR, other change           update returns that PR
 //	closed PR with the same change  rejected, within ReopenAfter (0: forever)
@@ -240,14 +240,21 @@ func (tb *Toolbox) existingPR(ctx context.Context, r *Repo, branch, change strin
 		tb.Opened = append(tb.Opened, OpenedPR{Repo: r.Name, Branch: branch, URL: pr.URL, Number: pr.Number, Outcome: o})
 	}
 	if open := openPR(found); open != nil {
-		if ChangeOf(open.Body) == change {
+		ours, onBranch, err := r.RemoteHead(ctx, branch)
+		if err != nil {
+			return nil, "", false, err
+		}
+		// The head commit's trailer says what the branch holds, also when the
+		// body is old because its update failed, e.g. on Bitbucket Cloud or
+		// Gogs. Without a trailer (a commit made before HeraIon wrote one, or
+		// a person's commit) the body's marker counts.
+		if onBranch == "" {
+			onBranch = ChangeOf(open.Body)
+		}
+		if onBranch == change {
 			record(OutcomeUnchanged, open)
 			log.Info("open PR already has this change", "url", open.URL)
 			return nil, fmt.Sprintf("the open PR %s already has exactly this change; nothing was pushed", open.URL), true, nil
-		}
-		ours, err := r.HeadByHeraIon(ctx, branch)
-		if err != nil {
-			return nil, "", false, err
 		}
 		if !ours {
 			record(OutcomeSkipped, open)
@@ -298,11 +305,10 @@ func (tb *Toolbox) openPR(ctx context.Context, raw json.RawMessage) (string, err
 	title, body := red.Redact(a.Title), red.Redact(a.Body+tb.footer())
 	log := tb.Log.With("repo", a.Repo, "branch", branch, "mode", tb.Guard.Mode())
 
-	patch, err := tb.commit(r, branch, title+"\n\n"+body, log)
+	patch, change, err := tb.commit(r, branch, title+"\n\n"+body, log)
 	if err != nil {
 		return "", err
 	}
-	change := ChangeID(patch)
 	body += "\n\n" + changeMarker(change)
 	if tb.Guard.DryRun() {
 		if err := tb.Guard.ReservePR(); err != nil {
@@ -344,31 +350,31 @@ func (tb *Toolbox) checkChangedPaths(r *Repo) ([]string, error) {
 	return paths, nil
 }
 
-// commit commits the clone's changes to branch and returns the diff. It
-// refuses a diff that adds a credential, or in safe mode one that changes
-// more than versions and image digests (guardrails.CheckSafeDiff).
-func (tb *Toolbox) commit(r *Repo, branch, message string, log *slog.Logger) (*object.Patch, error) {
-	patch, err := r.Commit(branch, message)
+// commit commits the clone's changes to branch and returns the diff and its
+// change ID. It refuses a diff that adds a credential, or in safe mode one
+// that changes more than versions and image digests (guardrails.CheckSafeDiff).
+func (tb *Toolbox) commit(r *Repo, branch, message string, log *slog.Logger) (*object.Patch, string, error) {
+	patch, change, err := r.Commit(branch, message)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if patch == nil {
-		return nil, errors.New("no changes to commit: write files with repo_write_file first")
+		return nil, "", errors.New("no changes to commit: write files with repo_write_file first")
 	}
 	// File contents are pushed as written, so refuse a change that adds a
 	// credential, e.g. one the model copied from a tool result.
 	if leaks := tb.Guard.Redactor().FindSecretLines(patch); len(leaks) > 0 {
 		log.Warn("refusing PR with secret-like content", "lines", len(leaks))
-		return nil, fmt.Errorf("not opening a PR: the change adds %d line(s) that look like credentials, e.g. %q. %s",
+		return nil, "", fmt.Errorf("not opening a PR: the change adds %d line(s) that look like credentials, e.g. %q. %s",
 			len(leaks), textutil.Truncate(leaks[0], 200), discarded)
 	}
 	if tb.Guard.Mode() == config.ModeSafe {
 		if err := guardrails.CheckSafeDiff(patch); err != nil {
 			log.Info("refusing PR in safe mode", "reason", err)
-			return nil, fmt.Errorf("not opening a PR: %w. Leave this change out, or mention it in your summary. %s", err, discarded)
+			return nil, "", fmt.Errorf("not opening a PR: %w. Leave this change out, or mention it in your summary. %s", err, discarded)
 		}
 	}
-	return patch, nil
+	return patch, change, nil
 }
 
 // logDryRun logs the change instead of pushing it.

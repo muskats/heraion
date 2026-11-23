@@ -117,6 +117,9 @@ type FakePRs struct {
 	Comments []Comment
 	// CommentErr, when set, is returned by Comment.
 	CommentErr error
+	// UpdateErr, when set, is returned by Update, which then changes nothing,
+	// e.g. go-scm's ErrNotSupported on Gogs.
+	UpdateErr error
 }
 
 // Comment is one comment posted through FakePRs.
@@ -130,6 +133,9 @@ type Comment struct {
 func (f *FakePRs) Update(_ context.Context, repo string, number int, in scm.PRInput) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.UpdateErr != nil {
+		return f.UpdateErr
+	}
 	f.Updated = append(f.Updated, in)
 	for _, pr := range f.Open {
 		if pr.Number == number {

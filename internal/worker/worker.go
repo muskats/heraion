@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -215,7 +216,7 @@ func resolveScope(cfg *config.Config, pb *playbook.Playbook, log *slog.Logger) s
 func issueGuard(j *config.Jira, tools []llm.Tool, projects []string, playbookName, eventID string,
 	guard *guardrails.Guard, log *slog.Logger) ([]llm.Tool, *jira.Tool) {
 	var search, create llm.Tool
-	out := tools[:0:0]
+	var out []llm.Tool
 	for _, t := range tools {
 		server, name, _ := strings.Cut(t.Name(), ".")
 		switch {
@@ -338,6 +339,8 @@ var modePrompt = map[config.Mode]string{
 		"Put anything else in your summary or an issue instead.\n",
 }
 
+var closingEventTag = regexp.MustCompile(`(?i)</\s*event\s*>`)
+
 // userPrompt appends the event, which must already be redacted: cutting it
 // first could leave half a secret that redaction no longer recognises.
 func userPrompt(pb *playbook.Playbook, event string) string {
@@ -345,8 +348,9 @@ func userPrompt(pb *playbook.Playbook, event string) string {
 	if len(event) == 0 {
 		return p
 	}
-	// A payload must not end the tag itself and continue as instructions.
-	event = strings.ReplaceAll(event, "</event>", "<\\/event>")
+	// A payload must not end the tag itself and continue as instructions,
+	// e.g. with "</event>" or "</EVENT >".
+	event = closingEventTag.ReplaceAllString(event, "<\\/event>")
 	const maxEvent = 64 << 10
 	if len(event) > maxEvent {
 		event = textutil.Truncate(event, maxEvent) + "\n...[truncated]"

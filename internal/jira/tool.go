@@ -105,6 +105,11 @@ func (t *Tool) Call(ctx context.Context, raw json.RawMessage) (string, error) {
 		if !config.ValidLabel(l) {
 			return "", fmt.Errorf("label %q must not contain spaces", l)
 		}
+		// heraion-<hash> is another finding's fingerprint: an issue carrying
+		// it would be found as that finding's issue, which is then never created.
+		if strings.HasPrefix(strings.ToLower(l), "heraion-") {
+			return "", fmt.Errorf("label %q is not allowed: labels starting with heraion- are set by HeraIon", l)
+		}
 	}
 	// A webhook run is about one event, so the event is the finding. A
 	// scheduled run needs the model's key, in a shape that stays stable.

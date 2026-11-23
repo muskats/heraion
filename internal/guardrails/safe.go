@@ -29,7 +29,7 @@ var LockFiles = []string{
 
 // IgnoreFiles record scanner false positives, e.g. "CVE-2024-1234". One
 // entry can mute a whole package type, so safe mode refuses them and full
-// mode needs an explicit writePaths pattern (OptInPaths).
+// mode needs a writePaths pattern that names them (CheckWritePath).
 var IgnoreFiles = []string{
 	"**/.trivyignore", "**/.trivyignore.yaml", "**/.grype.yaml", "**/.snyk",
 	"**/osv-scanner.toml", "**/*.vex.json", "**/*.openvex.json",

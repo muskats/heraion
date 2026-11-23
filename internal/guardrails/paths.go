@@ -28,11 +28,6 @@ var DefaultDenyPaths = []string{
 	"**/.gemrc", "**/.bundle/config", "**/gradle.properties",
 }
 
-// OptInPaths are scanner ignore files: writing one can mute the scanner, so
-// a playbook must name it in writePaths, e.g. ".trivyignore" or
-// "**/.trivyignore". "**" or "deploy/**" never unlock them.
-var OptInPaths = IgnoreFiles
-
 // CheckWritePath fails unless the repo-relative path p may be written:
 // Options.AllowPaths (empty: everything) minus DefaultDenyPaths and
 // Options.DenyPaths. Patterns are slash-separated globs where "**" matches
@@ -50,7 +45,10 @@ func (g *Guard) CheckWritePath(p string) error {
 			return fmt.Errorf("writing %s is not allowed: this playbook denies %q", p, pat)
 		}
 	}
-	if matchAny(OptInPaths, p) {
+	// Scanner ignore files can mute the scanner, so a playbook must name
+	// them, e.g. ".trivyignore" or "**/.trivyignore"; "**" or "deploy/**"
+	// never unlock them.
+	if matchAny(IgnoreFiles, p) {
 		for _, pat := range g.o.AllowPaths {
 			if explicitFor(pat, p) {
 				return nil

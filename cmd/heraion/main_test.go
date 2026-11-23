@@ -259,3 +259,20 @@ func TestCheckJiraToolSchemas(t *testing.T) {
 		t.Fatalf("drift not reported: %s", out.String())
 	}
 }
+
+// An event file is read whole up to the Secret limit, a larger one fails.
+func TestReadEvent(t *testing.T) {
+	dir := t.TempDir()
+	small, large := filepath.Join(dir, "small"), filepath.Join(dir, "large")
+	_ = os.WriteFile(small, []byte(`{"a":1}`), 0o600)
+	_ = os.WriteFile(large, []byte(strings.Repeat("x", maxEventBytes+1)), 0o600)
+	if b, err := readEvent(small); err != nil || string(b) != `{"a":1}` {
+		t.Errorf("small: %q %v", b, err)
+	}
+	if _, err := readEvent(large); err == nil {
+		t.Error("an event over the limit must fail")
+	}
+	if b, err := readEvent(""); err != nil || b != nil {
+		t.Errorf("no event: %q %v", b, err)
+	}
+}

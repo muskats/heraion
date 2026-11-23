@@ -182,6 +182,14 @@ func (d *Dispatcher) Dispatch(ctx context.Context, playbook, hook string, identi
 			}
 			return job.Name, false, ErrRetryLater
 		}
+		// A gateway that stopped between the Job and its Secret left the
+		// pod waiting for the volume; the redelivery creates it. An
+		// existing Secret is the normal case and fine.
+		if len(event) > 0 {
+			if err := d.createEventSecret(ctx, old, event); err != nil {
+				return "", false, err
+			}
+		}
 		return job.Name, false, nil
 	} else if !apierrors.IsNotFound(err) {
 		return "", false, fmt.Errorf("get job: %w", err)

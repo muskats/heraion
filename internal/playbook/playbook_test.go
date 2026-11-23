@@ -190,9 +190,16 @@ func TestFullModeNeedsWritePaths(t *testing.T) {
 }
 
 func TestCatchAllWritePathsRefused(t *testing.T) {
-	for _, pat := range []string{"**", "**/*", "*", "/**", "./**", " ** "} {
+	for _, pat := range []string{"**", "**/*", "*", "/**", "./**", " ** ", "**/**", "**/*.*", "{**,x}", "*/**"} {
 		y := "name: fix\ntrigger: {manual: true}\ntools: [x]\nprompt: p\nguardrails: {writePaths: [Dockerfile, '" + pat + "']}\n"
 		if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "must name what the playbook may change") {
+			t.Errorf("%q: %v", pat, err)
+		}
+	}
+	// Patterns that name files or a directory stay allowed.
+	for _, pat := range []string{"Dockerfile", "deploy/**", "**/values*.yaml", "**/*.Dockerfile", "**/Chart.yaml", "*.yaml"} {
+		y := "name: fix\ntrigger: {manual: true}\ntools: [x]\nprompt: p\nguardrails: {writePaths: ['" + pat + "']}\n"
+		if _, err := Parse([]byte(y)); err != nil {
 			t.Errorf("%q: %v", pat, err)
 		}
 	}

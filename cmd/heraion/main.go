@@ -147,15 +147,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	if !ok {
 		return fmt.Errorf("playbook %q not found in %s", *name, cfg.PlaybooksDir)
 	}
-	var event []byte
-	switch *eventPath {
-	case "":
-		// No event, e.g. a scheduled run.
-	case "-":
-		event, err = io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
-	default:
-		event, err = os.ReadFile(*eventPath)
-	}
+	event, err := readEvent(*eventPath)
 	if err != nil {
 		return fmt.Errorf("read event: %w", err)
 	}
@@ -176,6 +168,37 @@ func cmdRun(ctx context.Context, args []string) error {
 	}
 	log.Info("run finished", attrs...)
 	return err
+}
+
+// maxEventBytes caps the event read by `heraion run`: the gateway stores a
+// payload in a Secret, which holds at most 1 MiB.
+const maxEventBytes = 1 << 20
+
+// readEvent reads the trigger payload from path, "-" for stdin, or returns
+// nil for "" (e.g. a scheduled run). A larger payload is an error.
+func readEvent(path string) ([]byte, error) {
+	var r io.Reader
+	switch path {
+	case "":
+		return nil, nil
+	case "-":
+		r = os.Stdin
+	default:
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		r = f
+	}
+	b, err := io.ReadAll(io.LimitReader(r, maxEventBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxEventBytes {
+		return nil, fmt.Errorf("event is larger than %d bytes", maxEventBytes)
+	}
+	return b, nil
 }
 
 // newLogger returns a JSON logger that masks secrets in every value, e.g.

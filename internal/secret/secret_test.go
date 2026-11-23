@@ -71,6 +71,11 @@ func TestMissing(t *testing.T) {
 	if nilSrc.Set() || nilSrc.String() != "" {
 		t.Fatal("nil source must be empty")
 	}
+	// Whitespace alone is no value, for Set as for Value.
+	blank := FromMap("X", map[string]string{"X_FILE": " ", "X": " \n", "X_FALLBACK": "\t"})
+	if _, err := blank.Value(); blank.Set() || !errors.Is(err, ErrMissing) {
+		t.Fatalf("blank source: Set=%v err=%v", blank.Set(), err)
+	}
 }
 
 func TestFileRotation(t *testing.T) {
