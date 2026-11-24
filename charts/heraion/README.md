@@ -716,6 +716,13 @@ helm upgrade heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f my-value
 - Breaking changes are listed in the release notes of each chart version. From 2.x to 3.0.0:
   [docs/upgrading-3.md](../../docs/upgrading-3.md), one row per change with what to do.
 
+Behavior changes in 3.1.0 (no values need to change):
+
+| 3.0.1 | 3.1.0 |
+|---|---|
+| `helm test` (`heraion check --connect`) checks the MCP servers and the LLM | It also lists the refs of each repo in `repos`, and outside dry-run finds it through the Git API; an unreachable repo fails it |
+| The admission policy does not check `hostAliases` or DNS settings | Gateway Jobs may only carry the `hostAliases`, `dnsPolicy` and `dnsConfig` nameservers and searches the chart renders |
+
 Behavior changes in 3.0.1 (only the first two rows can need a values change):
 
 | 3.0.0 | 3.0.1 |

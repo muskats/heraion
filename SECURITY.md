@@ -7,7 +7,8 @@ so reports about how that can be abused are welcome.
 
 | Version | Security fixes |
 |---|---|
-| 3.0.x | Yes |
+| 3.1.x | Yes |
+| 3.0.x | No: upgrade to 3.1.x, no values need to change |
 | 2.1.x | Until 2027-05-31 |
 | 2.0.x and older | No |
 
