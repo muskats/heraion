@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -555,5 +557,53 @@ func TestPushOnlyHeraionBranches(t *testing.T) {
 	}
 	if got, _ := scmtest.RemoteBranchFile(t, base, repo, "main", "Dockerfile"); got != "FROM alpine:3.18\n" {
 		t.Errorf("main must be unchanged: %q", got)
+	}
+}
+
+func TestProbe(t *testing.T) {
+	base := t.TempDir()
+	url := scmtest.NewRemote(t, base, repo, map[string]string{"a": "b"})
+	ws := scm.NewWorkspaces(config.Git{CloneBaseURL: url}, t.TempDir(), nil)
+	t.Cleanup(ws.Close)
+	u, err := ws.Probe(context.Background(), repo)
+	if err != nil || u != url+"/"+repo+".git" {
+		t.Fatalf("probe: %q %v", u, err)
+	}
+	if _, err := ws.Probe(context.Background(), "acme/missing"); err == nil || !strings.Contains(err.Error(), "list refs") {
+		t.Fatalf("a missing repo must fail, got %v", err)
+	}
+	// Probe clones nothing.
+	if entries, _ := os.ReadDir(base); len(entries) != 1 {
+		t.Fatalf("probe changed %s: %v", base, entries)
+	}
+}
+
+func TestCheckAPI(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.Header.Get("Authorization"), " tok") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v1/version": // the Gitea driver asks once, on creation
+			fmt.Fprint(w, `{"version":"1.22.0"}`)
+		case "/api/v1/repos/acme/app":
+			fmt.Fprint(w, `{"id":1,"full_name":"acme/app","name":"app","owner":{"login":"acme"}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	tok := secret.FromMap("HERAION_GIT_TOKEN", map[string]string{"HERAION_GIT_TOKEN": "tok"})
+	g := config.Git{Provider: "gitea", Endpoint: srv.URL, Token: tok}
+	if err := scm.CheckAPI(context.Background(), g, repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := scm.CheckAPI(context.Background(), g, "acme/missing"); err == nil {
+		t.Fatal("a missing repo must fail")
+	}
+	g.Token = secret.FromMap("HERAION_GIT_TOKEN", map[string]string{"HERAION_GIT_TOKEN": "wrong"})
+	if err := scm.CheckAPI(context.Background(), g, repo); err == nil {
+		t.Fatal("a wrong token must fail")
 	}
 }

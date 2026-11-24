@@ -361,6 +361,27 @@ securityContext:
 
 {{/* ---------- worker ---------- */}}
 
+{{- define "heraion.caBundleName" -}}
+{{- $ca := .Values.worker.caBundle -}}
+{{- if and $ca.pem $ca.configMap }}{{ fail "worker.caBundle: set pem or configMap, not both" }}{{ end -}}
+{{- if $ca.pem }}{{ include "heraion.fullname" . }}-ca{{ else }}{{ $ca.configMap }}{{ end -}}
+{{- end }}
+
+{{/* Proxy and CA env of the worker, e.g. HTTPS_PROXY and SSL_CERT_DIR. */}}
+{{- define "heraion.networkEnv" -}}
+{{- $w := .Values.worker -}}
+{{- with $w.proxy.url }}
+- { name: HTTP_PROXY, value: {{ . | quote }} }
+- { name: HTTPS_PROXY, value: {{ . | quote }} }
+- name: NO_PROXY
+  value: {{ concat (list "localhost" "127.0.0.1" "::1" ".svc" ".cluster.local") ($w.proxy.noProxy | default list) | uniq | join "," | quote }}
+{{- end }}
+{{- if include "heraion.caBundleName" . }}
+# Go loads the system CAs and every file in this directory.
+- { name: SSL_CERT_DIR, value: /etc/heraion/ca }
+{{- end }}
+{{- end }}
+
 {{/* Worker pod spec. dict "root" $ "args" (list "run" "--playbook" "x") */}}
 {{- define "heraion.workerPodSpec" -}}
 {{- $root := .root -}}
@@ -369,6 +390,17 @@ securityContext:
 restartPolicy: Never
 serviceAccountName: {{ include "heraion.workerSA" $root }}
 automountServiceAccountToken: {{ $w.automountServiceAccountToken }}
+{{- with $w.hostAliases }}
+hostAliases:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with $w.dnsPolicy }}
+dnsPolicy: {{ . }}
+{{- end }}
+{{- with $w.dnsConfig }}
+dnsConfig:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
 {{- include "heraion.podScheduling" (dict "root" $root "role" $w "component" "worker") }}
 {{- $sidecars := include "heraion.mcpSidecars" $root }}
 {{- if or $sidecars $w.initContainers }}
@@ -389,6 +421,7 @@ containers:
       - name: HERAION_CONFIG
         value: /etc/heraion/conf/config.yaml
       {{- include "heraion.credEnv" (dict "root" $root "items" $creds.items) | nindent 6 }}
+      {{- include "heraion.networkEnv" $root | nindent 6 }}
       {{- with $w.extraEnv }}
       {{- toYaml . | nindent 6 }}
       {{- end }}
@@ -406,6 +439,9 @@ containers:
       - { name: workspace, mountPath: /workspace }
       - { name: tmp, mountPath: /tmp }
       {{- include "heraion.credMounts" (dict "root" $root "items" $creds.items) | nindent 6 }}
+      {{- if include "heraion.caBundleName" $root }}
+      - { name: ca-bundle, mountPath: /etc/heraion/ca, readOnly: true }
+      {{- end }}
       {{- with $w.extraVolumeMounts }}
       {{- toYaml . | nindent 6 }}
       {{- end }}
@@ -423,6 +459,10 @@ volumes:
     emptyDir: { sizeLimit: 256Mi }
   {{- include "heraion.credVolumes" (dict "root" $root "items" $creds.items) | nindent 2 }}
   {{- include "heraion.mcpVolumes" $root | nindent 2 }}
+  {{- with include "heraion.caBundleName" $root }}
+  - name: ca-bundle
+    configMap: { name: {{ . }}, items: [{ key: {{ $w.caBundle.key }}, path: ca.crt }] }
+  {{- end }}
   {{- with $w.extraVolumes }}
   {{- toYaml . | nindent 2 }}
   {{- end }}

@@ -21,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/storage/memory"
 
 	"github.com/muskats/heraion/internal/config"
 )
@@ -64,6 +65,37 @@ func (w *Workspaces) CloneURL(repo string) string {
 	return w.git.CloneBaseURL + "/" + repo + ".git"
 }
 
+// cloneURL returns resolve's URL when set, otherwise CloneURL.
+func (w *Workspaces) cloneURL(ctx context.Context, repo string) (string, error) {
+	if w.resolve == nil {
+		return w.CloneURL(repo), nil
+	}
+	u, err := w.resolve(ctx, repo)
+	if err != nil {
+		return "", fmt.Errorf("look up clone URL: %w", err)
+	}
+	return u, nil
+}
+
+// Probe lists repo's refs like `git ls-remote`, without cloning, and
+// returns the clone URL. heraion check --connect uses it to show that the
+// Git server is reachable with the token, e.g. through a VPN or proxy.
+func (w *Workspaces) Probe(ctx context.Context, repo string) (string, error) {
+	u, err := w.cloneURL(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+	auth, err := w.auth()
+	if err != nil {
+		return u, err
+	}
+	rem := git.NewRemote(memory.NewStorage(), &gitcfg.RemoteConfig{Name: "origin", URLs: []string{u}})
+	if _, err := rem.ListContext(ctx, &git.ListOptions{Auth: auth}); err != nil {
+		return u, fmt.Errorf("list refs: %w", err)
+	}
+	return u, nil
+}
+
 // Get returns the clone of repo, e.g. "acme/web", cloning it on first use.
 // The caller checks the allowlist.
 func (w *Workspaces) Get(ctx context.Context, repo string) (*Repo, error) {
@@ -77,13 +109,9 @@ func (w *Workspaces) Get(ctx context.Context, repo string) (*Repo, error) {
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, err
 	}
-	cloneURL := w.CloneURL(repo)
-	if w.resolve != nil {
-		u, err := w.resolve(ctx, repo)
-		if err != nil {
-			return nil, fmt.Errorf("clone %s: look up clone URL: %w", repo, err)
-		}
-		cloneURL = u
+	cloneURL, err := w.cloneURL(ctx, repo)
+	if err != nil {
+		return nil, fmt.Errorf("clone %s: %w", repo, err)
 	}
 	auth, err := w.auth()
 	if err != nil {

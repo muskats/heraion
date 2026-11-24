@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/mcp"
 	"github.com/muskats/heraion/internal/playbook"
+	"github.com/muskats/heraion/internal/scm"
 	"github.com/muskats/heraion/internal/secret"
 )
 
@@ -32,11 +35,12 @@ import (
 //	ok    mcp        k8s: 18 tools
 //	ok    llm        GET https://api.openai.com/v1/models: 200
 //	ok    jira       create_issue through atlassian, in [OPS]
+//	ok    git        acme/web: API github, clone https://github.com/acme/web.git
 func cmdCheck(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	cfgPath := configFlag(fs)
 	role := fs.String("role", "worker", "worker or gateway: which secrets must be present")
-	connect := fs.Bool("connect", false, "also connect to the MCP servers and the LLM endpoint")
+	connect := fs.Bool("connect", false, "also connect to the MCP servers, the LLM endpoint and each repo")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -75,7 +79,7 @@ func cmdCheck(ctx context.Context, args []string) error {
 			}
 		}
 		if *connect {
-			c.warn("connect", "--connect checks the worker's MCP servers and LLM; use it without --role gateway")
+			c.warn("connect", "--connect checks the worker's MCP servers, LLM and repos; use it without --role gateway")
 		}
 	default:
 		c.secret(cfg.LLM.APIKey, false, "llm")
@@ -113,8 +117,60 @@ func cmdCheck(ctx context.Context, args []string) error {
 			c.fail("jira", "create_issue needs mcp server "+cfg.Jira.Server+", which could not be reached")
 		}
 		c.llm(ctx, cfg)
+		c.git(ctx, cfg)
 	}
 	return c.result()
+}
+
+// git reaches each repo the way a run does, without cloning: the API when a
+// run uses it (PRs, or clone URLs looked up through it), then the clone URL.
+func (c *checker) git(ctx context.Context, cfg *config.Config) {
+	if len(cfg.Repos) == 0 {
+		c.warn("git", "no repos configured")
+		return
+	}
+	var resolve scm.CloneURLFunc
+	if cfg.Git.ResolvesCloneURL() {
+		var err error
+		if resolve, err = scm.NewCloneURLResolver(cfg.Git); err != nil {
+			c.fail("git", err.Error())
+			return
+		}
+	}
+	ws := scm.NewWorkspaces(cfg.Git, "", resolve)
+	defer ws.Close()
+	api := cmp.Or(cfg.Git.Endpoint, cfg.Git.Provider)
+	for _, repo := range cfg.Repos {
+		via := ""
+		switch {
+		case resolve != nil:
+			via = "API " + api + " (clone URL), "
+		case !cfg.DryRun:
+			if err := scm.CheckAPI(ctx, cfg.Git, repo); err != nil {
+				c.fail("git", fmt.Sprintf("%s: API %s: %v", repo, api, err))
+				continue
+			}
+			via = "API " + api + ", "
+		}
+		u, err := ws.Probe(ctx, repo)
+		if err != nil {
+			where := repo
+			if u != "" {
+				where += ": " + redactURL(u)
+			}
+			c.fail("git", fmt.Sprintf("%s: %v", where, err))
+			continue
+		}
+		c.ok("git", fmt.Sprintf("%s: %sclone %s", repo, via, redactURL(u)))
+	}
+}
+
+// redactURL hides a password in a URL, e.g. https://u:xxxxx@git.example.com/a.git.
+func redactURL(s string) string {
+	if u, err := url.Parse(s); err == nil {
+		return u.Redacted()
+	}
+	return s
 }
 
 type checker struct {

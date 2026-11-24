@@ -93,6 +93,19 @@ func NewCloneURLResolver(g config.Git) (CloneURLFunc, error) {
 	}, nil
 }
 
+// CheckAPI asks the Git API for repo, e.g. GET /repos/acme/web on GitHub,
+// to check the endpoint, the token and its access to repo. It only reads.
+func CheckAPI(ctx context.Context, g config.Git, repo string) error {
+	c, err := newGoSCMClient(g)
+	if err != nil {
+		return err
+	}
+	if _, _, err := c.Repositories.Find(ctx, repo); err != nil {
+		return fmt.Errorf("find %s: %w", repo, err)
+	}
+	return nil
+}
+
 type tokenSource struct{ src *secret.Source }
 
 func (t tokenSource) Token(context.Context) (*goscm.Token, error) {

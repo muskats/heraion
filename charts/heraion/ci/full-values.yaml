@@ -77,6 +77,15 @@ mcpServers:
       env: [{ name: LOG_LEVEL, value: info }]
       secretEnv:
         API_TOKEN: { value: custom-token-value }
+worker:
+  caBundle:
+    pem: |
+      -----BEGIN CERTIFICATE-----
+      MIIBexample
+      -----END CERTIFICATE-----
+  proxy: { url: "http://127.0.0.1:1055", noProxy: [litellm.example] }
+  hostAliases: [{ ip: 10.96.12.34, hostnames: [git.example.internal] }]
+  dnsConfig: { searches: [example.internal] }
 resourceQuota: { enabled: true }
 secrets:
   existingSecret: heraion-shared
