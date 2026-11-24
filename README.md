@@ -25,6 +25,7 @@ one.
 | [charts/heraion/README.md](charts/heraion/README.md) | Helm install, secrets, every chart value, testing, upgrading |
 | [Monitoring](#monitoring) | Prometheus metrics of the gateway, Loki queries for worker runs |
 | [docs/integrations.md](docs/integrations.md) | Kubernetes, Grafana, Datadog, Jira, Confluence and custom MCP servers; webhook senders; LLM providers |
+| [docs/private-networks.md](docs/private-networks.md) | Git servers behind a VPN, a proxy or Tailscale; private CAs |
 | [examples/](examples/) | Runtime config, playbooks, Helm values |
 | [docs/upgrading-3.md](docs/upgrading-3.md) | Every breaking change from 2.x to 3.0.0, with what to do |
 | [SECURITY.md](SECURITY.md) | Supported versions and how to report a vulnerability privately |
@@ -42,7 +43,7 @@ export HERAION_GIT_TOKEN=...
 |---|---|
 | `heraion run --playbook NAME [--dry-run] [--event FILE]` | Runs one playbook, then exits (what a worker Job runs) |
 | `heraion serve` | Webhook gateway: creates a worker Job per request |
-| `heraion check [--role gateway] [--connect]` | Checks config, playbooks and where each secret comes from; with `--connect` also the MCP servers and the LLM |
+| `heraion check [--role gateway] [--connect]` | Checks config, playbooks and where each secret comes from; with `--connect` also the MCP servers, the LLM and each repo |
 | `heraion version` | Prints the version |
 
 With `--dry-run` the agent clones the repos and edits files, but each PR is only logged with

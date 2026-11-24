@@ -77,3 +77,15 @@ tests:
     set: { mcpServers.k8s.enabled: true, mcpServers.k8s.deploy.replicas: 2 }
     asserts:
       - failedTemplate: {}
+  - it: caBundle with both pem and configMap
+    set: { worker.caBundle: { pem: "-----BEGIN CERTIFICATE-----", configMap: corp-ca } }
+    asserts:
+      - failedTemplate: { errorPattern: "set pem or configMap, not both" }
+  - it: proxy url without a scheme
+    set: { worker.proxy.url: "proxy.corp:3128" }
+    asserts:
+      - failedTemplate: {}
+  - it: hostAlias without hostnames
+    set: { worker.hostAliases: [{ ip: 10.0.0.1 }] }
+    asserts:
+      - failedTemplate: {}

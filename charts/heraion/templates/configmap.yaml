@@ -15,3 +15,14 @@ data:
   {{ $n }}.yaml: |
     {{- toYaml $p | nindent 4 }}
   {{- end }}
+{{- with .Values.worker.caBundle.pem }}
+---
+# CAs the worker trusts besides the system CAs (worker.caBundle.pem).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  {{- include "heraion.metadata" (dict "root" $ "component" "worker" "name" (include "heraion.caBundleName" $)) | nindent 2 }}
+data:
+  {{ $.Values.worker.caBundle.key }}: |
+    {{- . | nindent 4 }}
+{{- end }}

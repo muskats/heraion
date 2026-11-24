@@ -215,6 +215,20 @@ worker:
   affinity: {}
   topologySpreadConstraints: []
   priorityClassName: ""
+  # Private networks (VPN, proxy, Tailscale): see docs/private-networks.md.
+  # These apply to worker pods and the helm test pod, never the gateway.
+  # Extra CAs in PEM, trusted besides the system CAs, e.g. the CA of git.corp.example.
+  caBundle:
+    pem: ""            # stored in the ConfigMap <release>-heraion-ca
+    configMap: ""      # or an existing ConfigMap, e.g. one from trust-manager
+    key: ca.crt
+  # Proxy for the worker's outbound HTTP: Git, LLM and MCP URLs. 127.0.0.1 is never proxied.
+  proxy:
+    url: ""            # e.g. http://127.0.0.1:1055 (Tailscale sidecar) or http://proxy.corp:3128
+    noProxy: []        # besides localhost, 127.0.0.1, ::1, .svc, .cluster.local, e.g. [vllm, 10.0.0.0/8]
+  hostAliases: []      # e.g. [{ ip: 10.96.12.34, hostnames: [git.corp.example] }]
+  dnsPolicy: ""        # e.g. None, with dnsConfig.nameservers
+  dnsConfig: {}        # e.g. { searches: [corp.example] }
 
 # Gateway: receives webhooks. Only rendered when a webhook playbook is enabled.
 gateway:

@@ -32,6 +32,13 @@ so the policy follows the values.
 {{- else }}{{ $volumes = append $volumes (printf "(v.name == %s && !has(v.hostPath))" $n) }}
 {{- end }}
 {{- end }}
+{{- /* hostAliases by IP and the DNS settings, so a Job cannot point the Git
+       server's name at another address. */}}
+{{- $aliases := dict }}
+{{- range ($pod.hostAliases | default list) }}
+{{- $_ := set $aliases .ip (concat (get $aliases .ip | default list) .hostnames | uniq) }}
+{{- end }}
+{{- $dns := $pod.dnsConfig | default dict }}
 {{- $container := `c.name in variables.images && c.image == variables.images[c.name] && (has(c.command) ? c.command.join('\x1f') : '') == variables.commands[c.name] && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name in variables.secrets)) && (!has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef) || f.secretRef.name in variables.secrets)) && (!has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)` }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -55,6 +62,12 @@ spec:
       expression: {{ toJson $commands | toJson }}
     - name: secrets
       expression: {{ toJson (uniq $secrets) | toJson }}
+    - name: hostAliases
+      expression: {{ toJson $aliases | toJson }}
+    - name: nameservers
+      expression: {{ toJson ($dns.nameservers | default list) | toJson }}
+    - name: searches
+      expression: {{ toJson ($dns.searches | default list) | toJson }}
   validations:
     - expression: "has(object.metadata.labels) && 'heraion.io/playbook' in object.metadata.labels"
       message: worker Jobs carry the heraion.io/playbook label
@@ -66,6 +79,12 @@ spec:
       message: no ephemeral containers
     - expression: {{ printf "!has(variables.pod.volumes) || variables.pod.volumes.all(v, %s)" (join " || " $volumes) | toJson }}
       message: every volume must be one the chart renders, with its source; heraion-event must be the Job's own event Secret
+    - expression: "!has(variables.pod.hostAliases) || variables.pod.hostAliases.all(h, h.ip in variables.hostAliases && (!has(h.hostnames) || h.hostnames.all(n, n in variables.hostAliases[h.ip])))"
+      message: every hostAlias must be one the chart renders (worker.hostAliases)
+    - expression: {{ printf "(has(variables.pod.dnsPolicy) ? variables.pod.dnsPolicy : 'ClusterFirst') == %s" (toJson ($pod.dnsPolicy | default "ClusterFirst")) | toJson }}
+      message: dnsPolicy must be the chart's (worker.dnsPolicy)
+    - expression: "!has(variables.pod.dnsConfig) || ((!has(variables.pod.dnsConfig.nameservers) || variables.pod.dnsConfig.nameservers.all(n, n in variables.nameservers)) && (!has(variables.pod.dnsConfig.searches) || variables.pod.dnsConfig.searches.all(s, s in variables.searches)))"
+      message: dnsConfig nameservers and searches must be the chart's (worker.dnsConfig)
     - expression: "!(has(variables.pod.hostNetwork) && variables.pod.hostNetwork) && !(has(variables.pod.hostPID) && variables.pod.hostPID) && !(has(variables.pod.hostIPC) && variables.pod.hostIPC)"
       message: no host network, PID or IPC namespace
 ---

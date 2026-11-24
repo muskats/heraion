@@ -26,3 +26,43 @@ tests:
       playbooks.trivy-remediate.enabled: false
     asserts:
       - hasDocuments: { count: 1 }   # only the ServiceAccount
+  - it: renders proxy, CA bundle, hostAliases and DNS settings
+    documentSelector: { path: "kind", value: CronJob }
+    set:
+      worker:
+        caBundle: { configMap: corp-ca, key: root.pem }
+        proxy: { url: "http://127.0.0.1:1055", noProxy: [vllm] }
+        hostAliases: [{ ip: 10.96.12.34, hostnames: [git.corp.example] }]
+        dnsConfig: { searches: [corp.example] }
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: { name: HTTPS_PROXY, value: "http://127.0.0.1:1055" }
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: { name: NO_PROXY, value: "localhost,127.0.0.1,::1,.svc,.cluster.local,vllm" }
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content: { name: SSL_CERT_DIR, value: /etc/heraion/ca }
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].volumeMounts
+          content: { name: ca-bundle, mountPath: /etc/heraion/ca, readOnly: true }
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.volumes
+          content: { name: ca-bundle, configMap: { name: corp-ca, items: [{ key: root.pem, path: ca.crt }] } }
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.hostAliases
+          value: [{ ip: 10.96.12.34, hostnames: [git.corp.example] }]
+      - equal: { path: spec.jobTemplate.spec.template.spec.dnsConfig.searches, value: [corp.example] }
+  - it: sets no proxy or CA env by default
+    documentSelector: { path: "kind", value: CronJob }
+    asserts:
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          any: true
+          content: { name: HTTPS_PROXY }
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          any: true
+          content: { name: SSL_CERT_DIR }
+      - notExists: { path: spec.jobTemplate.spec.template.spec.hostAliases }

@@ -15,6 +15,7 @@ import (
 	"github.com/muskats/heraion/internal/guardrails"
 	"github.com/muskats/heraion/internal/llm"
 	"github.com/muskats/heraion/internal/llm/llmtest"
+	"github.com/muskats/heraion/internal/scm/scmtest"
 )
 
 // capture swaps stdout and stderr for buffers until the test ends.
@@ -274,5 +275,36 @@ func TestReadEvent(t *testing.T) {
 	}
 	if b, err := readEvent(""); err != nil || b != nil {
 		t.Errorf("no event: %q %v", b, err)
+	}
+}
+
+func TestCheckConnectsToRepos(t *testing.T) {
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(llmSrv.Close)
+	base := t.TempDir()
+	remote := scmtest.NewRemote(t, base, "acme/web", map[string]string{"a": "b"})
+	extra := "dryRun: true\nmode: safe\ngit: {cloneBaseURL: \"" + remote + "\"}\nrepos: [acme/web]\n"
+
+	out, _ := capture(t)
+	if err := cmdCheck(context.Background(), []string{"--config", setup(t, llmSrv.URL, extra), "--connect"}); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if want := "ok    git        acme/web: clone " + remote + "/acme/web.git"; !strings.Contains(out.String(), want) {
+		t.Errorf("no %q:\n%s", want, out)
+	}
+
+	out.Reset()
+	extra = strings.Replace(extra, "[acme/web]", "[acme/web, acme/missing]", 1)
+	if err := cmdCheck(context.Background(), []string{"--config", setup(t, llmSrv.URL, extra), "--connect"}); err == nil {
+		t.Fatalf("an unreachable repo must fail the check:\n%s", out)
+	}
+	if !strings.Contains(out.String(), "FAIL  git        acme/missing: ") {
+		t.Errorf("no FAIL line for acme/missing:\n%s", out)
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	if got := redactURL("https://u:secret@git.example.com/a.git"); strings.Contains(got, "secret") {
+		t.Errorf("password shown: %s", got)
 	}
 }

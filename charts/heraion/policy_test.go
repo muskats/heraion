@@ -100,7 +100,9 @@ func TestAdmissionPolicies(t *testing.T) {
 		"--set", "repos={acme/web}", "--set", "secrets.existingSecret=heraion",
 		"--set", "mcpServers.k8s.enabled=true", "--set", "mcpServers.atlassian.enabled=true",
 		"--set", "playbooks.alertmanager-triage.enabled=true",
-		"--set", "gateway.hooks.alertmanager.auth=token", "--set", "gateway.hooks.alertmanager.secret.existingSecret=am")
+		"--set", "gateway.hooks.alertmanager.auth=token", "--set", "gateway.hooks.alertmanager.secret.existingSecret=am",
+		"--set", "worker.hostAliases[0].ip=10.96.0.5", "--set", "worker.hostAliases[0].hostnames={git.corp.example}",
+		"--set", "worker.dnsConfig.searches={corp.example}", "--set", "worker.caBundle.configMap=corp-ca")
 	pol := func(name string) *policy {
 		o := find(objs, "ValidatingAdmissionPolicy", name)
 		if o == nil {
@@ -145,6 +147,9 @@ func TestAdmissionPolicies(t *testing.T) {
 	}
 
 	podSpec := func(m map[string]any) map[string]any { return get(m, "spec", "template", "spec") }
+	if podSpec(toMap(t, job))["hostAliases"] == nil {
+		t.Fatal("the gateway's Job has no hostAliases, so the policy's hostAliases check is not exercised")
+	}
 	containers := func(m map[string]any) []any { return podSpec(m)["containers"].([]any) }
 	for _, tc := range []struct {
 		name   string
@@ -157,7 +162,7 @@ func TestAdmissionPolicies(t *testing.T) {
 			podSpec(m)["initContainers"].([]any)[0].(map[string]any)["command"] = []any{"python", "-c", "steal()"}
 		}},
 		{"extra container", func(m map[string]any) {
-			podSpec(m)["containers"] = append(containers(m), map[string]any{"name": "x", "image": "docker.io/muskats/heraion:3.0.1"})
+			podSpec(m)["containers"] = append(containers(m), map[string]any{"name": "x", "image": "docker.io/muskats/heraion:3.1.0"})
 		}},
 		{"other Secret in env", func(m map[string]any) {
 			c := containers(m)[0].(map[string]any)
@@ -185,6 +190,23 @@ func TestAdmissionPolicies(t *testing.T) {
 			containers(m)[0].(map[string]any)["securityContext"].(map[string]any)["privileged"] = true
 		}},
 		{"hostNetwork", func(m map[string]any) { podSpec(m)["hostNetwork"] = true }},
+		{"other hostAlias IP", func(m map[string]any) {
+			podSpec(m)["hostAliases"] = []any{map[string]any{"ip": "203.0.113.9", "hostnames": []any{"git.corp.example"}}}
+		}},
+		{"extra hostAlias name", func(m map[string]any) {
+			podSpec(m)["hostAliases"].([]any)[0].(map[string]any)["hostnames"] = []any{"git.corp.example", "api.openai.com"}
+		}},
+		{"other dnsPolicy", func(m map[string]any) { podSpec(m)["dnsPolicy"] = "None" }},
+		{"other nameserver", func(m map[string]any) {
+			podSpec(m)["dnsConfig"] = map[string]any{"nameservers": []any{"203.0.113.53"}}
+		}},
+		{"other CA ConfigMap", func(m map[string]any) {
+			for _, v := range podSpec(m)["volumes"].([]any) {
+				if v := v.(map[string]any); v["name"] == "ca-bundle" {
+					v["configMap"] = map[string]any{"name": "evil-ca"}
+				}
+			}
+		}},
 	} {
 		m := toMap(t, job)
 		tc.mutate(m)

@@ -457,7 +457,7 @@ gateway ServiceAccount, using the worker pod spec the chart renders:
 
 | Object | Admitted only when |
 |---|---|
-| Job | Label `heraion.io/playbook`; the worker ServiceAccount; every container one the chart renders, with its image and command; Secrets in `env` only those the chart uses; every volume one the chart renders, with its source; `heraion-event` is `<job>-event`; no privileged container, host network, PID or IPC, ephemeral container |
+| Job | Label `heraion.io/playbook`; the worker ServiceAccount; every container one the chart renders, with its image and command; Secrets in `env` only those the chart uses; every volume one the chart renders, with its source; `heraion-event` is `<job>-event`; `hostAliases`, `dnsPolicy` and `dnsConfig` nameservers and searches only the chart's; no privileged container, host network, PID or IPC, ephemeral container |
 | Secret | Named `<job>-event`, label `heraion.io/playbook`, immutable, `Opaque`, one key `payload`, owned by that Job |
 
 Installing the policies needs permission to create cluster-scoped admission objects. Install
@@ -593,6 +593,10 @@ rejected by [values.schema.json](values.schema.json).
 | `worker.resources` | 100m / 128Mi requests, 1Gi limit | |
 | `worker.extraEnv`, `extraEnvFrom`, `extraVolumes`, `extraVolumeMounts`, `extraContainers`, `initContainers` | `[]` | e.g. `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | `worker.podAnnotations`, `podLabels` and the scheduling keys | empty | |
+| `worker.caBundle.pem`, `.configMap`, `.key` | `""`, `""`, `ca.crt` | Extra CAs besides the system CAs, e.g. an internal CA; see [private networks](../../docs/private-networks.md) |
+| `worker.proxy.url` | `""` | `HTTP_PROXY` and `HTTPS_PROXY` of the worker, e.g. `http://127.0.0.1:1055` |
+| `worker.proxy.noProxy` | `[]` | Added to `localhost,127.0.0.1,::1,.svc,.cluster.local`, e.g. `[vllm]` |
+| `worker.hostAliases`, `dnsPolicy`, `dnsConfig` | `[]`, `""`, `{}` | e.g. `git.corp.example` -> the ClusterIP of a Tailscale egress Service |
 
 ### Gateway
 
@@ -674,11 +678,13 @@ ok    mcp        k8s: 18 tools
 ok    llm        GET https://api.openai.com/v1/models: 200
 ok    mcp        atlassian: 5 tools
 ok    jira       create_issue through atlassian, in [OPS]
+ok    git        acme/web: API github, clone https://github.com/acme/web.git
 ```
 
 The check fails on a missing or unreadable required secret, a required MCP server that is
-down, a 401 or 403 from the LLM endpoint, or a `jira.server` that lacks the tools and
-arguments `create_issue` calls.
+down, a 401 or 403 from the LLM endpoint, a `jira.server` that lacks the tools and
+arguments `create_issue` calls, or a repo that cannot be reached. Each repo is read like
+`git ls-remote`, without cloning; outside dry-run the Git API must also find it.
 Secret values are never printed, only their source: `file`, `env` or `fallback`.
 
 Chart development:
@@ -709,6 +715,13 @@ helm upgrade heraion oci://ghcr.io/muskats/charts/heraion -n heraion -f my-value
   [Security defaults](#security-defaults).
 - Breaking changes are listed in the release notes of each chart version. From 2.x to 3.0.0:
   [docs/upgrading-3.md](../../docs/upgrading-3.md), one row per change with what to do.
+
+Behavior changes in 3.1.0 (no values need to change):
+
+| 3.0.1 | 3.1.0 |
+|---|---|
+| `helm test` (`heraion check --connect`) checks the MCP servers and the LLM | It also lists the refs of each repo in `repos`, and outside dry-run finds it through the Git API; an unreachable repo fails it |
+| The admission policy does not check `hostAliases` or DNS settings | Gateway Jobs may only carry the `hostAliases`, `dnsPolicy` and `dnsConfig` nameservers and searches the chart renders |
 
 Behavior changes in 3.0.1 (only the first two rows can need a values change):
 

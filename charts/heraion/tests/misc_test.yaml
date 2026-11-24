@@ -40,3 +40,18 @@ tests:
     documentSelector: { path: kind, value: CronJob }
     asserts:
       - exists: { path: "spec.jobTemplate.spec.template.metadata.annotations[\"checksum/secret\"]" }
+  - it: worker.caBundle.pem becomes a ConfigMap mounted by the worker
+    template: configmap.yaml
+    documentSelector: { path: metadata.name, value: RELEASE-NAME-heraion-ca }
+    set:
+      worker.caBundle.pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+    asserts:
+      - matchRegex: { path: "data['ca.crt']", pattern: "BEGIN CERTIFICATE" }
+  - it: the helm test pod gets the worker's proxy
+    template: test-check.yaml
+    set:
+      worker.proxy.url: http://proxy.corp:3128
+    asserts:
+      - contains:
+          path: spec.containers[0].env
+          content: { name: HTTPS_PROXY, value: "http://proxy.corp:3128" }
