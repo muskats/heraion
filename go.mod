@@ -12,7 +12,7 @@ require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/jenkins-x/go-scm v1.17.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/openai/openai-go/v3 v3.105.0
+	github.com/openai/openai-go/v3 v3.107.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/robfig/cron/v3 v3.0.1
 	k8s.io/api v0.37.2
