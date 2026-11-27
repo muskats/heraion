@@ -5,7 +5,7 @@ go 1.26.3
 toolchain go1.26.11
 
 require (
-	cel.dev/cel-go v0.32.0
+	cel.dev/cel-go v0.33.4
 	github.com/bmatcuk/doublestar/v4 v4.10.4
 	github.com/go-git/go-billy/v5 v5.9.2
 	github.com/go-git/go-git/v5 v5.19.3
